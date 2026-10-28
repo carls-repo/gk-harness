@@ -62,6 +62,9 @@ def handle(data: Any) -> None:
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
         return
+    script = tool_input.get("script")
+    if isinstance(script, str) and script:
+        return  # an inline script is never a gk call, whatever its name says
     name = gk_name(tool_input)
     if name is None:
         return

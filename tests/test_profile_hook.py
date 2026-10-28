@@ -67,7 +67,9 @@ class ProfileHookTests(unittest.TestCase):
         proc = self.run_hook(d, extra_env=extra_env)
         self.assertEqual(proc.stderr, b"")
         text = proc.stdout.decode("utf-8")
-        return json.loads(text) if text.strip() else None
+        if text == "":
+            return None
+        return json.loads(text)  # a stray newline or other text fails here
 
     def args_of(self, out):
         return out["hookSpecificOutput"]["updatedInput"]["args"]
@@ -163,6 +165,11 @@ class ProfileHookTests(unittest.TestCase):
         self.assertIsNone(self.call({"scriptPath": "/x/flows/build.js"}))
         self.assertIsNone(self.call({"name": "gk-Review"}))
         self.assertIsNone(self.call({"name": "gk-build"}, tool_name="Agent"))
+        # an inline script is never a gk call, whatever its name
+        self.assertIsNone(self.call({"name": "gk-review", "script": "export default 1",
+                                     "args": {"x": 1}}))
+        self.assertIsNone(self.call({"name": "gk-diagnose", "script": "x"},
+                                    scratchpad_dir="/s"))
 
     def test_scriptpath_gk_detected(self):
         self.seat("opus")
@@ -181,8 +188,25 @@ class ProfileHookTests(unittest.TestCase):
     def test_args_array_untouched(self):
         self.seat("opus")
         repo = self.repo('{"version": 1}')
-        for args in (["a"], 3, "not json", "[1, 2]"):
+        for args in (["a"], 3, True, "null", "not json", "[1, 2]"):
             self.assertIsNone(self.call({"name": "gk-review", "args": args}, cwd=repo))
+
+    def test_scriptpath_diagnose_gets_scratchpad(self):
+        out = self.call({"scriptPath": "/x/gk-diagnose.js", "args": {"symptom": "s"}},
+                        scratchpad_dir="/sp")
+        self.assertEqual(self.args_of(out), {"symptom": "s", "scratchpad": "/sp"})
+
+    def test_unusable_cwd_still_injects_profile(self):
+        self.seat("opus")
+        afile = self.tmp / "afile"
+        afile.write_text("x")
+        for cwd in (9, str(self.tmp / "missing"), str(afile)):
+            d = {"hook_event_name": "PreToolUse", "tool_name": "Workflow", "session_id": "s1",
+                 "cwd": cwd, "tool_input": {"name": "gk-build"}}
+            proc = self.run_hook(d)
+            self.assertEqual(proc.stderr, b"")
+            out = json.loads(proc.stdout.decode("utf-8"))
+            self.assertEqual(self.args_of(out), {"profile": "opus"}, cwd)
 
     # -- project -------------------------------------------------------------------------
 
