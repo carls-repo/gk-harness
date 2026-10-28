@@ -50,15 +50,23 @@ class EntryTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX only")
     def test_install_sh_survives_exported_cdpath(self):
+        # CDPATH only applies to relative cd targets, so run the script by a
+        # relative path whose directory name also exists as a decoy under CDPATH.
         import tempfile
+        name = os.path.basename(ROOT)
         with tempfile.TemporaryDirectory() as tmp:
-            env = dict(os.environ, PYTHON=sys.executable, CDPATH=tmp + os.pathsep + ROOT)
+            decoy = os.path.join(tmp, name)
+            os.makedirs(decoy)
+            with open(os.path.join(decoy, "install.py"), "w") as fh:
+                fh.write("import sys\nprint('decoy install.py')\n")
+            env = dict(os.environ, PYTHON=sys.executable, CDPATH=tmp)
             proc = subprocess.run(
-                ["sh", os.path.join(ROOT, "install.sh"), "status"],
-                cwd=tmp, env=env, capture_output=True, text=True,
+                ["sh", os.path.join(name, "install.sh"), "status"],
+                cwd=os.path.dirname(ROOT), env=env, capture_output=True, text=True,
             )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("status: not implemented", proc.stdout)
+        self.assertNotIn("decoy", proc.stdout)
 
     @unittest.skipUnless(os.name == "nt", "Windows only")
     def test_install_ps1_status(self):
