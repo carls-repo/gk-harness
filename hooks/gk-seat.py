@@ -8,6 +8,7 @@ from __future__ import annotations
 import calendar
 import os
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -17,49 +18,83 @@ import gk_model
 
 UPDATE_INTERVAL = 24 * 3600
 GIT_TIMEOUT = 3
+CHECK_BUDGET = 4  # seconds for the whole update check, every git call included
+DEFAULT_SSH = "ssh -o BatchMode=yes -o ConnectTimeout=3"
 _TS = "%Y-%m-%dT%H:%M:%SZ"
+_OUT_CAP = 65536
+_now = time.monotonic
 
 
 def stamp_path() -> Path:
     return gk_common.claude_dir() / "state" / "gk-harness-update.json"
 
 
-def _git(root: str, args: list[str]) -> subprocess.CompletedProcess | None:
+def _base_env() -> dict:
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="", SSH_ASKPASS="",
-               SSH_ASKPASS_REQUIRE="never", GCM_INTERACTIVE="never")
-    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=3")
+               SSH_ASKPASS_REQUIRE="never", GCM_INTERACTIVE="never", GIT_NO_LAZY_FETCH="1")
     for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
         env.pop(k, None)
+    return env
+
+
+def _run_git(root: str, args: list[str], env: dict, deadline: float) -> tuple[int, str] | None:
+    """(returncode, stdout) of one git call, or None when it failed, timed out or the
+    deadline has passed. stdout goes to a temporary file, not a pipe: on Windows a pipe held
+    open by git's grandchildren (git-remote-https, ssh) can outlast the timeout."""
+    left = deadline - _now()
+    if left <= 0:
+        return None
     extra: dict = {}
     if os.name == "nt":
         extra["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     else:
         extra["start_new_session"] = True  # no controlling tty for prompts
     try:
-        return subprocess.run(["git", "-C", root] + args, stdin=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                              encoding="utf-8", errors="replace",
-                              timeout=GIT_TIMEOUT, env=env, **extra)
+        with tempfile.TemporaryFile() as out:
+            proc = subprocess.run(["git", "-C", root] + args, stdin=subprocess.DEVNULL,
+                                  stdout=out, stderr=subprocess.DEVNULL,
+                                  timeout=min(GIT_TIMEOUT, left), env=env, **extra)
+            out.seek(0)
+            text = out.read(_OUT_CAP).decode("utf-8", "replace")
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
+    return proc.returncode, text
 
 
-def origin_is_ahead(root: str) -> bool:
-    """Whether origin's HEAD is a commit this checkout lacks or has not merged. Never fetches."""
-    r = _git(root, ["ls-remote", "origin", "HEAD"])
-    if r is None or r.returncode != 0:
+def git_env(root: str, deadline: float) -> dict:
+    """The environment for the update check's git calls. A batch-mode ssh command is added
+    only when the user has chosen no ssh of their own (GIT_SSH_COMMAND, GIT_SSH or
+    core.sshCommand), because the environment variable would outrank their choice."""
+    env = _base_env()
+    if "GIT_SSH_COMMAND" in env or "GIT_SSH" in env:
+        return env
+    r = _run_git(root, ["config", "--get", "core.sshCommand"], env, deadline)
+    if r is not None and r[1].strip():
+        return env
+    env["GIT_SSH_COMMAND"] = DEFAULT_SSH
+    return env
+
+
+def origin_is_ahead(root: str, deadline: float | None = None) -> bool:
+    """Whether origin's HEAD is a commit this checkout lacks or has not merged. Never fetches.
+    The whole check shares one deadline; running out of time counts as "no update"."""
+    if deadline is None:
+        deadline = _now() + CHECK_BUDGET
+    env = git_env(root, deadline)
+    r = _run_git(root, ["ls-remote", "origin", "HEAD"], env, deadline)
+    if r is None or r[0] != 0:
         return False
-    fields = r.stdout.split()
+    fields = r[1].split()
     head = fields[0] if fields else ""
     if not head or any(c not in "0123456789abcdefABCDEF" for c in head):
         return False
-    r = _git(root, ["cat-file", "-e", head + "^{commit}"])
+    r = _run_git(root, ["cat-file", "-e", head + "^{commit}"], env, deadline)
     if r is None:
         return False
-    if r.returncode != 0:
+    if r[0] != 0:
         return True
-    r = _git(root, ["merge-base", "--is-ancestor", head, "HEAD"])
-    return r is not None and r.returncode == 1
+    r = _run_git(root, ["merge-base", "--is-ancestor", head, "HEAD"], env, deadline)
+    return r is not None and r[0] == 1
 
 
 def update_line(root: str) -> str:
@@ -110,6 +145,11 @@ def handle(data: Any) -> None:
     if event == "PostModelSwitch":
         model = data.get("to_model")
         if gk_model.profile_for_model(model) is None:
+            model = data.get("requested_model")
+        if gk_model.profile_for_model(model) is None:
+            # The new seat is unknown: drop the old record so nothing keeps acting on it.
+            gk_common._remove_quietly(str(gk_model.seat_path(sid)))
+            _reply(event, gk_model.seat_card(None, None, None))
             return
         effort = effort or seat.get("effort")
     else:
