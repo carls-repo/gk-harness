@@ -331,7 +331,11 @@ class ClearTests(RemoteBase):
         self.assertNotIn("w.md", self.ledger_path().read_text() if self.ledger_path().exists() else "")
 
     def test_ledger_without_trailing_newline_gets_one(self):
-        self.ledger_path().write_text(HEADER + "\ndocs/superpowers/old.md\t%s\t2026-10-01" % URL1)
+        # bytes, not write_text: text mode would turn "\n" into "\r\n" on Windows and
+        # plant a CR before the hook runs, so the no-CR check below could not tell a
+        # regression from a correct hook.
+        self.ledger_path().write_bytes(
+            (HEADER + "\ndocs/superpowers/old.md\t%s\t2026-10-01" % URL1).encode("utf-8"))
         self.clear(CLI_DOCS + "batch", NEW_DOC, {"u": URL2})
         lines = self.ledger().splitlines()
         self.assertEqual(lines[1], "docs/superpowers/old.md\t%s\t2026-10-01" % URL1)
@@ -525,6 +529,7 @@ class DocsMatcherTests(RemoteBase):
         lines = self.ledger(bare).splitlines()
         self.assertEqual(lines[0], HEADER)
         self.assertTrue(lines[1].startswith("docs/reports/r.md\t%s\t20" % URL1))
+        self.assertNotIn(b"\r", self.ledger_path(bare).read_bytes())
 
 
 if __name__ == "__main__":
