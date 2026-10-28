@@ -11,11 +11,13 @@ import importlib.util
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOKS = os.path.join(ROOT, "hooks")
@@ -63,6 +65,21 @@ def git(cwd, *args):
     r = subprocess.run(["git", "-C", str(cwd)] + list(args), check=True, capture_output=True,
                        stdin=subprocess.DEVNULL, env=env, encoding="utf-8")
     return r.stdout
+
+
+def skip_cmd(sid, rel, exe=None):
+    """The skip command the hooks print, quoted exactly as gk_common.skip_command quotes it."""
+    return " ".join(shlex.quote(a) for a in (Path(exe or sys.executable).as_posix(),
+                                             Path(HOOKS, SKIP).as_posix(), sid, rel))
+
+
+def load_common():
+    sys.path.insert(0, HOOKS)
+    try:
+        import gk_common
+    finally:
+        sys.path.remove(HOOKS)
+    return gk_common
 
 
 def load_clear_module():
@@ -180,7 +197,8 @@ class PendingTests(RemoteBase):
         self.assertIn("Spec written (gk-remote): docs/superpowers/a-spec.md.", msg)
         self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
         self.assertIn("No reading copy yet.", msg)
-        self.assertIn("gk-remote-skip.py S1 docs/superpowers/a-spec.md", msg)
+        self.assertTrue(msg.endswith("if Carl says not to publish, run: "
+                                     + skip_cmd("S1", "docs/superpowers/a-spec.md")), msg)
         self.assertIn("a Claude Doc", msg)
         st = self.pend()
         self.assertEqual(len(st["pending"]), 1)
@@ -253,6 +271,15 @@ class PendingTests(RemoteBase):
         msg = self.ctx(self.edit(self.R / "docs/superpowers/sentonly.md"))
         self.assertIn("No reading copy yet.", msg)
 
+    def test_failed_state_write_prints_nothing(self):
+        # A folder where the state file belongs makes write_json fail: no state means no Stop
+        # gate, so the hook must not tell the seat that one holds the turn.
+        self.pfile().mkdir(parents=True)
+        rc, out = self.run_hook(PENDING, self.post("Edit", {"file_path": str(self.R / "docs/superpowers/a-spec.md")}))
+        self.assertEqual((rc, out), (0, ""))
+        self.assertIn("gk-remote-pending: cannot store", self.last_err)
+        self.assertTrue(self.pfile().is_dir())
+
     def test_served_session_id_ignored(self):
         self.sid = "served:abc"
         self.assertEqual(self.edit(self.R / "docs/superpowers/a-spec.md"), "")
@@ -319,7 +346,7 @@ class ClearTests(RemoteBase):
         self.assertTrue(self.ledger().splitlines()[-1].startswith("docs/superpowers/five.md\t%s\t20" % URL2))
         # no link in the response and no container id -> doc:unknown-url
         self.edit(self.R / "docs/superpowers/six.md")
-        self.clear(CLI_DOCS + "create", NEW_DOC, {"ok": True})
+        self.clear(CLI_DOCS + "create", {"object": "node", "artifact": DOC_ID, "payload": "x"}, {"ok": True})
         self.assertTrue(self.ledger().splitlines()[-1].startswith("docs/superpowers/six.md\tdoc:unknown-url\t20"))
 
     def test_worktree_ledger_in_worktree_toplevel(self):
@@ -362,11 +389,12 @@ class FixRoundTests(RemoteBase):
         life = "docs/superpowers/life.md"
         code_url = "https://claude.ai/code/artifact/" + DOC_ID
         self.edit(self.R / life)
-        self.clear(CLI_DOCS + "create", {"container": {"kind": "project", "create": {"name": "x"}}},
-                   {"u": URL1})
+        self.clear(CLI_DOCS + "create", {"object": "node", "container": {"kind": "project", "id": DOC_ID},
+                                         "payload": "x"}, {"u": URL1})
         msg = self.ctx(self.edit(self.R / life))
         self.assertIn("A reading copy already exists at %s" % URL1, msg)
-        self.clear(CLI_DOCS + "update", {"container": {"kind": "doc", "id": DOC_ID}, "payload": "x"},
+        self.clear(CLI_DOCS + "update", {"ref": {"object": "node", "id": "n1"},
+                                         "container": {"kind": "doc", "id": DOC_ID}, "payload": "x"},
                    {"ok": True})
         self.assertEqual(self.ledger_url(life), code_url)
         msg = self.ctx(self.edit(self.R / life))
@@ -402,7 +430,8 @@ class StopTests(RemoteBase):
         r = self.reason(out)
         self.assertIn("docs/superpowers/stop-spec.md", r)
         self.assertIn('docs/reports/stop.html: SendUserFile with display "render"', r)
-        self.assertIn("gk-remote-skip.py S6 docs/superpowers/stop-spec.md", r)
+        self.assertIn("- docs/superpowers/stop-spec.md: Claude Doc (Markdown). If Carl says not to publish: "
+                      + skip_cmd("S6", "docs/superpowers/stop-spec.md"), r.splitlines())
         self.assertIn("Publish now, then end the turn again. If you genuinely cannot (connector down), "
                       "end the turn once more and say so.", r)
         self.assertEqual(self.stop(True), "")
@@ -419,15 +448,22 @@ class StopTests(RemoteBase):
         self.sid = "S6"
         rel = "docs/superpowers/it's a spec.md"
         self.edit(self.R / rel)
-        cmd = "%s %s S6 %s" % (shlex.quote(Path(sys.executable).as_posix()),
-                               shlex.quote(Path(HOOKS, SKIP).as_posix()), shlex.quote(rel))
+        cmd = skip_cmd("S6", rel)
         self.assertIn("If Carl says not to publish: " + cmd, self.reason(self.stop(False)))
-        self.assertIn(cmd, self.ctx(self.edit(self.R / rel)))
+        self.assertTrue(self.ctx(self.edit(self.R / rel)).endswith("run: " + cmd))
         self.assertNotIn("~/.claude", self.reason(self.stop(False)))
+        # The printed command is for a POSIX shell: the Bash tool, which is Git Bash on Windows.
         if os.name == "nt":
-            return  # the printed command is for a POSIX shell (the Bash tool)
+            shell = shutil.which("bash")
+            if not shell:
+                self.skipTest("no bash on PATH to run the printed command with")
+            sysdir = os.path.normcase(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), ""))
+            if os.path.normcase(shell).startswith(sysdir):
+                self.skipTest("bash on PATH is the WSL launcher (%s), not Git Bash" % shell)
+        else:
+            shell = "sh"
         env = dict(os.environ, GK_CLAUDE_DIR=str(self.g))
-        p = subprocess.run(["sh", "-c", cmd], capture_output=True, env=env, cwd=str(self.R),
+        p = subprocess.run([shell, "-c", cmd], capture_output=True, env=env, cwd=str(self.R),
                            encoding="utf-8", timeout=60)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("Removed pending spec: " + rel, p.stdout)
@@ -460,6 +496,48 @@ class SkipTests(RemoteBase):
         self.assertNotIn("skip-a.md", self.stop(False))
 
 
+class SkipStateTests(RemoteBase):
+    def test_malformed_or_missing_state_says_no_pending_specs(self):
+        self.sid = "S8"
+        self.pfile().parent.mkdir(parents=True)
+        for bad in ("garbage {{", "[]", '{"session_id": "S8"}', '{"pending": 5}'):
+            with self.subTest(bad=bad):
+                self.pfile().write_text(bad, encoding="utf-8")
+                rc, out = self.skip("S8", "docs/superpowers/x.md")
+                self.assertEqual(rc, 0)
+                self.assertIn("No pending specs for session S8.", out)
+                self.assertNotIn("No pending entry matches", out)
+        self.pfile().unlink()
+        rc, out = self.skip("S8", "docs/superpowers/x.md")
+        self.assertEqual(rc, 0)
+        self.assertIn("No pending specs for session S8.", out)
+
+    def test_valid_state_without_the_entry_says_no_entry_matches(self):
+        self.sid = "S8"
+        self.edit(self.R / "docs/superpowers/kept.md")
+        rc, out = self.skip("S8", "docs/superpowers/x.md")
+        self.assertEqual(rc, 0)
+        self.assertIn("No pending entry matches docs/superpowers/x.md.", out)
+        self.assertNotIn("No pending specs", out)
+        self.assertEqual(self.paths(), ["docs/superpowers/kept.md"])
+
+
+class SkipCommandTests(unittest.TestCase):
+    def test_unknown_interpreter_falls_back_to_a_python_name(self):
+        gk_common = load_common()
+        rel = "docs/superpowers/a b.md"
+        fallback = "python" if os.name == "nt" else "python3"
+        for exe in ("", None):
+            with self.subTest(exe=exe), mock.patch.object(sys, "executable", exe):
+                cmd = gk_common.skip_command("S1", rel)
+            self.assertEqual(cmd, skip_cmd("S1", rel, exe=fallback))
+            self.assertTrue(cmd.startswith(fallback + " "), cmd)
+
+    def test_running_interpreter_used_when_known(self):
+        gk_common = load_common()
+        self.assertEqual(gk_common.skip_command("S1", "docs/plans/p.md"), skip_cmd("S1", "docs/plans/p.md"))
+
+
 class GarbageTests(RemoteBase):
     def test_garbage_stdin_exits_0_silent(self):
         self.sid = "S1"
@@ -485,8 +563,13 @@ class DocsMatcherTests(RemoteBase):
             ("mcp__claude_ai_Claude_Docs__batch", container),
             (DESK_DOCS + "batch", container),
             (DESK_DOCS + "update", ref),
-            (DESK_DOCS + "create", {"container": {"kind": "project", "create": {"name": "x"}}}),
+            (DESK_DOCS + "create", {"container": {"kind": "project", "id": DOC_ID}, "payload": "x"}),
             ("mcp__plugin_docs_Claude_Docs__update", ref),
+            # create addressing the doc by artifact instead of container
+            (DESK_DOCS + "create", {"object": "node", "artifact": URL1, "payload": "x"}),
+            (DESK_DOCS + "create", {"object": "node", "container": {"kind": "project", "id": DOC_ID},
+                                    "payload": "x"}),
+            (CLI_DOCS + "create", {"artifact": DOC_ID, "payload": {"markdown": "x"}}),
         ]
         false_cases = [
             ("mcp__supabase-dev__create_branch", container),
@@ -500,6 +583,20 @@ class DocsMatcherTests(RemoteBase):
             ("mcp__x__batch\n", container),
             ("mcp__x__batch", None),
             (None, container),
+            # create: a comment, a non-content record, or no payload / no doc named
+            (DESK_DOCS + "create", {"object": "utterance", "container": {"kind": "project", "id": DOC_ID},
+                                    "payload": "a comment"}),
+            (DESK_DOCS + "create", {"object": "blob", "container": {"kind": "project", "id": DOC_ID},
+                                    "payload": "x"}),
+            (DESK_DOCS + "create", {"object": "file", "artifact": URL1, "payload": "x"}),
+            (DESK_DOCS + "create", {"object": "enum", "artifact": URL1, "payload": "x"}),
+            (DESK_DOCS + "create", {"object": "node", "container": {"kind": "project", "id": DOC_ID}}),
+            (DESK_DOCS + "create", {"object": "node", "payload": "x"}),
+            (DESK_DOCS + "create", {"object": "node", "artifact": "", "payload": "x"}),
+            (DESK_DOCS + "create", {"object": "node", "artifact": 5, "payload": "x"}),
+            # each verb keeps its own shape
+            (DESK_DOCS + "update", {"container": {"kind": "doc", "id": DOC_ID}, "payload": "x"}),
+            (DESK_DOCS + "batch", ref),
         ]
         for name, ti in true_cases:
             with self.subTest(name=name):

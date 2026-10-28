@@ -16,7 +16,6 @@ from typing import Any
 import gk_common
 
 SPEC_RE = re.compile(r"docs/(superpowers|reports|plans)/.*\.(md|html)")
-LEDGER = ("docs", "superpowers", "REMOTE-LINKS.tsv")
 
 
 def toplevel(file_abs: str) -> str | None:
@@ -40,7 +39,7 @@ def ledger_last(root: str, rel: str) -> tuple[str, str, str] | None:
     earlier link: an update revises the same doc.
     """
     try:
-        with open(os.path.join(root, *LEDGER), encoding="utf-8") as f:
+        with open(os.path.join(root, *gk_common.REMOTE_LEDGER), encoding="utf-8") as f:
             lines = f.read().splitlines()
     except Exception:
         return None
@@ -93,7 +92,9 @@ def handle(data: Any) -> None:
             st["pending"].append({"path": rel, "root": root, "kind": kind,
                                   "first_at": ts, "last_at": ts, "yielded": False})
         if not gk_common.write_json(pfile, st):
+            # No state, no Stop gate: say nothing rather than promise a gate that won't fire.
             sys.stderr.write("gk-remote-pending: cannot store %s\n" % pfile)
+            return
         n_pending = len(st["pending"])
 
     channel = "a Claude Doc" if kind == "md" else 'SendUserFile with display "render"'

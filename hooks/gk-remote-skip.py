@@ -11,11 +11,6 @@ import sys
 import gk_common
 
 
-def norm(p: str) -> str:
-    p = os.path.normpath(os.path.abspath(p))
-    return os.path.normcase(os.path.join(os.path.realpath(os.path.dirname(p)), os.path.basename(p)))
-
-
 def main(argv: list[str]) -> None:
     if len(argv) < 2:
         print("usage: gk-remote-skip.py <session_id> <path>")
@@ -28,13 +23,18 @@ def main(argv: list[str]) -> None:
     if not pfile.exists():
         print("No pending specs for session %s." % sid)
         return
-    t_abs = norm(target)
+    t_abs = gk_common.canon_path(target, os.getcwd())
     with gk_common.locked(pfile.parent):
+        raw = gk_common.read_json(pfile)
+        if not (isinstance(raw, dict) and isinstance(raw.get("pending"), list)):
+            # missing (removed since the check above) or malformed: today's wording
+            print("No pending specs for session %s." % sid)
+            return
         st = gk_common.load_pending(pfile, sid)
         keep, removed = [], []
         for e in st["pending"]:
             root = e.get("root") if isinstance(e.get("root"), str) else None
-            if e["path"] == target or (root and norm(os.path.join(root, e["path"])) == t_abs):
+            if e["path"] == target or (root and gk_common.canon_path(e["path"], root) == t_abs):
                 removed.append(e)
             else:
                 keep.append(e)

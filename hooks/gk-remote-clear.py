@@ -19,29 +19,38 @@ LINK_RE = re.compile(r"https://claude\.ai/(code/)?artifact/[0-9A-Za-z-]{20,}")
 DOC_ID_RE = re.compile(r"[0-9A-Za-z-]{20,}")
 DOCS_TOOL_RE = re.compile(r"mcp__.+__(batch|update|create)")
 HEADER = "path\turl\tpublished\n"
-LEDGER = ("docs", "superpowers", "REMOTE-LINKS.tsv")
+# Claude Docs create records whose object is one of these (or absent) write doc content;
+# utterances are comments, and blob/file/enum records are not a reading copy.
+DOCS_CREATE_OBJECTS = (None, "node")
 
 
 def is_docs_publish(tool_name: str, tool_input: dict) -> bool:
     """Whether a tool call writes a Claude Doc, under whatever server name the surface uses.
 
-    The name must end in __batch, __update or __create, and the input must have the docs
-    shape: a `container` object, or a `ref` object together with a `payload`. That keeps
-    other servers' tools (create_branch, create_draft, ...) out.
+    The name must end in __batch, __update or __create, and the input must have that
+    tool's docs shape:
+    - batch: a `container` object;
+    - update: a `ref` object and a `payload`;
+    - create: a `payload`, an `object` of "node" or none (not a comment utterance or a
+      blob/file/enum record), and the doc named by a `container` object or a non-empty
+      `artifact` string.
+    That keeps other servers' tools (create_branch, create_draft, ...) out.
     """
-    if not isinstance(tool_name, str) or not DOCS_TOOL_RE.fullmatch(tool_name):
+    if not isinstance(tool_name, str) or not isinstance(tool_input, dict):
         return False
-    if not isinstance(tool_input, dict):
+    m = DOCS_TOOL_RE.fullmatch(tool_name)
+    if not m:
         return False
-    if isinstance(tool_input.get("container"), dict):
-        return True
-    return isinstance(tool_input.get("ref"), dict) and "payload" in tool_input
-
-
-def norm(p: str, base: str) -> str:
-    """p made absolute against base, its folder resolved, case-folded where the OS ignores case."""
-    p = os.path.normpath(os.path.join(base, p))
-    return os.path.normcase(os.path.join(os.path.realpath(os.path.dirname(p)), os.path.basename(p)))
+    verb = m.group(1)
+    if verb == "batch":
+        return isinstance(tool_input.get("container"), dict)
+    if verb == "update":
+        return isinstance(tool_input.get("ref"), dict) and "payload" in tool_input
+    artifact = tool_input.get("artifact")
+    return ("payload" in tool_input
+            and tool_input.get("object") in DOCS_CREATE_OBJECTS
+            and (isinstance(tool_input.get("container"), dict)
+                 or (isinstance(artifact, str) and artifact != "")))
 
 
 def clean(s: Any) -> str:
@@ -54,7 +63,7 @@ def append_ledger(root: str, rows: list[tuple[str, str, str]]) -> None:
     Callers hold the gk-remote-pending folder lock, which every gate hook (old and new)
     takes before touching a ledger, so appends never interleave.
     """
-    tsv = os.path.join(root, *LEDGER)
+    tsv = os.path.join(root, *gk_common.REMOTE_LEDGER)
     os.makedirs(os.path.dirname(tsv), exist_ok=True)
     need_header = (not os.path.exists(tsv)) or os.path.getsize(tsv) == 0
     need_nl = False
@@ -107,14 +116,14 @@ def clear_sent(pfile: Any, sid: str, ti: dict, cwd: str, date: str) -> None:
     sent = sent_paths(ti)
     if not sent:
         return
-    sent_abs = set(norm(s, cwd) for s in sent)
+    sent_abs = set(gk_common.canon_path(s, cwd) for s in sent)
     sent_raw = set(sent)
     with gk_common.locked(pfile.parent):
         st = gk_common.load_pending(pfile, sid)
         keep, rows = [], {}
         for e in st["pending"]:
             root = e.get("root") if isinstance(e.get("root"), str) else None
-            eabs = norm(e["path"], root) if root else None
+            eabs = gk_common.canon_path(e["path"], root) if root else None
             if (eabs and eabs in sent_abs) or e["path"] in sent_raw:
                 if root:
                     rows.setdefault(root, []).append((e["path"], "sent:SendUserFile", date))

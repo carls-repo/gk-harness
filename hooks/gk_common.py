@@ -351,6 +351,19 @@ def shared_branch_phrase(toplevel: str | os.PathLike | None) -> str:
     return "the shared branch (%s)" % branch if branch else "the shared branch"
 
 
+REMOTE_LEDGER = ("docs", "superpowers", "REMOTE-LINKS.tsv")
+"""The publish gate's ledger, relative to a repo's top level, as path parts."""
+
+
+def canon_path(p: str, base: str) -> str:
+    """p made absolute against base, its folder resolved, case-folded where the OS ignores case.
+
+    The publish gate compares paths this way (sent files, skip targets, pending entries).
+    """
+    p = os.path.normpath(os.path.join(base, p))
+    return os.path.normcase(os.path.join(os.path.realpath(os.path.dirname(p)), os.path.basename(p)))
+
+
 def pending_file(sid: str) -> Path:
     """The publish gate's state file for a session: state/gk-remote-pending/<sid>.json."""
     return claude_dir() / "state" / "gk-remote-pending" / (sid + ".json")
@@ -371,9 +384,13 @@ def load_pending(path: str | os.PathLike, sid: str) -> dict:
 
 def skip_command(sid: str, rel: str) -> str:
     """The shell command that drops one pending spec: this interpreter, the sibling
-    gk-remote-skip.py, the session id and the repo-relative path, quoted for a POSIX shell."""
+    gk-remote-skip.py, the session id and the repo-relative path, quoted for a POSIX shell.
+
+    When the interpreter's path is unknown (sys.executable empty or None) the command names
+    python3 (python on Windows), so it never starts with "." and sources the script."""
     skip = Path(os.path.abspath(__file__)).with_name("gk-remote-skip.py")
-    return " ".join(shlex.quote(a) for a in (Path(sys.executable).as_posix(), skip.as_posix(), sid, rel))
+    exe = sys.executable or ("python" if os.name == "nt" else "python3")
+    return " ".join(shlex.quote(a) for a in (Path(exe).as_posix(), skip.as_posix(), sid, rel))
 
 
 def read_input() -> dict | None:
