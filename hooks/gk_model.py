@@ -39,6 +39,8 @@ def in_lineup(model: Any) -> bool:
 
 def model_from_transcript(path: Any, max_bytes: int = TAIL_BYTES) -> str | None:
     """The model of the last main-thread assistant entry in the transcript's tail."""
+    if not isinstance(path, (str, bytes, os.PathLike)):
+        return None  # an int (or bool) would be taken as a file descriptor and closed
     try:
         with open(path, "rb") as f:
             size = f.seek(0, os.SEEK_END)

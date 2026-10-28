@@ -78,6 +78,13 @@ class ModelTest(unittest.TestCase):
         g.write_bytes(b"\xff\xfe not json\n{broken\n[1,2]\n")
         self.assertIsNone(gk_model.model_from_transcript(g))
 
+    def test_non_path_transcript_never_touches_fds(self):
+        for bad in (1, 2, True, 0, 3.5, [], {}):
+            self.assertIsNone(gk_model.model_from_transcript(bad))
+            self.assertIsNone(gk_model.resolve_profile({"session_id": "x1", "transcript_path": bad}))
+        for fd in (0, 1, 2):
+            os.fstat(fd)
+
     def test_seat_roundtrip(self):
         self.assertTrue(gk_model.save_seat("s1", "claude-opus-5-5", "opus", "high", "SessionStart"))
         rec = gk_model.load_seat("s1")
