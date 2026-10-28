@@ -24,6 +24,11 @@ def _inside(path: str, root: str) -> bool:
             or gk_common.rel_posix(path, root) is not None)
 
 
+def _same_common(stored: Any, common: str) -> bool:
+    """Same git common dir, compared case-insensitively where the filesystem is (Windows)."""
+    return isinstance(stored, str) and os.path.normcase(stored) == os.path.normcase(common)
+
+
 def handle(data: Any) -> None:
     if not isinstance(data, dict):
         return
@@ -58,7 +63,7 @@ def handle(data: Any) -> None:
     claims = doc.get("claims") if isinstance(doc, dict) and isinstance(doc.get("claims"), list) else []
     claims = [c for c in claims if isinstance(c, dict)]
     for c in claims:
-        if c.get("common") == common and c.get("path") == rel:
+        if _same_common(c.get("common"), common) and c.get("path") == rel:
             c.update({"branch": branch, "root": top, "at": now})
             break
     else:
@@ -79,7 +84,7 @@ def handle(data: Any) -> None:
         pd = gk_common.read_json(base / "state" / "gk-claims" / (peer + ".json"))
         peer_claims = pd.get("claims") if isinstance(pd, dict) else None
         for c in peer_claims if isinstance(peer_claims, list) else []:
-            if isinstance(c, dict) and c.get("common") == common and c.get("path") == rel:
+            if isinstance(c, dict) and _same_common(c.get("common"), common) and c.get("path") == rel:
                 hits.append((name, c.get("branch", "?"), c.get("at", "?")))
                 break
     if hits:

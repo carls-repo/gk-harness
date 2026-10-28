@@ -79,7 +79,9 @@ def make_repo(path):
 
 
 def common_dir(repo):
-    return real(os.path.join(str(repo), git(repo, "rev-parse", "--git-common-dir").strip()))
+    # Built exactly as gk_common.git_identity builds it (realpath, no normcase), so peer
+    # claims written by the fixture carry the same spelling the hook stores on every OS.
+    return os.path.realpath(os.path.join(str(repo), git(repo, "rev-parse", "--git-common-dir").strip()))
 
 
 def write_project(repo, obj):
@@ -353,7 +355,7 @@ class ClaimTests(CoordBase):
         c = d["claims"][0]
         self.assertEqual(c["path"], "b.txt")
         self.assertEqual(c["branch"], "main")
-        self.assertEqual(real(c["common"]), self.COMMON)
+        self.assertEqual(real(c["common"]), real(self.COMMON))
         self.assertEqual(real(c["root"]), real(self.R))
         self.assertEqual(d["session_id"], "own-2")
 
@@ -393,7 +395,7 @@ class ClaimTests(CoordBase):
         self.assertEqual(self.claim(self.R2, self.R2 / "a.txt"), "")
         d = self.doc()
         self.assertEqual(len(d["claims"]), 2)
-        self.assertEqual(real(d["claims"][1]["common"]), self.COMMON2)
+        self.assertEqual(real(d["claims"][1]["common"]), real(self.COMMON2))
 
     def test_non_git_paths_silent_and_unclaimed(self):
         self.assertEqual(self.claim(self.PLAIN, self.PLAIN / "x.txt"), "")
