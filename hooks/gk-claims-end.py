@@ -11,8 +11,6 @@ from typing import Any
 
 import gk_common
 
-STATE = ("gk-claims", "gk-peers", "gk-remote-pending", "gk-seat")
-
 
 def handle(data: Any) -> None:
     if not isinstance(data, dict):
@@ -21,7 +19,7 @@ def handle(data: Any) -> None:
     if not sid:
         return
     base = gk_common.claude_dir()
-    for sub in STATE:
+    for sub in gk_common.SESSION_STATE_DIRS:
         try:
             os.unlink(base / "state" / sub / (sid + ".json"))
         except FileNotFoundError:

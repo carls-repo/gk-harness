@@ -18,8 +18,9 @@ import gk_common
 POLICY = ("Policy: message a peer (SendMessage) before editing a file it has claimed, when a hook "
           "warns of an overlap, and before merging to %s.")
 MAX_FILES = 15
-# Per-session state a dead session leaves behind.
-PRUNE = ("gk-claims", "gk-peers", "gk-remote-pending", "gk-seat")
+# The SessionStart briefing's size limit: it shares the 10,000-character SessionStart budget
+# with the seat card, so peers past this are summarised in one line.
+BRIEFING_MAX = 8000
 
 
 def load_registry(base: Path) -> list[dict]:
@@ -94,14 +95,36 @@ def policy_line(cwd: Any) -> str:
     return POLICY % gk_common.shared_branch_phrase(top)
 
 
+def _more(n: int) -> str:
+    return "+%s not listed." % plural(n, "more session")
+
+
 def briefing(peers: dict, cwd: Any) -> str:
+    """The SessionStart briefing, at most BRIEFING_MAX characters, the policy line always last.
+
+    Peers are listed in order while the text (with the "+N more" line it would need and the
+    policy line) stays within the limit; the rest are counted in one "+N more" line.
+    """
     if not peers:
         return "Live peer sessions (gk-peers): none."
     stamp = time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime())
     lines = ["Live peer sessions (gk-peers, %s): %s on this machine."
              % (stamp, plural(len(peers), "other session"))]
-    lines += ["- " + describe(p, True) for p in peers.values()]
-    lines.append(policy_line(cwd))
+    policy = policy_line(cwd)
+    body = ["- " + describe(p, True) for p in peers.values()]
+    size = len(lines[0])
+    shown = 0
+    for line in body:
+        left = len(body) - shown - 1
+        tail = len(policy) + 1 + (len(_more(left)) + 1 if left else 0)
+        if size + 1 + len(line) + tail > BRIEFING_MAX:
+            break
+        lines.append(line)
+        size += 1 + len(line)
+        shown += 1
+    if shown < len(body):
+        lines.append(_more(len(body) - shown))
+    lines.append(policy)
     return "\n".join(lines)
 
 
@@ -140,7 +163,7 @@ def handle(data: Any) -> None:
         sid = d["sessionId"]
         if sid == own or sid in live_ids:
             continue
-        for sub in PRUNE:
+        for sub in gk_common.SESSION_STATE_DIRS:
             rm(base / "state" / sub / (sid + ".json"))
 
     peers = {}

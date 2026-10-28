@@ -29,6 +29,9 @@ LOCK_POLL = 0.025
 GIT_TIMEOUT = 5
 PROJECT_FILE = (".claude", "gk-project.json")
 SHARED_BRANCH_MAX = 200
+# The folders under <claude_dir>/state that hold one <session_id>.json per session. A session's
+# file in each is removed when it ends (gk-claims-end) or is found dead (gk-peers).
+SESSION_STATE_DIRS = ("gk-claims", "gk-peers", "gk-remote-pending", "gk-seat")
 
 _ERROR_ACCESS_DENIED = 5
 _DWORD_MAX = 0xFFFFFFFF

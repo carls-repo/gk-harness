@@ -32,6 +32,9 @@ _GLOBAL_DIR = None
 
 LIVE = os.getpid()
 DEAD = None  # a finished child's pid, set by setUpModule
+# The finished child's Popen, kept until tearDownModule: on Windows its open process handle
+# stops the pid from being handed to a later process (which would make DEAD read as alive).
+_DEAD_CHILD = None
 
 POLICY = ("Policy: message a peer (SendMessage) before editing a file it has claimed, when a "
           "hook warns of an overlap, and before merging to the shared branch.")
@@ -42,19 +45,22 @@ PROJECT = {"version": 1, "sharedBranch": "develop"}
 
 
 def setUpModule():
-    global _GLOBAL_DIR, DEAD
+    global _GLOBAL_DIR, DEAD, _DEAD_CHILD
     _GLOBAL_DIR = tempfile.TemporaryDirectory()
     empty = os.path.join(_GLOBAL_DIR.name, "gitconfig")
     open(empty, "w").close()
     GIT_ENV["GIT_CONFIG_GLOBAL"] = empty
     child = subprocess.Popen([sys.executable, "-c", "pass"])
     child.wait()
+    _DEAD_CHILD = child
     DEAD = child.pid
     if gk_common.pid_alive(DEAD):
         raise unittest.SkipTest("the finished child's pid %d was reused" % DEAD)
 
 
 def tearDownModule():
+    global _DEAD_CHILD
+    _DEAD_CHILD = None
     GIT_ENV.pop("GIT_CONFIG_GLOBAL", None)
     if _GLOBAL_DIR is not None:
         _GLOBAL_DIR.cleanup()
@@ -65,10 +71,6 @@ def git(cwd, *args):
     r = subprocess.run(["git", "-C", str(cwd)] + list(args), check=True, capture_output=True,
                        stdin=subprocess.DEVNULL, env=env, encoding="utf-8")
     return r.stdout
-
-
-def real(p):
-    return os.path.normcase(os.path.realpath(str(p)))
 
 
 def make_repo(path):
@@ -106,6 +108,7 @@ class CoordBase(unittest.TestCase):
         data = raw.encode("utf-8") if isinstance(raw, str) else raw
         p = subprocess.run([sys.executable, os.path.join(HOOKS, hook)], input=data,
                            capture_output=True, env=env, timeout=60)
+        self.last_err = p.stderr.decode("utf-8", "replace")
         return p.returncode, p.stdout.decode("utf-8")
 
     def ok(self, hook, payload=None, raw=None):
@@ -187,6 +190,7 @@ class PeersTests(CoordBase):
         self.assertNotIn("OWN SEAT", c)
         self.assertNotIn("ownfile.txt", c)
         self.assertNotIn("GHOST", c)
+        self.assertNotIn("not listed", c)
 
     def test_start_prunes_dead_state_only(self):
         self.ok(PEERS, self.start("own-1"))
@@ -276,6 +280,40 @@ class PeersNoPeerTests(CoordBase):
         self.assertFalse((self.g / "state" / "gk-peers").exists())
 
 
+class PeersCapTests(CoordBase):
+    def setUp(self):
+        super().setUp()
+        self.reg("own-1", "OWN SEAT", "busy", LIVE)
+
+    def test_briefing_capped_with_policy_last(self):
+        deep = "deeply/nested/folder/" * 5
+        for i in range(40):
+            sid = "peer-%02d" % i
+            self.reg(sid, "PEER %02d" % i, "busy", LIVE, 2000 + i)
+            self.claims(sid, "/c", "feat/branch-%02d" % i, "2026-10-14T07:00:00Z",
+                        *["%sfile-%02d-%02d.txt" % (deep, i, j) for j in range(20)])
+        c = self.ctx(self.ok(PEERS, self.start("own-1")))
+        self.assertLessEqual(len(c), 8000)
+        lines = c.splitlines()
+        self.assertIn("40 other sessions on this machine.", lines[0])
+        self.assertEqual(lines[-1], POLICY)
+        shown = [ln for ln in lines if ln.startswith("- ")]
+        self.assertTrue(0 < len(shown) < 40, len(shown))
+        self.assertEqual(lines[-2], "+%d more sessions not listed." % (40 - len(shown)))
+        self.assertEqual(len(lines), len(shown) + 3)
+        for k, ln in enumerate(shown):
+            self.assertTrue(ln.startswith("- PEER %02d — busy — branch feat/branch-%02d — 20 files: "
+                                          % (k, k)), ln[:80])
+        # every peer line has the same length, so the next one would have gone over
+        self.assertGreater(len(c) + 1 + len(shown[0]), 8000)
+
+    def test_one_oversized_peer_is_counted_not_listed(self):
+        self.reg("peer-big", "B" * 9000, "idle", LIVE, 2000)
+        c = self.ctx(self.ok(PEERS, self.start("own-1")))
+        self.assertLessEqual(len(c), 8000)
+        self.assertEqual(c.splitlines()[1:], ["+1 more session not listed.", POLICY])
+
+
 class PeersPolicyTests(CoordBase):
     def setUp(self):
         super().setUp()
@@ -355,8 +393,10 @@ class ClaimTests(CoordBase):
         c = d["claims"][0]
         self.assertEqual(c["path"], "b.txt")
         self.assertEqual(c["branch"], "main")
-        self.assertEqual(real(c["common"]), real(self.COMMON))
-        self.assertEqual(real(c["root"]), real(self.R))
+        # Exactly the strings git_identity gives (old hooks compare them as plain strings).
+        common, top, _ = gk_common.git_identity(str(self.R))
+        self.assertEqual(c["common"], common)
+        self.assertEqual(c["root"], top)
         self.assertEqual(d["session_id"], "own-2")
 
     def test_claim_dedup_same_file_and_across_worktrees(self):
@@ -367,7 +407,8 @@ class ClaimTests(CoordBase):
         d = self.doc()
         self.assertEqual(len(d["claims"]), 1)
         self.assertEqual(d["claims"][0]["branch"], "feat/x")
-        self.assertEqual(real(d["claims"][0]["root"]), real(self.W))
+        self.assertEqual(d["claims"][0]["root"], gk_common.git_identity(str(self.W))[1])
+        self.assertEqual(d["claims"][0]["common"], gk_common.git_identity(str(self.R))[0])
 
     def test_overlap_across_worktrees_warns(self):
         self.claim(self.R, self.R / "b.txt")
@@ -390,12 +431,23 @@ class ClaimTests(CoordBase):
             (self.R / ".claude" / "gk-project.json").unlink()
         self.assertTrue(c.endswith("agree who merges to the shared branch (develop) first."), c)
 
+    def test_write_failure_reported_and_overlap_still_warned(self):
+        # The own claims file's path is a folder, so storing the claim fails, while the
+        # live peer's claims beside it stay readable.
+        self.cf.mkdir(parents=True)
+        out = self.claim(self.R, self.R / "a.txt", tool="Edit")
+        self.assertIn("gk-claim: cannot store claims", self.last_err)
+        self.assertIn('Overlap (gk-claim): a.txt was edited by session "PEER ONE" on branch '
+                      'feat/peer at 2026-10-14T07:00:00Z.', self.ctx(out))
+        self.assertTrue(self.cf.is_dir())
+        self.assertEqual(list(self.cf.parent.glob("*.tmp")), [], "no temp file left behind")
+
     def test_same_relpath_in_different_repo_does_not_warn(self):
         self.claim(self.R, self.R / "b.txt")
         self.assertEqual(self.claim(self.R2, self.R2 / "a.txt"), "")
         d = self.doc()
         self.assertEqual(len(d["claims"]), 2)
-        self.assertEqual(real(d["claims"][1]["common"]), real(self.COMMON2))
+        self.assertEqual(d["claims"][1]["common"], gk_common.git_identity(str(self.R2))[0])
 
     def test_non_git_paths_silent_and_unclaimed(self):
         self.assertEqual(self.claim(self.PLAIN, self.PLAIN / "x.txt"), "")
