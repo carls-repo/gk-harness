@@ -107,6 +107,45 @@ def copy_checkout(dst: Path) -> Path:
     return dst
 
 
+class Killed(BaseException):
+    """Stands in for a kill (SIGKILL, a closed terminal, power loss). No except clause of the
+    installer catches it, and once it is raised every later write raises it too, so not even a
+    finally clause can save anything after it: what is on disk is what a kill would leave."""
+
+
+@contextlib.contextmanager
+def watch_writes(fail_at: int = 0, error: BaseException | None = None, after: bool = False,
+                 only: Path | None = None):
+    """Watch manifest.write_bytes_atomic, through which every installer write goes (copies, the
+    journal and the targets). With fail_at, its fail_at-th call (counting only the writes to
+    only, when given) raises error: before it writes, or with after once it has written. After
+    a Killed, every later call raises Killed too. Yields {"calls": [posix path of each call],
+    "written": [posix path of each call that completed]}."""
+    real = manifest.write_bytes_atomic
+    log: dict = {"calls": [], "written": [], "dead": False}
+    watched = None if only is None else paths.posix(only)
+
+    def fake(path, data, created=None, private=False):
+        if log["dead"]:
+            raise Killed()
+        p = paths.posix(path)
+        log["calls"].append(p)
+        n = len(log["calls"]) if watched is None else log["calls"].count(watched)
+        hit = bool(fail_at) and n == fail_at and watched in (None, p)
+        if hit and not after:
+            log["dead"] = isinstance(error, Killed)
+            raise error
+        sha = real(path, data, created, private)
+        log["written"].append(p)
+        if hit:
+            log["dead"] = isinstance(error, Killed)
+            raise error
+        return sha
+
+    with mock.patch.object(manifest, "write_bytes_atomic", fake):
+        yield log
+
+
 class InstallBase(unittest.TestCase):
     """A temporary home with an empty .claude in it. The shell startup file is <home>/.bashrc
     unless patch_rc is false."""
@@ -147,7 +186,35 @@ class InstallBase(unittest.TestCase):
         return json.loads((self.cdir / "settings.json").read_text(encoding="utf-8"))
 
     def journal(self) -> dict:
-        return manifest.load(self.cdir / "backups" / "gk-harness" / "manifest.json")
+        return manifest.load(self.journal_path())
+
+    def journal_path(self) -> Path:
+        return self.cdir / "backups" / "gk-harness" / "manifest.json"
+
+    def fresh_home(self) -> None:
+        shutil.rmtree(str(self.home))
+        self.cdir.mkdir(parents=True)
+
+    def make_box(self) -> dict:
+        """A home shaped like today's box: the old policy as CLAUDE.md, settings.json with
+        today's hooks section verbatim, the old hook files, profiles/, two existing workers and
+        a .bashrc with the three old aliases. Returns the settings it wrote."""
+        c = self.cdir
+        write(c / "CLAUDE.md", OLD_POLICY)
+        before = box_settings()
+        write(c / "settings.json", sm.dumps(before), 0o600)
+        for rel in legacy.RETIRE_PATHS[:-1]:
+            write(c / rel, "#!/bin/sh\n# old %s\n" % rel, 0o755)
+        write(c / "profiles" / "CLAUDE.md.next", OLD_POLICY)
+        write(c / "profiles" / "apply-three-seat-policy.sh", "#!/bin/sh\necho apply\n", 0o755)
+        write(c / "profiles" / "opus-seat.json", '{"model": "opus"}\n')
+        write(c / "hooks" / "supabase-row-cap.sh", "#!/bin/sh\nexit 0\n", 0o755)
+        write(c / "hooks" / "pii-in-logs.sh", "#!/bin/sh\nexit 0\n", 0o755)
+        write(c / "agents" / "worker-opus.md", "---\nname: worker-opus\n---\nold opus worker\n")
+        write(c / "agents" / "worker-haiku.md", "---\nname: worker-haiku\n---\nold haiku\n")
+        write(c / "agents" / "my-helper.md", "---\nname: my-helper\n---\nmine\n")
+        write(self.rc, BASHRC)
+        return before
 
     def assertTreeEqual(self, start: dict, now: dict) -> None:
         """now equals start, apart from the backups folder that holds backups/gk-harness."""
@@ -197,20 +264,7 @@ class RoundTripTests(InstallBase):
 
     def test_round_trip_legacy_box(self):
         c = self.cdir
-        write(c / "CLAUDE.md", OLD_POLICY)
-        before = box_settings()
-        write(c / "settings.json", sm.dumps(before), 0o600)
-        for rel in legacy.RETIRE_PATHS[:-1]:
-            write(c / rel, "#!/bin/sh\n# old %s\n" % rel, 0o755)
-        write(c / "profiles" / "CLAUDE.md.next", OLD_POLICY)
-        write(c / "profiles" / "apply-three-seat-policy.sh", "#!/bin/sh\necho apply\n", 0o755)
-        write(c / "profiles" / "opus-seat.json", '{"model": "opus"}\n')
-        write(c / "hooks" / "supabase-row-cap.sh", "#!/bin/sh\nexit 0\n", 0o755)
-        write(c / "hooks" / "pii-in-logs.sh", "#!/bin/sh\nexit 0\n", 0o755)
-        write(c / "agents" / "worker-opus.md", "---\nname: worker-opus\n---\nold opus worker\n")
-        write(c / "agents" / "worker-haiku.md", "---\nname: worker-haiku\n---\nold haiku\n")
-        write(c / "agents" / "my-helper.md", "---\nname: my-helper\n---\nmine\n")
-        write(self.rc, BASHRC)
+        before = self.make_box()
         start = snapshot(self.home)
 
         self.ok("install")
@@ -389,6 +443,24 @@ class UninstallTests(InstallBase):
         self.assertIn("nothing to uninstall", out)
         self.assertEqual(os.listdir(str(self.cdir)), [])
 
+    def test_files_put_back_by_hand_before_uninstall(self):
+        # A file that already equals its backup is as it was before the install: uninstall leaves
+        # it, adding no legacy entry twice and printing no changed-since notice.
+        before = self.make_box()
+        start = snapshot(self.home)
+        self.ok("install")
+        backup = Path(self.journal()["installs"][-1]["backup"])
+        for rel in ("settings.json", "CLAUDE.md", "agents/worker-opus.md"):
+            shutil.copyfile(str(backup / rel), str(self.cdir / rel))
+        shutil.copyfile(str(backup / "rc" / self.rc.name), str(self.rc))
+        out, err = self.ok("uninstall")
+        self.assertEqual(err, "")
+        self.assertNotIn("not put back", out)
+        self.assertNotIn("old policy it replaced", out)
+        self.assertEqual([x for x in commands_of(self.settings()) if legacy.is_legacy_command(x)],
+                         [x for x in commands_of(before) if legacy.is_legacy_command(x)])
+        self.assertTreeEqual(start, snapshot(self.home))
+
     def test_changed_copied_file_is_left_with_a_warning(self):
         start = snapshot(self.home)
         self.ok("install")
@@ -424,22 +496,29 @@ class UninstallTests(InstallBase):
         self.assertEqual(self.journal()["installs"], [])
 
     def test_created_files_edited_since(self):
+        # Notes go in after any byte-order mark, as an editor writes them: the PowerShell profile
+        # install creates on Windows starts with one.
         start = snapshot(self.home)
         md = self.cdir / "CLAUDE.md"
         for name, edit, expected in (
                 ("edited inside the block", lambda t: t.replace(">>>\n", ">>>\n# mine\n").replace(
                     "(read first)", "(read me)"), None),
-                ("notes added", lambda t: "# notes\n\n" + t, "# notes\n")):
+                ("notes added", lambda t: claude_md.bom_of(t) + "# notes\n\n"
+                 + t[len(claude_md.bom_of(t)):], "# notes\n")):
             with self.subTest(name):
                 self.ok("install")
+                marks = {}
                 for path in (md, self.rc):
-                    write(path, edit(path.read_text(encoding="utf-8")))
+                    text = path.read_text(encoding="utf-8")
+                    marks[path] = claude_md.bom_of(text)
+                    write(path, edit(text))
                 self.ok("uninstall")
                 for path in (md, self.rc):
                     if expected is None:
                         self.assertFalse(path.exists(), path)
                     else:
-                        self.assertEqual(path.read_text(encoding="utf-8"), expected)
+                        self.assertEqual(path.read_text(encoding="utf-8"),
+                                         marks[path] + expected)
                         path.unlink()
                 self.assertTreeEqual(start, snapshot(self.home))
 
@@ -516,6 +595,123 @@ class UninstallTests(InstallBase):
             self.assertEqual((backup / "workflows" / "gk-review.js").read_text(encoding="utf-8"),
                              "// my own review\n")
             self.ok("uninstall")
+        self.assertTreeEqual(start, snapshot(self.home))
+
+
+class InterruptionTests(InstallBase):
+    """An install or uninstall stopped at any point (a failed write, or a kill that runs no
+    cleanup) leaves a journal from which uninstall returns the home to where it started, and
+    from which install finishes the job."""
+
+    def installed_tree(self) -> dict:
+        """The home as a snapshot, without gk-harness.json (it holds the install's time)."""
+        tree = snapshot(self.home)
+        tree.pop(".claude/gk-harness.json", None)
+        return tree
+
+    def test_install_write_fails_part_way(self):
+        # Every write (a backup, the journal, a target) failing in turn. A failure, or a kill,
+        # just before the journal is saved for a step leaves the same state, so this also
+        # stands for a kill at that point.
+        self.make_box()
+        start = snapshot(self.home)
+        with watch_writes() as log:
+            self.ok("install", cli.RETIRE)
+        backups = paths.posix(self.cdir / "backups") + "/"
+        for k in range(1, len(log["calls"]) + 1):
+            with self.subTest(failing_write=k, path=log["calls"][k - 1]):
+                self.fresh_home()
+                self.make_box()
+                with watch_writes(k, OSError(5, "simulated write failure")) as failed:
+                    code, out, err = self.gk("install", cli.RETIRE)
+                self.assertEqual(code, 1, out + err)
+                self.assertIn("simulated write failure; install stopped part-way", err)
+                # The journal holds exactly the writes and moves made before the failure.
+                made = [p for p in failed["written"] if not p.startswith(backups)]
+                journalled = [a for inst in self.journal()["installs"] for a in inst["actions"]
+                              if a["type"] != "folder"]
+                self.assertEqual([a["path"] for a in journalled if "path" in a], made)
+                moved = {a["src"] for a in journalled if a["type"] == "legacy_move"}
+                for rel in legacy.RETIRE_PATHS:
+                    self.assertEqual(paths.posix(self.cdir / rel) in moved,
+                                     not (self.cdir / rel).exists(), rel)
+                self.ok("uninstall")
+                self.assertTreeEqual(start, snapshot(self.home))
+
+    def test_install_killed_then_undone_or_finished(self):
+        # Killed once the journal names a write (or a move) not yet made: uninstall passes over
+        # that action, and install run again finishes the job.
+        self.make_box()
+        start = snapshot(self.home)
+        with watch_writes() as log:
+            self.ok("install", cli.RETIRE)
+        installed = self.installed_tree()
+        saves = log["calls"].count(paths.posix(self.journal_path()))
+        for k in range(1, saves + 1):
+            for then in ("uninstall", "install"):
+                with self.subTest(killed_after_save=k, then=then):
+                    self.fresh_home()
+                    self.make_box()
+                    with watch_writes(k, Killed(), after=True, only=self.journal_path()):
+                        with self.assertRaises(Killed):
+                            self.gk("install", cli.RETIRE)
+                    if then == "install":
+                        self.ok("install", cli.RETIRE)
+                        self.assertTreeEqual(installed, self.installed_tree())
+                    out, err = self.ok("uninstall")
+                    self.assertEqual(err, "")
+                    self.assertTreeEqual(start, snapshot(self.home))
+
+    def test_uninstall_killed_then_run_again(self):
+        # Killed after each reversal, before the journal records it: the next uninstall replays
+        # that action and must find it already done.
+        for edited in (False, True):
+            self.fresh_home()
+            before = self.make_box()
+            start = snapshot(self.home)
+            self.ok("install")
+            self.ok("install", cli.RETIRE)
+            if edited:
+                # Each owned file changed since install, so each is reversed surgically.
+                settings = self.settings()
+                settings["permissions"]["allow"].append("Bash(ls:*)")
+                write(self.cdir / "settings.json", json.dumps(settings, indent=4))
+                md = self.cdir / "CLAUDE.md"
+                write(md, md.read_text(encoding="utf-8") + "\n## Mine\n")
+                write(self.rc, self.rc.read_text(encoding="utf-8") + "# mine\n")
+            installed = self.tmp / ("installed-%s" % edited)
+            shutil.copytree(str(self.home), str(installed), symlinks=True)
+            with watch_writes() as log:
+                self.ok("uninstall")
+            final = snapshot(self.home)
+            if edited:
+                expected = json.loads(json.dumps(before))
+                expected["permissions"]["allow"].append("Bash(ls:*)")
+                self.assertEqual(self.settings(), expected)
+            else:
+                self.assertTreeEqual(start, final)
+            saves = log["calls"].count(paths.posix(self.journal_path()))
+            for k in range(1, saves + 1):
+                with self.subTest(edited=edited, killed_before_save=k):
+                    shutil.rmtree(str(self.home))
+                    shutil.copytree(str(installed), str(self.home), symlinks=True)
+                    with watch_writes(k, Killed(), only=self.journal_path()):
+                        with self.assertRaises(Killed):
+                            self.gk("uninstall")
+                    out, err = self.ok("uninstall")
+                    self.assertEqual(err, "")
+                    self.assertTreeEqual(final, snapshot(self.home))
+
+    def test_folders_made_meanwhile_are_journalled(self):
+        # The folders a write will make are journalled before it. Should another program make or
+        # remove one meanwhile, the journal is corrected to what the write did make.
+        start = snapshot(self.home)
+        with mock.patch.object(cli, "_missing_folders", lambda path: []):
+            self.ok("install")
+        folders = [a["path"] for a in self.journal()["installs"][0]["actions"]
+                   if a["type"] == "folder"]
+        self.assertIn(paths.posix(self.cdir / "hooks" / "gk-harness"), folders)
+        self.ok("uninstall")
         self.assertTreeEqual(start, snapshot(self.home))
 
 

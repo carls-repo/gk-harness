@@ -63,7 +63,7 @@ Each command is `"<python>" "<claude_dir>/hooks/gk-harness/<script>"`, where `<p
 
 ### Backups and the journal
 
-Every file the installer replaces is copied first to `~/.claude/backups/gk-harness/<UTC yyyymmddTHHMMSSZ>/`. Every change is recorded in the action journal `~/.claude/backups/gk-harness/manifest.json`, so that `uninstall` can reverse it.
+Every file the installer replaces is copied first to `~/.claude/backups/gk-harness/<UTC yyyymmddTHHMMSSZ>/`. Every change is recorded in the action journal `~/.claude/backups/gk-harness/manifest.json`, so that `uninstall` can reverse it. Each change is recorded before it is made, so an install cut short (a closed terminal, a crash, a power cut) is finished by running `install` again, or undone by `uninstall`.
 
 Before its first write, `install` checks that Python is 3.9 or newer, that every source file is present, that `settings.json` is strict JSON (or absent) and that no path it quotes holds `"`, `$` or `` ` ``. If a check fails it exits with `gk-harness: <problem>; nothing was changed.`
 
@@ -93,7 +93,7 @@ Windows PowerShell:
 powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.gk-harness\install.ps1" uninstall
 ```
 
-`uninstall` replays the journal in reverse. A file that is exactly as the installer left it gets its earlier state back. A file changed since is reversed surgically: in `settings.json` the installer's entries go and the removed entries come back; from `CLAUDE.md` and the shell rc file only the block is removed; a copied hook, agent or workflow you edited stays where it is, with the warning `changed since install, left in place: <path>`. The backups stay.
+`uninstall` replays the journal in reverse. A file that is exactly as the installer left it gets its earlier state back. A file changed since is reversed surgically: in `settings.json` the installer's entries go and the removed entries come back; from `CLAUDE.md` and the shell rc file only the block is removed; a copied hook, agent or workflow you edited stays where it is, with the warning `changed since install, left in place: <path>`. A file that already matches its backup is left as it is. An uninstall cut short is finished by running it again. The backups stay.
 
 ## Update and status
 

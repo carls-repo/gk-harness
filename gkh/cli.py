@@ -5,6 +5,11 @@ found then (the preflight) stops it with nothing changed (exit 2). The writes th
 order, and each is recorded in the action journal (backups/gk-harness/manifest.json) with the
 state it replaced, so uninstall can replay them in reverse. An install that finds nothing to
 change writes nothing, not even the journal.
+
+The journal is saved before each write it records, and uninstall saves it after each action it
+reverses, so a run stopped at any point (a kill, a closed terminal, power loss) leaves a journal
+that names every change still in place. An action whose write never happened, or whose reversal
+already happened, finds its file absent or equal to its backup, and is passed over.
 """
 from __future__ import annotations
 
@@ -278,7 +283,44 @@ def _plan(root: Path, cdir: Path, python: str, retire: bool) -> dict:
 
 # --- install: the writes --------------------------------------------------------------------
 
-def _apply(plan: dict, record: dict, done: list) -> None:
+def _missing_folders(path: Path) -> list:
+    """The folders a write to path will create, outermost first, found as the writer finds them
+    (manifest.write_bytes_atomic), so that they can be journalled before the write."""
+    target = str(path)
+    if os.path.islink(target):
+        target = os.path.realpath(target)
+    missing = []
+    cur = os.path.dirname(target)
+    while cur and not os.path.isdir(cur):
+        missing.append(cur)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return [Path(d) for d in reversed(missing)]
+
+
+def _journal_add(journal: dict, record: dict, actions: list) -> None:
+    """Add actions to this install's record (the record joins the journal with its first action)
+    and save the journal: before the write they describe, so that a kill never leaves a write
+    the journal does not name."""
+    if not record["actions"]:
+        journal["installs"].append(record)
+    record["actions"].extend(actions)
+    manifest.save(paths.manifest_path(), journal)
+
+
+def _journal_drop(journal: dict, record: dict, n: int) -> None:
+    """Take back the last n actions, whose write failed and changed nothing, and save."""
+    del record["actions"][-n:]
+    if not record["actions"]:
+        journal["installs"].pop()
+    manifest.save(paths.manifest_path(), journal)
+
+
+def _apply(plan: dict, journal: dict, record: dict, done: list) -> None:
+    """Make the planned writes, each journalled first. Each existing file is backed up before
+    its action is journalled, so a journalled backup always exists."""
     backup = plan["backup"]
     for step in plan["steps"]:
         prior = manifest.prior_absent()
@@ -287,16 +329,32 @@ def _apply(plan: dict, record: dict, done: list) -> None:
             manifest.copy_file(step.path, saved, private=True)
             record["backup"] = paths.posix(backup)
             prior = manifest.prior_backup(saved)
+        folders = _missing_folders(step.path)
+        actions = [manifest.folder_action(d) for d in folders]
+        actions.append(step.record(prior, manifest.sha256_bytes(step.data)))
+        _journal_add(journal, record, actions)
         created: list = []
-        sha = manifest.write_bytes_atomic(step.path, step.data, created=created)
-        record["actions"].extend(manifest.folder_action(d) for d in created)
-        record["actions"].append(step.record(prior, sha))
+        try:
+            manifest.write_bytes_atomic(step.path, step.data, created=created)
+        except OSError:
+            _journal_drop(journal, record, len(actions))
+            raise
+        if [paths.posix(d) for d in created] != [paths.posix(d) for d in folders]:
+            # Another program made or removed one of them meanwhile: journal what the write made.
+            record["actions"][-len(actions):] = ([manifest.folder_action(d) for d in created]
+                                                 + actions[-1:])
+            manifest.save(paths.manifest_path(), journal)
         done.append(step)
     for move in plan["moves"]:
-        move["dst"].parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(move["src"]), str(move["dst"]))
         record["backup"] = paths.posix(backup)
-        record["actions"].append(manifest.legacy_move_action(move["src"], move["dst"]))
+        _journal_add(journal, record, [manifest.legacy_move_action(move["src"], move["dst"])])
+        try:
+            move["dst"].parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(move["src"]), str(move["dst"]))
+        except OSError:
+            if not os.path.lexists(str(move["dst"])):
+                _journal_drop(journal, record, 1)
+            raise
         done.append(move)
 
 
@@ -336,18 +394,11 @@ def install(retire: bool) -> int:
         return 0
     record = manifest.new_install(VERSION, None)
     done: list = []
-    failed = None
     try:
-        _apply(plan, record, done)
+        _apply(plan, journal, record, done)
     except OSError as e:
-        failed = e
-    finally:
-        if record["actions"]:
-            journal["installs"].append(record)
-            manifest.save(paths.manifest_path(), journal)
-    if failed is not None:
         _warn("%s; install stopped part-way. What it changed is in the journal: run install "
-              "again to finish, or uninstall to undo it." % failed)
+              "again to finish, or uninstall to undo it." % e)
         return 1
     _report(done, record, cdir, root)
     if _windows() and any(isinstance(s, _Step) and s.group == "rc" for s in done):
@@ -379,22 +430,59 @@ def _restore(path: Path, prior: Any, private: bool) -> None:
         manifest.copy_file(Path(saved), path, private=private)
 
 
+def _backup_sha(prior: dict) -> str | None:
+    """The sha256 of the backup prior names; None when it names none or it is absent."""
+    saved = prior.get("backup") if prior.get("state") == "backup" else None
+    return _sha(Path(saved)) if isinstance(saved, str) else None
+
+
 def _undo_file(a: dict, private: bool, surgical: Callable[[Path, dict], None]) -> None:
     """The shared reverse of a recorded write: the prior state when the file is exactly as the
-    install left it (or gone, when there is a backup to bring back), else surgical()."""
+    install left it (or gone, when there is a backup to bring back), nothing when it already
+    equals its backup (put back by hand, by an uninstall cut short, or never overwritten by an
+    install cut short), else surgical()."""
     path = Path(a["path"])
+    prior = a.get("prior") if isinstance(a.get("prior"), dict) else {}
     current = _sha(path)
     if current == a.get("sha256"):
-        _restore(path, a.get("prior"), private)
+        _restore(path, prior, private)
     elif current is None:
-        if isinstance(a.get("prior"), dict) and a["prior"].get("state") == "backup":
-            _restore(path, a["prior"], private)
+        if prior.get("state") == "backup":
+            _restore(path, prior, private)
+    elif current and current == _backup_sha(prior):
+        return
     else:
         surgical(path, a)
 
 
 def _changed_copy(path: Path, a: dict) -> None:
     _warn("changed since install, left in place: %s" % paths.posix(path))
+
+
+def _group_keys(group: Any) -> Any:
+    return {k: v for k, v in group.items() if k != "hooks"} if isinstance(group, dict) else None
+
+
+def _not_back_yet(settings: dict, removed: list) -> list:
+    """The recorded legacy entries that settings does not hold already (under the same event,
+    in a group with the same matcher), each counted once, so that reversing the merge again
+    after an uninstall cut short, or after an entry was put back by hand, adds none twice."""
+    present = []
+    hooks = settings.get("hooks")
+    for event, groups in hooks.items() if isinstance(hooks, dict) else ():
+        for group in groups if isinstance(groups, list) else ():
+            entries = group.get("hooks") if isinstance(group, dict) else None
+            for entry in entries if isinstance(entries, list) else ():
+                present.append((event, _group_keys(group), entry))
+    out = []
+    for r in removed:
+        key = (r.get("event"), _group_keys(r.get("group")), r.get("entry")) \
+            if isinstance(r, dict) else None
+        if key in present:
+            present.remove(key)
+        else:
+            out.append(r)
+    return out
 
 
 def _surgical_settings(path: Path, a: dict) -> None:
@@ -405,7 +493,10 @@ def _surgical_settings(path: Path, a: dict) -> None:
         return
     if current is None:
         return
-    new = sm.unmerge(current, a.get("undo"))
+    undo = a.get("undo")
+    if isinstance(undo, dict) and isinstance(undo.get("removed"), list):
+        undo = dict(undo, removed=_not_back_yet(current, undo["removed"]))
+    new = sm.unmerge(current, undo)
     if sm.dumps(new) != sm.dumps(current):
         manifest.write_text_atomic(path, sm.dumps(new))
 
@@ -488,10 +579,13 @@ def _undo_folder(a: dict) -> None:
 
 def _undo_move(a: dict) -> None:
     src, dst = Path(a["src"]), Path(a["dst"])
-    if os.path.lexists(str(src)):
+    if not os.path.lexists(str(dst)):
+        if not os.path.lexists(str(src)):
+            _warn("the retired copy %s is missing, so %s was not put back" % (a["dst"], a["src"]))
+        # else it is back already (an uninstall cut short), or was never moved (an install cut
+        # short), so there is nothing to do
+    elif os.path.lexists(str(src)):
         _warn("%s exists again, so the retired copy stays in %s" % (a["src"], a["dst"]))
-    elif not os.path.lexists(str(dst)):
-        _warn("the retired copy %s is missing, so %s was not put back" % (a["dst"], a["src"]))
     else:
         src.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(dst), str(src))
@@ -527,17 +621,19 @@ def uninstall() -> int:
               % paths.posix(path))
         return 0
     try:
+        # The journal is saved after each action is reversed, so a kill leaves at most that one
+        # action recorded but done; replayed, it finds its file already as it was.
         while journal["installs"]:
             actions = journal["installs"][-1]["actions"]
-            while actions:
+            if actions:
                 _undo(actions[-1])
                 actions.pop()
-            journal["installs"].pop()
+            if not actions:
+                journal["installs"].pop()
+            manifest.save(path, journal)
     except OSError as e:
         _warn("%s; uninstall stopped part-way. Run uninstall again to finish." % e)
         return 1
-    finally:
-        manifest.save(path, journal)
     print("gk-harness uninstalled from %s; the backups stay in %s"
           % (paths.posix(paths.claude_dir()), paths.posix(paths.backup_root())))
     return 0
