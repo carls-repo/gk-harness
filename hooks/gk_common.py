@@ -28,6 +28,7 @@ LOCK_TIMEOUT = 2.0
 LOCK_POLL = 0.025
 GIT_TIMEOUT = 5
 PROJECT_FILE = (".claude", "gk-project.json")
+SHARED_BRANCH_MAX = 200
 
 _ERROR_ACCESS_DENIED = 5
 _DWORD_MAX = 0xFFFFFFFF
@@ -320,6 +321,30 @@ def load_project(toplevel: str | os.PathLike) -> tuple[dict | None, str | None]:
     if type(version) is not int or version != 1:
         return None, "%s has unsupported version %r (expected 1)" % (path, version)
     return data, None
+
+
+def shared_branch(toplevel: str | os.PathLike | None) -> str | None:
+    """The project file's `sharedBranch` at toplevel, or None when there is no usable one.
+
+    Usable means a non-blank, printable string of at most SHARED_BRANCH_MAX characters, so
+    a project file can't put a line break or a wall of text into a hook's message.
+    """
+    if toplevel is None:
+        return None
+    data, _ = load_project(toplevel)
+    branch = data.get("sharedBranch") if data else None
+    if not isinstance(branch, str):
+        return None
+    branch = branch.strip()
+    if not branch or len(branch) > SHARED_BRANCH_MAX or not branch.isprintable():
+        return None
+    return branch
+
+
+def shared_branch_phrase(toplevel: str | os.PathLike | None) -> str:
+    """The phrase "the shared branch", plus " (<sharedBranch>)" when the project names one."""
+    branch = shared_branch(toplevel)
+    return "the shared branch (%s)" % branch if branch else "the shared branch"
 
 
 def read_input() -> dict | None:
