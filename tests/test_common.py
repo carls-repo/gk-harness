@@ -39,7 +39,31 @@ def stdin_bytes(data):
 
 class PidAliveTests(unittest.TestCase):
     def test_pid_alive_self(self):
-        self.assertTrue(gk_common.pid_alive(os.getpid()))
+        # Checked in a child, not in the test runner: if pid_alive ever used os.kill on
+        # Windows, the in-process call would terminate the runner with exit code 0 and
+        # CI would go green with the failures unreported.
+        code = "import os, sys; sys.path.insert(0, sys.argv[1]); import gk_common; print(gk_common.pid_alive(os.getpid()))"
+        out = subprocess.run(
+            [sys.executable, "-c", code, str(HOOKS)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=30,
+        )
+        self.assertEqual((out.returncode, out.stdout.strip()), (0, "True"), out.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "Windows-only: os.kill there terminates the process")
+    def test_pid_alive_windows_never_calls_os_kill(self):
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+        try:
+            with mock.patch("os.kill") as k:
+                self.assertTrue(gk_common.pid_alive(os.getpid()))
+                self.assertTrue(gk_common.pid_alive(p.pid))
+            k.assert_not_called()
+            self.assertIsNone(p.poll())
+        finally:
+            p.kill()
+            p.wait()
 
     def test_pid_alive_dead(self):
         p = subprocess.Popen([sys.executable, "-c", "pass"])
