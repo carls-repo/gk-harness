@@ -11,6 +11,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -348,6 +349,31 @@ def shared_branch_phrase(toplevel: str | os.PathLike | None) -> str:
     """The phrase "the shared branch", plus " (<sharedBranch>)" when the project names one."""
     branch = shared_branch(toplevel)
     return "the shared branch (%s)" % branch if branch else "the shared branch"
+
+
+def pending_file(sid: str) -> Path:
+    """The publish gate's state file for a session: state/gk-remote-pending/<sid>.json."""
+    return claude_dir() / "state" / "gk-remote-pending" / (sid + ".json")
+
+
+def load_pending(path: str | os.PathLike, sid: str) -> dict:
+    """The publish gate's state, {"session_id", "pending": [entries with a str path]}.
+
+    A missing or malformed file gives an empty list; malformed entries are dropped.
+    """
+    d = read_json(path)
+    if isinstance(d, dict) and isinstance(d.get("pending"), list):
+        d["pending"] = [e for e in d["pending"] if isinstance(e, dict) and isinstance(e.get("path"), str)]
+        d["session_id"] = sid
+        return d
+    return {"session_id": sid, "pending": []}
+
+
+def skip_command(sid: str, rel: str) -> str:
+    """The shell command that drops one pending spec: this interpreter, the sibling
+    gk-remote-skip.py, the session id and the repo-relative path, quoted for a POSIX shell."""
+    skip = Path(os.path.abspath(__file__)).with_name("gk-remote-skip.py")
+    return " ".join(shlex.quote(a) for a in (Path(sys.executable).as_posix(), skip.as_posix(), sid, rel))
 
 
 def read_input() -> dict | None:
