@@ -16,9 +16,18 @@ EIGHT = {
 # CHANGELOG is the file name (generic "changelog entries" work stays in the routing table).
 BANNED_EXACT = ("/home/carls", "mike-dev", ":8080", "CHANGELOG")
 BANNED_ANY_CASE = ("supabase", "scroll audit")
-# The one place the policy may name Goodricke's shared branch: a parenthetical that is the
-# project file's `sharedBranch` example.
-SHARED_BRANCH_EXAMPLE = re.compile(r"\([^()]*sharedBranch[^()]*\)")
+# The one place the policy may name Goodricke's shared branch: the sentence that defines the
+# shared branch as the project file's `sharedBranch`, with `develop` as its example.
+DEVELOP = re.compile(r"\bdevelop\b")
+# Sentence ends: ., ! or ? then whitespace, except after "e.g." and "i.e.".
+SENTENCE_END = re.compile(r"(?<!e\.g\.)(?<!i\.e\.)(?<=[.!?])\s+")
+
+
+def sentences(text: str) -> list:
+    out = []
+    for para in re.split(r"\n\s*\n", text):
+        out.extend(SENTENCE_END.split(" ".join(para.split())))
+    return out
 
 
 def frontmatter(text: str) -> dict:
@@ -44,10 +53,12 @@ class PolicyTest(unittest.TestCase):
         lowered = text.lower()
         for word in BANNED_ANY_CASE:
             self.assertNotIn(word, lowered)
-        self.assertRegex(text, SHARED_BRANCH_EXAMPLE)
-        outside = SHARED_BRANCH_EXAMPLE.sub("", text)
-        self.assertIsNone(re.search(r"\bdevelop\b", outside),
-                          "develop appears outside the sharedBranch example")
+        self.assertEqual(len(DEVELOP.findall(text)), 1, "develop must appear exactly once")
+        found = [s for s in sentences(text) if DEVELOP.search(s)]
+        self.assertEqual(len(found), 1)
+        self.assertIn("`sharedBranch`", found[0],
+                      "develop appears outside the sentence that names sharedBranch")
+        self.assertIn("shared branch", found[0].lower())
 
     def test_agents_are_the_eight(self):
         names = {p.name for p in AGENTS.iterdir()}

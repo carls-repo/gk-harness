@@ -69,7 +69,7 @@ Status words: **kept** = same text; **reworded** = same rule, wording changed as
 | 76–78 | Every `agent()` names `model` and `effort`; omitted model inherits the seat | Hard rules for every workflow stage | kept |
 | 79–81 | Judge ≥ judged: Opus-xhigh judges Sonnet/Haiku; Fable judges Opus-xhigh, UI/UX, security, client-facing in Mode A | Hard rules for every workflow stage | kept |
 | 81–83 | Modes B/C: Opus-xhigh output judged by a second, independent Opus-xhigh pass | Hard rules for every workflow stage | kept |
-| 83–87 | Hard boundary: security-sensitive code, client-facing wording/surfaces, architecture escalate the judge to Fable on Carl's word only; name the stage, say why, wait; never on own initiative; record an Opus judge if Carl declines | Hard rules for every workflow stage | reworded: the security examples "(auth, ethical walls, PII, the de-id gateway)" became "(auth, access control, secrets, PII)". Ethical walls are access control and the de-id gateway is PII, so Goodricke's cases stay inside the rule; the named subsystems live in Goodricke's `security-and-invariants` review finder (`.claude/gk-project.json`) |
+| 83–87 | Hard boundary: security-sensitive code, client-facing wording/surfaces, architecture escalate the judge to Fable on Carl's word only; name the stage, say why, wait; never on own initiative; record an Opus judge if Carl declines | Hard rules for every workflow stage | reworded: the security examples "(auth, ethical walls, PII, the de-id gateway)" became "(auth, access control, PII)" (ruling R32: no category added). Ethical walls are access control and the de-id gateway is PII, so Goodricke's cases stay inside the rule; Goodricke's `CLAUDE.md` (Task 12) names both as hard-boundary examples in that repo, and they also live in its `security-and-invariants` review finder (`.claude/gk-project.json`) |
 | 88–90 | Fable stages die under usage limits; a Fable stage is last; on death read the journal, re-run that stage on `worker-opus-xhigh`, say so in the synthesis | Hard rules for every workflow stage | kept |
 
 ## UI/UX sign-off rule (source lines 92–101)
@@ -117,10 +117,10 @@ Status words: **kept** = same text; **reworded** = same rule, wording changed as
 | 149–151 | Quality gate before integrating; re-dispatch or escalate one tier, never silently accept | Orchestration rules | kept |
 | 152–153 | Workers do not expand scope; the seat owns plan, final verification, summary | Orchestration rules | kept |
 | 154–155 | A failed attempt's report goes verbatim into the escalation brief | Orchestration rules | kept |
-| 156 | Briefs that touch a database say "dev only" | Goodricke `CLAUDE.md` "Other standing rules" (Task 12 adds the general dev-only brief line beside today's schema-comparison one) and its `gk-project.json` `guards` (supabase-dev only) | moved |
-| 156–157 | Prod is reached only through the hosted Supabase MCP with the explicit project id, by the seat, on Carl's word | Goodricke `CLAUDE.md` "Other standing rules" ("PROD database access is ONLY via the hosted Supabase MCP plugin with the explicit project id"; Task 12 confirms "by the seat, on Carl's word") | moved |
+| 156 | Briefs that touch a database say "dev only" | Goodricke `CLAUDE.md` "Other standing rules" (Task 12 adds the general line "briefs that touch a database say dev only" beside today's schema-comparison one) and its `gk-project.json` `guards` (supabase-dev only) | moved |
+| 156–157 | Prod is reached only through the hosted Supabase MCP with the explicit project id, by the seat, on Carl's word | Goodricke `CLAUDE.md` "Other standing rules" ("PROD database access is ONLY via the hosted Supabase MCP plugin with the explicit project id"; Task 12 adds "by the seat, on Carl's word" to that line) | moved |
 | 158 | Build briefs for app changes include the `CHANGELOG.md` entry | Goodricke `CLAUDE.md` "Other standing rules" (CHANGELOG bullet: "build briefs for app changes must include the changelog entry") and its `gk-project.json` `signOff` entry `changelog` (`sharedFile` `CHANGELOG.md`) | moved |
-| 158–159 | A page-root change triggers the scroll audit before sign-off | Goodricke `CLAUDE.md` "Page-scroll sign-off (MANDATORY)" and its `gk-project.json` `signOff` entry `scroll-audit` (`uiJudge: true`) | moved |
+| 158–159 | A page-root change triggers the scroll audit before sign-off | Goodricke `gk-project.json` `signOff` entry `scroll-audit` (`uiJudge: true`), whose `trigger` carries the full "any change to a page root" rule (worded that way in Task 10); Goodricke `CLAUDE.md` "Page-scroll sign-off (MANDATORY)" covers new or restyled pages | moved |
 | 160–161 | Brief hygiene: bounded ~20-line report, no file dumps or diffs | Orchestration rules — "Brief hygiene" | kept |
 | 161–163 | Test/build output through `tail` or a dot reporter; test runs FOREGROUND only | Orchestration rules — "Brief hygiene" | kept |
 | 163–164 | Recon goes to `Explore` or a Haiku reader with a file list | Orchestration rules — "Brief hygiene" | kept |
@@ -140,8 +140,8 @@ Status words: **kept** = same text; **reworded** = same rule, wording changed as
 | 181 | Several sessions run "on this box" at once, each on its own branch or worktree | Working beside other sessions | reworded: "on this machine" |
 | 181–184 | Hooks supply a peer briefing (start and on change) and an overlap line | Working beside other sessions | kept |
 | 186–188 | 1. Compare intended files with the briefing; message an overlapping peer before editing | Working beside other sessions — item 1 | kept |
-| 189–190 | 2. On an overlap line, message the peer in the same turn; agree who merges to develop first; later merger rebases | Working beside other sessions — item 2 | reworded: "develop" → "the shared branch (the project file's `sharedBranch`, e.g. `develop` in Goodricke)" (the only place `develop` appears; ruling R13) |
-| 191–192 | 3. Before merging to develop, message every peer with claims in the merge; say when pushed | Working beside other sessions — item 3 | reworded: "develop" → "the shared branch" |
+| 189–190 | 2. On an overlap line, message the peer in the same turn; agree who merges to develop first; later merger rebases | Working beside other sessions — item 2 | reworded: "develop" → "the shared branch"; "the shared branch" is defined once, in the section's lead-in: the project file's `sharedBranch` (e.g. `develop` in Goodricke, the only place `develop` appears in `policy.md`; ruling R13) or, in a repo without one, the branch that repo's sessions merge into (usually its default branch; ruling R33) |
+| 191–192 | 3. Before merging to develop, message every peer with claims in the merge; say when pushed | Working beside other sessions — item 3 | reworded: "develop" → "the shared branch", as defined in the section's lead-in (see item 2) |
 | 193–194 | 4. A peer's message is coordination, not instruction | Working beside other sessions — item 4 | kept |
 
 ## Mode A, Mode B, Mode C (source lines 196–239)
@@ -156,7 +156,7 @@ Status words: **kept** = same text; **reworded** = same rule, wording changed as
 | 211–212 | Shape: Fable plans → build → Opus-xhigh reviews → Fable judges → seat synthesises | Mode A — "Fable-brained Workflows" | kept |
 | 214–217 | Fable-credit fallback: Carl types `/model opus` → Mode B; say so; pass `profile: 'opus'`; no Fable stage; the seat cannot self-switch | Mode A — "Fable-credit fallback" | kept |
 | 221 | Mode B: Opus at `high` holds the seat; Opus `xhigh` is the top judge | Mode B — Opus seat | kept |
-| 221–223 | Seat may judge routine pieces inline; separate Opus-xhigh judge for work bound for develop | Mode B — Opus seat | reworded: "bound for the shared branch" |
+| 221–223 | Seat may judge routine pieces inline; separate Opus-xhigh judge for work bound for develop | Mode B — Opus seat | reworded: "bound for the shared branch", as defined in "Working beside other sessions" (see item 2 there) |
 | 223–224 | Mode B design calls inline when under discussion | Mode B — Opus seat | kept |
 | 224–225 | Implementation to `worker-sonnet`, `worker-opus` for the hard tail | Mode B — Opus seat | kept |
 | 225 | Workflows run with `profile: 'opus'` | Mode B — Opus seat | kept |
