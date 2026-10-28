@@ -1,0 +1,90 @@
+{
+  "PostToolUse": [
+    {
+      "matcher": "Edit|Write|MultiEdit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$HOME/.claude/hooks/supabase-row-cap.sh\""
+        },
+        {
+          "type": "command",
+          "command": "\"$HOME/.claude/hooks/pii-in-logs.sh\""
+        }
+      ]
+    },
+    {
+      "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.claude/hooks/gk-claim.py\""
+        },
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.claude/hooks/gk-remote-pending.py\""
+        }
+      ]
+    },
+    {
+      "matcher": "mcp__claude_ai_Claude_Docs__batch|mcp__claude_ai_Claude_Docs__update|mcp__claude_ai_Claude_Docs__create|Artifact|SendUserFile",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.claude/hooks/gk-remote-clear.py\""
+        }
+      ]
+    }
+  ],
+  "PreToolUse": [
+    {
+      "matcher": "Workflow",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$HOME/.claude/hooks/gk-profile-guard.sh\""
+        }
+      ]
+    }
+  ],
+  "SessionStart": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.claude/hooks/gk-peers.py\""
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.claude/hooks/gk-peers.py\""
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.claude/hooks/gk-remote-stop.py\""
+        }
+      ]
+    }
+  ],
+  "SessionEnd": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.claude/hooks/gk-claims-end.py\""
+        }
+      ]
+    }
+  ]
+}
