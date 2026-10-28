@@ -134,7 +134,8 @@ def _sweep(groups: list, event: str, event_index: int, records: list | None) -> 
     """Drop owned entries (and, when records is a list, legacy entries, recording each) from
     groups. Returns (kept_groups, anchor, removed_any): anchor is where the first group emptied
     by the sweep stood among the kept groups, or None. Groups that are not {..., "hooks": [...]}
-    are kept as they are."""
+    are kept as they are. Each record's kept_index is where the group that still holds the
+    rest of its entries stands among the kept groups, or None when the sweep emptied it."""
     kept: list = []
     anchor = None
     removed_any = False
@@ -160,8 +161,10 @@ def _sweep(groups: list, event: str, event_index: int, records: list | None) -> 
             kept.append(group)
             continue
         removed_any = True
+        kept_index = len(kept) if keep_entries else None
         for r in made:
             r["group_removed"] = not keep_entries
+            r["kept_index"] = kept_index
             records.append(r)
         if keep_entries:
             survivor = dict(group)
@@ -188,7 +191,8 @@ def merge(settings: dict, python: Any, claude_dir: Any) -> tuple:
 
     undo is JSON-ready, for the journal and unmerge():
       {"removed":   [{"event", "event_index", "group_index", "group", "group_removed",
-                      "entry_index", "entry"}, ...]  # each legacy entry taken out, in order
+                      "kept_index", "entry_index", "entry"}, ...]  # each legacy entry taken
+                                                               # out, in order
        "ultracode": {"present": False} or {"present": True, "value": <prior value>},
        "events":    [event names in `hooks` before the merge], or None when `hooks` was absent}
     """
@@ -257,10 +261,28 @@ def _meta(group: dict) -> dict:
     return {k: v for k, v in group.items() if k != "hooks"}
 
 
+def _survivor(base: list, r: dict, key: tuple, owner: dict) -> Any:
+    """The group in base that still holds the rest of r's original group: the one at r's
+    kept_index when it still has that group's keys, else the first group with those keys. A
+    group already claimed for a different original group is never picked."""
+    want = _meta(r["group"])
+
+    def usable(g: Any) -> bool:
+        return (isinstance(g, dict) and isinstance(g.get("hooks"), list) and _meta(g) == want
+                and owner.get(id(g), key) == key)
+
+    at = r.get("kept_index")
+    if isinstance(at, int) and not isinstance(at, bool) and 0 <= at < len(base) \
+            and usable(base[at]):
+        return base[at]
+    return next((g for g in base if usable(g)), None)
+
+
 def _restore(new: dict, removed: list) -> None:
     """Put each recorded legacy entry back where it was, as far as the file still allows."""
-    placed: dict = {}  # (event, original group index) -> the group it went back into
-    fresh: set = set()  # ids of groups re-created here, never matched as survivors
+    placed: dict = {}  # (event, original group index) -> the group its entries went back into
+    owner: dict = {}  # id(group) -> the (event, original group index) that claimed it
+    base: dict = {}  # event -> its groups as the sweep left them, before any re-insertion
     for r in removed:
         if not _valid_record(r):
             continue
@@ -273,18 +295,18 @@ def _restore(new: dict, removed: list) -> None:
         groups = hooks[event]
         if not isinstance(groups, list):
             continue
+        if event not in base:
+            base[event] = list(groups)
         key = (event, r["group_index"])
         group = placed.get(key)
         if group is None and not r["group_removed"]:
-            want = _meta(r["group"])
-            group = next((g for g in groups if isinstance(g, dict) and id(g) not in fresh
-                          and isinstance(g.get("hooks"), list) and _meta(g) == want), None)
+            group = _survivor(base[event], r, key, owner)
         if group is None:
             group = copy.deepcopy(r["group"])
             group["hooks"] = []
             groups.insert(min(r["group_index"], len(groups)), group)
-            fresh.add(id(group))
         placed[key] = group
+        owner[id(group)] = key
         group["hooks"].insert(min(r["entry_index"], len(group["hooks"])), copy.deepcopy(r["entry"]))
 
 

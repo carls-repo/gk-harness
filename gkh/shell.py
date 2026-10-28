@@ -45,9 +45,11 @@ def has_block(text: str, label: str = LABEL) -> bool:
 
 def strip_legacy_aliases(text: str) -> tuple:
     """(new_text, removed): text without the lines matching legacy.RC_ALIAS_RE, and
-    [{"line": 1-based line number, "text": the line without its newline}] for each."""
-    kept, removed = [], []
-    for number, line in enumerate(_LINE.findall(text), 1):
+    [{"line": 1-based line number, "text": the line without its newline}] for each. A
+    byte-order mark at the start is not part of line 1 and stays."""
+    bom = claude_md.bom_of(text)
+    kept, removed = [bom], []
+    for number, line in enumerate(_LINE.findall(text[len(bom):]), 1):
         bare = line.rstrip("\r\n")
         if legacy.RC_ALIAS_RE.match(bare):
             removed.append({"line": number, "text": bare})

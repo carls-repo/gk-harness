@@ -2,6 +2,8 @@
 folder and the shell startup file for this operating system."""
 from __future__ import annotations
 
+import codecs
+import locale
 import ntpath
 import os
 import subprocess
@@ -79,39 +81,87 @@ def new_backup_dir(t: float | None = None) -> Path:
     return candidate
 
 
-def run_capture(argv: list[str], timeout: float) -> str | None:
-    """stdout of argv when it exits 0 within timeout, else None (never raises)."""
+def run_capture(argv: list[str], timeout: float) -> bytes | None:
+    """stdout of argv, as the bytes it wrote, when it exits 0 within timeout, else None (never
+    raises). console_encoding() says how a console program's output is to be decoded."""
     try:
-        proc = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        proc = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
                               timeout=timeout)
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
     return proc.stdout if proc.returncode == 0 else None
 
 
-def _ps_profile(runner: Callable[[list[str], float], str | None]) -> Path | None:
+def _known_codec(name: str) -> bool:
+    try:
+        codecs.lookup(name)
+    except LookupError:
+        return False
+    return True
+
+
+def _console_output_cp() -> int:
+    """This process's console output code page on Windows; 0 when there is none to ask."""
+    try:
+        import ctypes
+        return int(ctypes.windll.kernel32.GetConsoleOutputCP())  # type: ignore[attr-defined]
+    except Exception:
+        return 0
+
+
+def console_encoding(platform: str | None = None, console_cp: int | None = None) -> str:
+    """The encoding a console program such as PowerShell writes to a pipe in.
+
+    Windows: the console's output code page (console_cp, else GetConsoleOutputCP()), which a
+    child started from here inherits; when this process has no console, the child gets a new
+    one in the OEM code page ("oem"). Elsewhere, or when neither is known: the locale's.
+    """
+    platform = sys.platform if platform is None else platform
+    if platform == "win32":
+        cp = _console_output_cp() if console_cp is None else console_cp
+        for name in (("cp%d" % cp) if cp else "", "oem"):
+            if name and _known_codec(name):
+                return name
+    return locale.getpreferredencoding(False) or "utf-8"
+
+
+def _ps_profile(runner: Callable[[list[str], float], bytes | None], encoding: str,
+                isdir: Callable[[str], bool]) -> Path | None:
     for exe in ("pwsh", "powershell"):
         out = runner([exe, "-NoProfile", "-Command", "$PROFILE"], PS_TIMEOUT)
-        lines = (out or "").strip().splitlines()
-        if len(lines) == 1 and ntpath.isabs(lines[0].strip()):
-            return Path(lines[0].strip())
+        if not out:
+            continue
+        lines = out.decode(encoding, "replace").strip().splitlines()
+        if len(lines) != 1:
+            continue
+        line = lines[0].strip()
+        # $PROFILE is <Documents>\PowerShell\<name>.ps1 (WindowsPowerShell for 5.1). A path
+        # decoded wrongly, or with characters the console could not show, names a Documents
+        # folder that does not exist, so it is refused rather than written to.
+        if ntpath.isabs(line) and isdir(ntpath.dirname(ntpath.dirname(line))):
+            return Path(line)
     return None
 
 
 def rc_file(platform: str | None = None, environ: Mapping[str, str] | None = None,
-            runner: Callable[[list[str], float], str | None] | None = None,
-            home: Path | None = None) -> Path | None:
+            runner: Callable[[list[str], float], bytes | None] | None = None,
+            home: Path | None = None, encoding: str | None = None,
+            isdir: Callable[[str], bool] | None = None) -> Path | None:
     """The shell startup file that gets the alias block, or None when there is none to use.
 
     macOS: ~/.zshrc. Linux (and other POSIX): ~/.zshrc when $SHELL ends in zsh, else ~/.bashrc.
-    Windows: the $PROFILE path reported by pwsh, else by powershell (5 s each); None when
-    neither answers with one absolute path.
+    Windows: the $PROFILE path reported by pwsh, else by powershell (5 s each), decoded with
+    encoding (default console_encoding()); None when neither answers with one absolute path
+    whose Documents folder (two levels up) exists by isdir (default os.path.isdir). runner is
+    called as runner(argv, 5) and returns stdout bytes or None (default run_capture).
     """
     platform = sys.platform if platform is None else platform
     environ = os.environ if environ is None else environ
     home = Path.home() if home is None else home
     if platform == "win32":
-        return _ps_profile(run_capture if runner is None else runner)
+        return _ps_profile(run_capture if runner is None else runner,
+                           console_encoding() if encoding is None else encoding,
+                           os.path.isdir if isdir is None else isdir)
     if platform == "darwin" or environ.get("SHELL", "").endswith("zsh"):
         return home / ".zshrc"
     return home / ".bashrc"

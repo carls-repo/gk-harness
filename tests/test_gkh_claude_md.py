@@ -147,6 +147,44 @@ class StripTests(unittest.TestCase):
         self.assertEqual(cm.strip(text), NOTES)
 
 
+class ByteOrderMarkTests(unittest.TestCase):
+    """A Windows editor that saves with a byte-order mark puts U+FEFF before line 1. A marker on
+    line 1 is still a marker, and the mark stays outside the block."""
+
+    def test_created_file_resaved_with_a_mark(self):
+        created, _ = cm.apply(None, block("1.0.0"))
+        text = "﻿" + created
+        self.assertTrue(cm.has_block(text))
+        self.assertEqual(cm.apply(text, block("1.0.0")), (text, "unchanged"))
+        self.assertEqual(cm.apply(text, block("1.1.0")), ("﻿" + block("1.1.0"), "updated"))
+        self.assertEqual(cm.strip(text), "﻿")
+
+    def test_replaced_old_policy_resaved_with_a_mark_and_crlf(self):
+        replaced, mode = cm.apply(OLD.replace("\n", "\r\n"), block())
+        self.assertEqual(mode, "replaced_old_policy")
+        text = "﻿" + replaced + "my notes\r\n"
+        self.assertFalse(cm.is_old_policy(text))
+        new, mode = cm.apply(text, block("1.1.0"))
+        self.assertEqual(mode, "updated")
+        self.assertEqual(new, "﻿" + block("1.1.0").replace("\n", "\r\n") + "my notes\r\n")
+        self.assertEqual(cm.strip(text), "﻿my notes\r\n")
+
+    def test_round_trips_with_a_mark(self):
+        for start in ("﻿", "﻿" + NOTES, "﻿" + NOTES.replace("\n", "\r\n")):
+            with self.subTest(start=start):
+                new, mode = cm.apply(start, block())
+                self.assertEqual(mode, "appended")
+                self.assertTrue(new.startswith("﻿") and not new.startswith("﻿﻿"))
+                self.assertEqual(cm.strip(new), start)
+                self.assertEqual(cm.apply(new, block()), (new, "unchanged"))
+        self.assertEqual(cm.apply("﻿", block())[0], "﻿" + block())
+
+    def test_a_mark_elsewhere_is_not_skipped(self):
+        # Only a mark at the very start is set aside; anywhere else it is part of the line.
+        text = "notes\n﻿<!-- gk-harness:end -->\n"
+        self.assertEqual(cm.strip(text), text)
+
+
 class OldPolicyTests(unittest.TestCase):
     def test_detection(self):
         self.assertTrue(cm.is_old_policy(OLD))

@@ -231,10 +231,91 @@ class UnmergeTests(unittest.TestCase):
             {"hooks": {"Notification": [{"matcher": "", "hooks": [
                 {"type": "command", "command": "python3 ~/.claude/hooks/gk-peers.py"}]}],
                 "PreCompact": [{"hooks": [{"type": "command", "command": "mine.sh"}]}]}},
+            # A legacy entry in the second of two matcher-less user groups goes back into that
+            # group, not the first.
+            {"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command", "command": "userA.sh"}]},
+                {"hooks": [{"type": "command", "command": "userB.sh"},
+                           {"type": "command", "command": "python3 ~/.claude/hooks/gk-peers.py"}]},
+            ]}},
+            # Two groups with the same matcher, each mixing a user entry and a legacy entry: each
+            # legacy entry goes back into its own group, in its own place.
+            {"hooks": {"PostToolUse": [
+                {"matcher": "Edit", "hooks": [
+                    {"type": "command", "command": "u1.sh"},
+                    {"type": "command", "command": "python3 ~/.claude/hooks/gk-claim.py"}]},
+                {"matcher": "Edit", "hooks": [
+                    {"type": "command", "command": "python3 ~/.claude/hooks/gk-remote-pending.py"},
+                    {"type": "command", "command": "u2.sh"}]},
+            ]}},
+            # The same with a legacy-only group between them, so the second survivor's place
+            # among the kept groups differs from its original place.
+            {"hooks": {"PostToolUse": [
+                {"matcher": "Edit", "hooks": [
+                    {"type": "command", "command": "u1.sh"},
+                    {"type": "command", "command": "python3 ~/.claude/hooks/gk-claim.py"}]},
+                {"matcher": "Edit", "hooks": [
+                    {"type": "command", "command": "python3 ~/.claude/hooks/gk-peers.py"}]},
+                {"matcher": "Edit", "hooks": [
+                    {"type": "command", "command": "python3 ~/.claude/hooks/gk-remote-pending.py"},
+                    {"type": "command", "command": "u2.sh"}]},
+            ]}},
         ]
         for case in cases:
             with self.subTest(case=json.dumps(case)[:80]):
                 self.round_trip(case)
+
+    def test_survivors_are_found_by_their_kept_place(self):
+        # An owned group from an earlier install stands first, so each survivor's original
+        # index is one more than its place among the kept groups. unmerge drops the owned group
+        # and puts each legacy entry back into its own group.
+        def group(*commands):
+            return {"matcher": "Edit", "hooks": [{"type": "command", "command": c} for c in commands]}
+        start = {"hooks": {"PostToolUse": [
+            group(cmd("gk-claim.py")),
+            group("u1.sh", "python3 ~/.claude/hooks/gk-claim.py"),
+            group("python3 ~/.claude/hooks/gk-remote-pending.py", "u2.sh"),
+        ]}}
+        new, undo = sm.merge(start, PY, CDIR)
+        self.assertEqual([(r["group_index"], r["kept_index"]) for r in undo["removed"]],
+                         [(1, 0), (2, 1)])
+        expected = copy.deepcopy(start)
+        del expected["hooks"]["PostToolUse"][0]
+        self.assertEqual(sm.dumps(sm.unmerge(new, undo)), sm.dumps(expected))
+
+    def test_survivor_lookup_falls_back_to_unclaimed_keys(self):
+        # Without kept_index (or when the group at that place no longer has the same keys),
+        # the first group with the same keys that no other original group claimed is used.
+        start = {"hooks": {"PostToolUse": [
+            {"matcher": "Edit", "hooks": [
+                {"type": "command", "command": "u1.sh"},
+                {"type": "command", "command": "python3 ~/.claude/hooks/gk-claim.py"}]},
+            {"matcher": "Edit", "hooks": [
+                {"type": "command", "command": "python3 ~/.claude/hooks/gk-remote-pending.py"},
+                {"type": "command", "command": "u2.sh"}]},
+        ]}}
+        new, undo = sm.merge(start, PY, CDIR)
+        for r in undo["removed"]:
+            del r["kept_index"]
+        self.assertEqual(sm.dumps(sm.unmerge(new, undo)), sm.dumps(start))
+        # The first record takes the second survivor; the second record's place is out of
+        # range, and the fallback skips the group the first record claimed.
+        new, undo = sm.merge(start, PY, CDIR)
+        undo["removed"][0]["kept_index"] = 1
+        undo["removed"][1]["kept_index"] = 7
+        back = sm.unmerge(new, undo)
+        self.assertEqual(sorted(len(g["hooks"]) for g in back["hooks"]["PostToolUse"]), [2, 2])
+        # A place that now holds a group with other keys is not used.
+        start = {"hooks": {"PostToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "u0.sh"}]},
+            {"matcher": "Edit", "hooks": [
+                {"type": "command", "command": "u1.sh"},
+                {"type": "command", "command": "python3 ~/.claude/hooks/gk-claim.py"}]},
+        ]}}
+        new, undo = sm.merge(start, PY, CDIR)
+        self.assertEqual(undo["removed"][0]["kept_index"], 1)
+        undo["removed"][0]["kept_index"] = 0
+        self.assertEqual(sm.dumps(sm.unmerge(new, undo)), sm.dumps(start))
 
     def test_user_edits_survive(self):
         before = box_settings()

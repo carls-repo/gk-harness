@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import locale
 import os
 import shutil
 import sys
@@ -17,7 +18,8 @@ PS_PROFILE = r"C:\Users\Carl Selby\Documents\PowerShell\Microsoft.PowerShell_pro
 
 
 class FakeRunner:
-    """Stands in for the PowerShell probe: answers per executable name, records each call."""
+    """Stands in for the PowerShell probe: answers per executable name (bytes as written to the
+    pipe; a str is sent as UTF-8), records each call."""
 
     def __init__(self, answers):
         self.answers = answers
@@ -25,7 +27,23 @@ class FakeRunner:
 
     def __call__(self, argv, timeout):
         self.calls.append((list(argv), timeout))
-        return self.answers.get(argv[0])
+        answer = self.answers.get(argv[0])
+        return answer.encode("utf-8") if isinstance(answer, str) else answer
+
+
+class FakeDirs:
+    """Stands in for os.path.isdir: the folders that exist, records each question."""
+
+    def __init__(self, *folders):
+        self.folders = set(folders)
+        self.asked = []
+
+    def __call__(self, path):
+        self.asked.append(path)
+        return path in self.folders
+
+
+DOCUMENTS = r"C:\Users\Carl Selby\Documents"
 
 
 class ClaudeDirTests(unittest.TestCase):
@@ -147,33 +165,76 @@ class RcFileTests(unittest.TestCase):
             got = paths.rc_file("linux", env, FakeRunner({}), self.home)
             self.assertEqual(got, self.home / ".bashrc", env)
 
+    def win(self, runner, encoding="utf-8", isdir=None):
+        return paths.rc_file("win32", {}, runner, self.home, encoding,
+                             FakeDirs(DOCUMENTS) if isdir is None else isdir)
+
     def test_windows_asks_pwsh_first(self):
         runner = FakeRunner({"pwsh": PS_PROFILE + "\r\n", "powershell": r"C:\other.ps1"})
-        got = paths.rc_file("win32", {}, runner, self.home)
-        self.assertEqual(got, Path(PS_PROFILE))
+        dirs = FakeDirs(DOCUMENTS)
+        self.assertEqual(self.win(runner, isdir=dirs), Path(PS_PROFILE))
         self.assertEqual(runner.calls, [(["pwsh", "-NoProfile", "-Command", "$PROFILE"], 5)])
+        self.assertEqual(dirs.asked, [DOCUMENTS])
 
     def test_windows_falls_back_to_powershell(self):
         runner = FakeRunner({"pwsh": None, "powershell": PS_PROFILE + "\n"})
-        got = paths.rc_file("win32", {}, runner, self.home)
-        self.assertEqual(got, Path(PS_PROFILE))
+        self.assertEqual(self.win(runner), Path(PS_PROFILE))
         self.assertEqual([c[0][0] for c in runner.calls], ["pwsh", "powershell"])
         self.assertTrue(all(c[1] == 5 for c in runner.calls))
 
     def test_windows_unusable_answers_are_skipped(self):
-        for bad in ("", "   \n", "relative\\profile.ps1", "C:\\a.ps1\nC:\\b.ps1"):
+        for bad in ("", "   \n", "relative\\profile.ps1", "C:\\a.ps1\nC:\\b.ps1", None):
             runner = FakeRunner({"pwsh": bad, "powershell": None})
-            self.assertIsNone(paths.rc_file("win32", {}, runner, self.home), repr(bad))
+            self.assertIsNone(self.win(runner), repr(bad))
 
     def test_windows_neither_answers(self):
-        self.assertIsNone(paths.rc_file("win32", {}, FakeRunner({}), self.home))
+        self.assertIsNone(self.win(FakeRunner({})))
+
+    def test_windows_profile_whose_documents_folder_is_missing_is_refused(self):
+        runner = FakeRunner({"pwsh": PS_PROFILE + "\r\n", "powershell": PS_PROFILE + "\r\n"})
+        self.assertIsNone(self.win(runner, isdir=FakeDirs()))
+        self.assertEqual([c[0][0] for c in runner.calls], ["pwsh", "powershell"])
+
+    def test_windows_non_ascii_user_name_in_the_console_code_page(self):
+        # PowerShell writes to a pipe in the console's (OEM) code page, cp850 here. Decoded
+        # with it the path is right; decoded with the ANSI code page (cp1252) it names a
+        # folder that does not exist, and is refused instead of written to.
+        profile = "C:\\Users\\Zo\u00eb\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1"
+        documents = "C:\\Users\\Zo\u00eb\\Documents"
+        answer = (profile + "\r\n").encode("cp850")
+        self.assertNotEqual(answer.decode("cp1252").strip(), profile)
+        dirs = FakeDirs(documents)
+        self.assertEqual(self.win(FakeRunner({"pwsh": answer}), "cp850", dirs), Path(profile))
+        self.assertIsNone(self.win(FakeRunner({"pwsh": answer}), "cp1252", dirs))
+        with mock.patch.object(paths, "console_encoding", return_value="cp850"):
+            got = paths.rc_file("win32", {}, FakeRunner({"pwsh": answer}), self.home, isdir=dirs)
+        self.assertEqual(got, Path(profile))
+
+    def test_console_encoding(self):
+        self.assertEqual(paths.console_encoding("win32", 850), "cp850")
+        self.assertEqual(paths.console_encoding("win32", 65001), "cp65001")
+        # No console (0) or an unknown code page: the OEM code page where Python has it
+        # (Windows), else the locale's.
+        fallback = "oem" if sys.platform == "win32" else locale.getpreferredencoding(False)
+        self.assertEqual(paths.console_encoding("win32", 0), fallback)
+        self.assertEqual(paths.console_encoding("win32", 99999), fallback)
+        self.assertEqual(paths.console_encoding("linux"), locale.getpreferredencoding(False))
+        if sys.platform != "win32":
+            with mock.patch.object(paths, "_console_output_cp", return_value=437):
+                self.assertEqual(paths.console_encoding("win32"), "cp437")
+            self.assertEqual(paths._console_output_cp(), 0)  # no kernel32 here
 
     def test_default_runner_survives_a_missing_executable(self):
         self.assertIsNone(paths.run_capture(["gk-harness-no-such-exe-0f3a"], 5))
 
     def test_default_runner_returns_stdout(self):
         out = paths.run_capture([sys.executable, "-c", "print('C:/x.ps1')"], 5)
-        self.assertEqual(out.strip(), "C:/x.ps1")
+        self.assertEqual(out.strip(), b"C:/x.ps1")
+
+    def test_default_runner_returns_the_bytes_written(self):
+        code = "import sys; sys.stdout.buffer.write('C:\\\\Users\\\\Zo\\u00eb\\r\\n'.encode('cp850'))"
+        out = paths.run_capture([sys.executable, "-c", code], 5)
+        self.assertEqual(out, "C:\\Users\\Zo\u00eb\r\n".encode("cp850"))
 
     def test_default_runner_nonzero_exit_is_none(self):
         self.assertIsNone(paths.run_capture([sys.executable, "-c", "print('x'); raise SystemExit(3)"], 5))

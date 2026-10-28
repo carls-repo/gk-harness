@@ -124,6 +124,52 @@ class FileHelperTests(unittest.TestCase):
         mf.write_text_atomic(p, text + "more\n")
         self.assertEqual(p.read_bytes(), b"caf\xe9\nmore\n")
 
+    def test_marked_utf16_and_utf32_are_decoded_and_re_encoded_with_their_mark(self):
+        text = "Set-Alias ll Get-ChildItem\r\n# Zoë \U0001f600\r\n"
+        for mark, encoding in ((b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be"),
+                               (b"\xff\xfe\x00\x00", "utf-32-le"), (b"\x00\x00\xfe\xff", "utf-32-be")):
+            with self.subTest(encoding=encoding):
+                data = mark + text.encode(encoding)
+                self.assertEqual(mf.decode_text(data), (text, encoding))
+                self.assertEqual(mf.encode_text(text, encoding), data)
+                p = self.tmp / ("profile-%s.ps1" % encoding)
+                p.write_bytes(data)
+                self.assertEqual(mf.read_text_encoded(p), (text, encoding))
+                with self.assertRaises(mf.TextEncodingError) as ctx:
+                    mf.read_text(p)
+                self.assertIn(str(p), str(ctx.exception))
+                sha = mf.write_text_atomic(p, text + "x\r\n", encoding)
+                self.assertEqual(p.read_bytes(), mark + (text + "x\r\n").encode(encoding))
+                self.assertEqual(sha, hashlib.sha256(p.read_bytes()).hexdigest())
+
+    def test_utf8_keeps_its_mark_in_the_text(self):
+        data = b"\xef\xbb\xbfalias ll='ls'\n"
+        self.assertEqual(mf.decode_text(data), ("﻿alias ll='ls'\n", "utf-8"))
+        self.assertEqual(mf.encode_text("﻿alias ll='ls'\n"), data)
+        p = self.tmp / "rc"
+        p.write_bytes(data)
+        self.assertEqual(mf.read_text(p), "﻿alias ll='ls'\n")
+        self.assertEqual(mf.read_text_encoded(p), ("﻿alias ll='ls'\n", "utf-8"))
+        self.assertIsNone(mf.read_text_encoded(self.tmp / "nope"))
+
+    def test_text_an_edit_would_corrupt_is_refused(self):
+        p = self.tmp / "profile.ps1"
+        for data in (b"\xff\xfeS\x00e\x00t", b"S\x00e\x00t\x00\r\x00\n\x00"):
+            with self.subTest(data=data):
+                p.write_bytes(data)
+                with self.assertRaises(mf.TextEncodingError) as ctx:
+                    mf.read_text_encoded(p)
+                self.assertIn(str(p), str(ctx.exception))
+                with self.assertRaises(mf.TextEncodingError):
+                    mf.read_text(p)
+        with self.assertRaises(ValueError):
+            mf.encode_text("x", "latin-1")
+
+    def test_lone_utf16_surrogates_round_trip(self):
+        data = b"\xff\xfe" + b"a\x00\x00\xd8b\x00"  # an unpaired high surrogate between a and b
+        text, encoding = mf.decode_text(data)
+        self.assertEqual(mf.encode_text(text, encoding), data)
+
     @unittest.skipIf(os.name == "nt", "POSIX permissions")
     def test_existing_mode_is_kept(self):
         p = self.tmp / "settings.json"

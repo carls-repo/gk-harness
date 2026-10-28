@@ -8,6 +8,7 @@ file is still exactly as the install left it. Paths are stored posix.
 """
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import os
@@ -22,10 +23,21 @@ FORMAT = 1
 ACTION_TYPES = ("file", "settings", "claude_md", "shell_rc", "legacy_move")
 WRITE_RETRIES = 10
 WRITE_RETRY_DELAY = 0.1
+# The encodings a text file the installer edits may be in. A UTF-16 or UTF-32 file is known by
+# its byte-order mark (Windows PowerShell 5.1's >, >> and Out-File write UTF-16LE with one);
+# anything else is read as UTF-8. The UTF-32 marks come first: FF FE 00 00 starts with FF FE.
+TEXT_ENCODINGS = ("utf-8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be")
+_MARKED = ((codecs.BOM_UTF32_LE, "utf-32-le"), (codecs.BOM_UTF32_BE, "utf-32-be"),
+           (codecs.BOM_UTF16_LE, "utf-16-le"), (codecs.BOM_UTF16_BE, "utf-16-be"))
 
 
 class ManifestError(ValueError):
     """The journal exists but cannot be read as one; the message names the file."""
+
+
+class TextEncodingError(ValueError):
+    """A text file the installer would edit is in an encoding it cannot edit safely, or is
+    UTF-16/UTF-32 where only UTF-8 is expected; the message names the file."""
 
 
 # --- the journal ----------------------------------------------------------------------------
@@ -122,14 +134,62 @@ def sha256_file(path: Any) -> str | None:
         return None
 
 
-def read_text(path: Any) -> str | None:
-    """The file as text with its newlines untouched, or None when it is absent. Bytes that are
-    not UTF-8 are carried through (surrogateescape), so a write gives them back unchanged."""
+def decode_text(data: bytes, label: str = "the file") -> tuple:
+    """(text, encoding), encoding one of TEXT_ENCODINGS.
+
+    A UTF-16 or UTF-32 byte-order mark selects that encoding; the mark is not part of the text
+    and encode_text puts it back. Anything else is UTF-8: a UTF-8 mark stays in the text as
+    U+FEFF, and bytes that are not UTF-8 are carried through (surrogateescape). Newlines are
+    untouched. Raises TextEncodingError for a UTF-16/UTF-32 file cut short, or for unmarked
+    bytes holding NUL (UTF-16 without a mark), because an edit would corrupt either.
+    """
+    for mark, encoding in _MARKED:
+        if data.startswith(mark):
+            try:
+                return data[len(mark):].decode(encoding, "surrogatepass"), encoding
+            except UnicodeDecodeError:
+                raise TextEncodingError("%s is not valid %s text (cut short?)"
+                                        % (label, encoding.upper())) from None
+    if b"\x00" in data:
+        raise TextEncodingError("%s holds NUL bytes, so it is not UTF-8 text (UTF-16 without a "
+                                "byte-order mark?)" % label)
+    return data.decode("utf-8", "surrogateescape"), "utf-8"
+
+
+def encode_text(text: str, encoding: str = "utf-8") -> bytes:
+    """text in encoding (one of TEXT_ENCODINGS), with the byte-order mark a UTF-16 or UTF-32
+    file is known by; the inverse of decode_text."""
+    if encoding == "utf-8":
+        return text.encode("utf-8", "surrogateescape")
+    for mark, name in _MARKED:
+        if name == encoding:
+            return mark + text.encode(name, "surrogatepass")
+    raise ValueError("unknown text encoding %r" % (encoding,))
+
+
+def read_text_encoded(path: Any) -> tuple | None:
+    """(text, encoding) as decode_text gives them, or None when the file is absent. For a file
+    whose encoding must be kept, such as a PowerShell profile: write it back with
+    write_text_atomic(path, text, encoding)."""
     try:
         data = Path(path).read_bytes()
     except FileNotFoundError:
         return None
-    return data.decode("utf-8", "surrogateescape")
+    return decode_text(data, str(path))
+
+
+def read_text(path: Any) -> str | None:
+    """The file as UTF-8 text with its newlines untouched, or None when it is absent. Bytes that
+    are not UTF-8 are carried through (surrogateescape), so a write gives them back unchanged.
+    Raises TextEncodingError for a UTF-16 or UTF-32 file (which a UTF-8 write would re-encode)
+    and as decode_text does."""
+    got = read_text_encoded(path)
+    if got is None:
+        return None
+    text, encoding = got
+    if encoding != "utf-8":
+        raise TextEncodingError("%s is %s text, not UTF-8" % (path, encoding.upper()))
+    return text
 
 
 def _remove_quietly(path: str) -> None:
@@ -182,9 +242,10 @@ def write_bytes_atomic(path: Any, data: bytes) -> str:
     return sha256_bytes(data)
 
 
-def write_text_atomic(path: Any, text: str) -> str:
-    """write_bytes_atomic of text as UTF-8, newlines untouched (surrogateescape, as read_text)."""
-    return write_bytes_atomic(path, text.encode("utf-8", "surrogateescape"))
+def write_text_atomic(path: Any, text: str, encoding: str = "utf-8") -> str:
+    """write_bytes_atomic of encode_text(text, encoding): UTF-8 by default (surrogateescape, as
+    read_text), newlines untouched; returns the sha256 of the bytes written."""
+    return write_bytes_atomic(path, encode_text(text, encoding))
 
 
 def write_json_atomic(path: Any, obj: Any) -> str:
