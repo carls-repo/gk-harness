@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -177,7 +176,7 @@ class UpdateCheckTests(SeatHookBase):
         self.assertTrue(self.stamp()["available"])
         # Origin is now unreachable: a fresh check would find nothing, so the line can only
         # come from the stamp.
-        shutil.rmtree(self.bare)
+        self.bare.rename(self.tmp / "gone.git")
         out = self.start(source="startup", model="claude-opus-5-5", effort="high")
         self.assertIn(self.expected_line(), self.card_of(out))
         self.assertTrue(self.stamp()["available"])
@@ -202,7 +201,7 @@ class UpdateCheckTests(SeatHookBase):
         self.start(source="startup", model="claude-opus-5-5")
         st = self.cdir / "state" / "gk-harness-update.json"
         st.write_text(json.dumps({"checked": "2020-01-01T00:00:00Z", "available": True}))
-        shutil.rmtree(self.bare)  # recheck fails -> available false
+        self.bare.rename(self.tmp / "gone.git")  # recheck fails -> available false
         out = self.start(source="startup", model="claude-opus-5-5")
         self.assertNotIn("update available", self.card_of(out))
         self.assertFalse(self.stamp()["available"])
@@ -229,11 +228,25 @@ class UpdateCheckTests(SeatHookBase):
 
     def test_update_check_offline(self):
         self.make_repos()
-        shutil.rmtree(self.bare)
-        t0 = time.monotonic()
+        self.bare.rename(self.tmp / "gone.git")
         out = self.start(source="startup", model="claude-opus-5-5")
-        self.assertLessEqual(time.monotonic() - t0, 4)
         self.assertNotIn("update available", self.card_of(out))
+        self.assertFalse(self.stamp()["available"])
+
+    def test_update_check_hanging_remote(self):
+        self.make_repos()
+        subprocess.run(["git", "-C", str(self.root), "remote", "set-url", "origin",
+                        "ssh://example.invalid/x.git"], check=True, capture_output=True)
+        ssh = self.tmp / "slow_ssh.py"
+        ssh.write_text("import sys, time\nsys.stderr.write('Enter passphrase: ')\n"
+                       "sys.stderr.flush()\ntime.sleep(20)\n")
+        cmd = '"%s" "%s"' % (Path(sys.executable).as_posix(), ssh.as_posix())
+        t0 = time.monotonic()
+        proc = self.run_hook({"hook_event_name": "SessionStart", "session_id": "s1",
+                              "source": "startup", "model": "claude-opus-5-5"},
+                             extra_env={"GIT_SSH_COMMAND": cmd}, timeout=15)
+        self.assertLessEqual(time.monotonic() - t0, 4.5)
+        self.assertNotIn("update available", self.card_of(self.out(proc)))
         self.assertFalse(self.stamp()["available"])
 
 

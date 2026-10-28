@@ -25,14 +25,21 @@ def stamp_path() -> Path:
 
 
 def _git(root: str, args: list[str]) -> subprocess.CompletedProcess | None:
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="", SSH_ASKPASS="",
+               SSH_ASKPASS_REQUIRE="never", GCM_INTERACTIVE="never")
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=3")
     for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
         env.pop(k, None)
+    extra: dict = {}
+    if os.name == "nt":
+        extra["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    else:
+        extra["start_new_session"] = True  # no controlling tty for prompts
     try:
         return subprocess.run(["git", "-C", root] + args, stdin=subprocess.DEVNULL,
-                              capture_output=True, encoding="utf-8", errors="replace",
-                              timeout=GIT_TIMEOUT, env=env)
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              encoding="utf-8", errors="replace",
+                              timeout=GIT_TIMEOUT, env=env, **extra)
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
 
@@ -76,9 +83,13 @@ def update_notice() -> str | None:
             age = None
         if age is not None and 0 <= age < UPDATE_INTERVAL:
             return update_line(root) if stamp.get("available") is True else None
+    # Count the attempt before the network call, so a hook killed mid-check is not retried
+    # at every startup.
+    checked = time.strftime(_TS, time.gmtime())
+    gk_common.write_json(stamp_path(), {"checked": checked, "available": False})
     available = origin_is_ahead(root)
-    gk_common.write_json(stamp_path(), {"checked": time.strftime(_TS, time.gmtime()),
-                                        "available": available})
+    if available:
+        gk_common.write_json(stamp_path(), {"checked": checked, "available": True})
     return update_line(root) if available else None
 
 
