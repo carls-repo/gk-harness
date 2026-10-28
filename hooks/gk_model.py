@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 from pathlib import Path
 from typing import Any
@@ -42,16 +43,24 @@ def model_from_transcript(path: Any, max_bytes: int = TAIL_BYTES) -> str | None:
     if not isinstance(path, (str, bytes, os.PathLike)):
         return None  # an int (or bool) would be taken as a file descriptor and closed
     try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return None  # a FIFO would block in open(); a character device never ends
         with open(path, "rb") as f:
             size = f.seek(0, os.SEEK_END)
             start = max(0, size - max_bytes)
-            f.seek(start)
-            raw = f.read()
+            f.seek(max(0, start - 1))
+            raw = f.read(max_bytes + (1 if start > 0 else 0))
     except Exception:
         return None
-    lines = raw.split(b"\n")
     if start > 0:
-        lines = lines[1:]  # the first line is probably cut in half
+        # raw begins one byte before the window: if that byte ends a line the first line is
+        # whole; otherwise the first line is cut and is dropped.
+        if raw[:1] == b"\n":
+            raw = raw[1:]
+        else:
+            nl = raw.find(b"\n")
+            raw = raw[nl + 1:] if nl >= 0 else b""
+    lines = raw.split(b"\n")
     for line in reversed(lines):
         if not line.strip():
             continue
@@ -101,20 +110,28 @@ def save_seat(sid: Any, model: Any, profile: Any, effort: Any, source: Any) -> b
     return gk_common.write_json(seat_path(sid), rec)
 
 
+def _clip(value: Any, limit: int = 80) -> str:
+    text = value if isinstance(value, str) else str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
 def seat_card(model: Any, profile: Any, effort: Any) -> str:
     """The one-paragraph seat notice injected into the session."""
-    if profile not in MODE:
+    if not isinstance(profile, str) or profile not in MODE:
         return ("gk-harness seat: the model was not reported. Read the model named in your "
                 "system prompt, apply that mode, and pass profile explicitly on every "
                 "Workflow call.")
-    card = ("gk-harness seat: %s at %s → Mode %s (profile '%s'). "
+    reported = profile_for_model(model) is not None
+    name = _clip(model) if reported else "an unreported model"
+    card = ("gk-harness seat: %s at %s \u2192 Mode %s (profile '%s'). "
             "Pass profile: '%s' on every Workflow call."
-            % (model, effort or "unknown effort", MODE[profile], profile, profile))
+            % (name, _clip(effort) if effort else "unknown effort", MODE[profile], profile,
+               profile))
     if effort != "high":
         card += " The policy expects effort high."
-    if not in_lineup(model):
+    if reported and not in_lineup(model):
         card += (" %s is not in the lineup, so Mode %s rules apply; say so to Carl in your "
-                 "first reply." % (model, MODE[profile]))
+                 "first reply." % (name, MODE[profile]))
     return card
 
 

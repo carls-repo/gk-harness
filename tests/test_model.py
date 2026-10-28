@@ -32,7 +32,7 @@ class ModelTest(unittest.TestCase):
             ("claude-sonnet-5-5", "sonnet"), ("claude-opus-5-5[1m]", "opus"),
             ("opus", "opus"), ("fable", "fable"),
             ("us.anthropic.claude-opus-5-5-v1:0", "opus"),
-            ("claude-haiku-5-5", "sonnet"), ("claude-next-7", "sonnet"),
+            ("Claude-OPUS-5-5", "opus"), ("claude-haiku-5-5", "sonnet"), ("claude-next-7", "sonnet"),
             ("default", None), ("", None), (None, None), ("<synthetic>", None), (42, None),
         ]
         for inp, want in pairs:
@@ -70,6 +70,53 @@ class ModelTest(unittest.TestCase):
         t = time.monotonic()
         self.assertIsNone(gk_model.model_from_transcript(p))
         self.assertLess(time.monotonic() - t, 0.2)
+
+    def test_transcript_skips_odd_message_shapes(self):
+        p = Path(self.tmp) / "odd.jsonl"
+        good = '{"type":"assistant","message":{"model":"claude-opus-5-5"}}\n'
+        odd = ['{"type":"assistant"}\n', '{"type":"assistant","message":null}\n',
+               '{"type":"assistant","message":{"model":42}}\n',
+               '{"type":"assistant","message":"claude-fable-5-1"}\n']
+        p.write_text(good + "".join(odd), encoding="utf-8")
+        self.assertEqual(gk_model.model_from_transcript(p), "claude-opus-5-5")
+
+    def test_transcript_window_inside_multibyte_char(self):
+        p = Path(self.tmp) / "mb.jsonl"
+        a = '{"type":"assistant","message":{"model":"claude-opus-5-5"}}\n'
+        u = '{"type":"user","message":{"content":"' + "\u00e9" * 40 + '"}}\n'
+        data = (a + u).encode("utf-8")
+        start = len(a.encode()) + len(b'{"type":"user","message":{"content":"') + 1  # mid-char
+        self.assertEqual(data[start] & 0xC0, 0x80)
+        p.write_bytes(data)
+        self.assertEqual(gk_model.model_from_transcript(p, max_bytes=len(data) - start),
+                         None)
+        data2 = data + a.replace("opus", "fable").encode()
+        p.write_bytes(data2)
+        self.assertEqual(gk_model.model_from_transcript(p, max_bytes=len(data2) - start),
+                         "claude-fable-5-5")
+
+    def test_transcript_cut_first_line_is_dropped(self):
+        # the remainder of the cut line is itself valid JSON; it must not be believed
+        p = Path(self.tmp) / "cut.jsonl"
+        frag = '{"type":"assistant","message":{"model":"claude-fable-5-1"}}'
+        data = ("0" + frag + "\n").encode()
+        p.write_bytes(data)
+        self.assertIsNone(gk_model.model_from_transcript(p, max_bytes=len(frag) + 1))
+
+    def test_transcript_window_on_line_boundary_keeps_first_line(self):
+        p = Path(self.tmp) / "edge.jsonl"
+        a = '{"type":"assistant","message":{"model":"claude-opus-5-5"}}\n'
+        pad = '{"type":"user","message":{"content":"zz"}}\n'
+        p.write_text(pad + a, encoding="utf-8")
+        self.assertEqual(gk_model.model_from_transcript(p, max_bytes=len(a)), "claude-opus-5-5")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX only")
+    def test_transcript_fifo_returns_none_promptly(self):
+        p = Path(self.tmp) / "fifo"
+        os.mkfifo(str(p))
+        t = time.monotonic()
+        self.assertIsNone(gk_model.model_from_transcript(p))
+        self.assertLess(time.monotonic() - t, 1.0)
 
     def test_transcript_missing_or_garbage(self):
         self.assertIsNone(gk_model.model_from_transcript(Path(self.tmp) / "nope.jsonl"))
@@ -122,6 +169,21 @@ class ModelTest(unittest.TestCase):
             c(None, None, None),
             "gk-harness seat: the model was not reported. Read the model named in your system "
             "prompt, apply that mode, and pass profile explicitly on every Workflow call.")
+        for model in (None, "", "default", "<synthetic>", 42):
+            card = c(model, "opus", "high")
+            self.assertIn("an unreported model at high", card, model)
+            self.assertNotIn("None", card)
+            self.assertNotIn("not in the lineup", card)
+        self.assertIn("The policy expects", c(None, "opus", "low"))
+        self.assertEqual(c(None, ["opus"], "high"), c(None, None, None))
+        self.assertEqual(c("x", {}, "high"), c(None, None, None))
+        long_model = "claude-next-" + "m" * 300
+        card = c(long_model, "sonnet", "e" * 300)
+        self.assertLess(len(card), 600)
+        self.assertIn("\u2026", card)
+        self.assertNotIn("m" * 100, card)
+        self.assertNotIn("e" * 100, card)
+        self.assertLess(len(c(long_model, "sonnet", "high")), 600)
         for card in (c("claude-fable-5-1", "fable", "xhigh"), c("claude-next-7", "sonnet", None),
                      c(None, None, None)):
             self.assertLess(len(card), 600)
