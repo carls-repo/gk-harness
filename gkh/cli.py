@@ -1,14 +1,688 @@
+"""The installer's commands: install [--retire-legacy], uninstall, update and status.
+
+install reads everything and decides every write before it makes the first one, so a problem
+found then (the preflight) stops it with nothing changed (exit 2). The writes then run in a fixed
+order, and each is recorded in the action journal (backups/gk-harness/manifest.json) with the
+state it replaced, so uninstall can replay them in reverse. An install that finds nothing to
+change writes nothing, not even the journal.
+"""
 from __future__ import annotations
 
+import functools
+import json
+import os
+import shutil
+import subprocess
 import sys
+from pathlib import Path
+from typing import Any, Callable
+
+from . import VERSION, claude_md, legacy, manifest, paths, shell
+from . import settings_merge as sm
 
 COMMANDS = ("install", "uninstall", "update", "status")
+RETIRE = "--retire-legacy"
+OPTIONS = {"install": (RETIRE,), "update": (RETIRE,)}
+USAGE = ("usage: install [install [%s] | uninstall | update [%s] | status]\n" % (RETIRE, RETIRE))
+# Sources install will not run without. It deploys every hooks/*.py, agents/worker-*.md and
+# workflows/gk-*.js present; there may be no workflows yet.
+WORKERS = ("worker-haiku-low", "worker-haiku", "worker-sonnet", "worker-opus",
+           "worker-opus-xhigh", "worker-opus-max", "worker-fable", "worker-fable-max")
+HOOK_SUPPORT = ("gk_common.py", "gk_model.py", "gk-remote-skip.py")
+OTHER_SOURCES = ("policy.md", "shell/aliases.sh", "shell/aliases.ps1")
+DEPLOYED = (("hooks", "*.py", ("hooks", "gk-harness")),
+            ("agents", "worker-*.md", ("agents",)),
+            ("workflows", "gk-*.js", ("workflows",)))
+EXECUTION_POLICY_NOTICE = (
+    "gk-harness: the gk, gk-opus and gk-sonnet functions load from your PowerShell profile only "
+    "when PowerShell may run profile scripts. If a new PowerShell window does not know them, "
+    "run: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned")
+_GIT_REPO_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+
+
+class Stop(Exception):
+    """A problem found before the first write: the command exits 2 and changes nothing."""
+
+
+def _stopped(problem: Any) -> int:
+    sys.stderr.write("gk-harness: %s; nothing was changed.\n" % problem)
+    return 2
+
+
+def _warn(text: str) -> None:
+    sys.stderr.write("gk-harness: %s\n" % text)
+
+
+def _plural(n: int, word: str) -> str:
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+
+
+def _windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _command_line(root: Any, command: str) -> str:
+    if _windows():
+        return ('powershell -NoProfile -ExecutionPolicy Bypass -File "%s/install.ps1" %s'
+                % (paths.posix(root), command))
+    return "%s/install.sh %s" % (paths.posix(root), command)
+
+
+def _read(path: Path) -> bytes | None:
+    """The file's bytes, or None when it is absent. Raises Stop when it cannot be read."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise Stop("%s cannot be read: %s" % (paths.posix(path), e.strerror or e)) from None
+
+
+def _sha(path: Path) -> str | None:
+    """The file's sha256; None when absent; "" when it cannot be read (so it never matches)."""
+    try:
+        return manifest.sha256_file(path)
+    except OSError:
+        return ""
+
+
+def _empty(text: str) -> bool:
+    """Nothing but whitespace, after any byte-order mark."""
+    return text.lstrip(claude_md.BOM).strip() == ""
+
+
+# --- sources --------------------------------------------------------------------------------
+
+def _required() -> list:
+    scripts = sorted({s for _, _, names in sm.REGISTRATIONS for s in names} | set(HOOK_SUPPORT))
+    return (["hooks/" + s for s in scripts] + ["agents/%s.md" % w for w in WORKERS]
+            + list(OTHER_SOURCES))
+
+
+def _check_sources(root: Path) -> None:
+    missing = [rel for rel in _required() if not root.joinpath(*rel.split("/")).is_file()]
+    if missing:
+        raise Stop("the gk-harness checkout %s is missing %s"
+                   % (paths.posix(root), ", ".join(missing)))
+
+
+def _deployed(root: Path, cdir: Path) -> list:
+    """[(group, source, target)] for every file install copies, in copy order."""
+    out = []
+    for group, pattern, target in DEPLOYED:
+        folder = root / group
+        if not folder.is_dir():
+            continue
+        for src in sorted(folder.glob(pattern)):
+            if src.is_file():
+                out.append((group, src, cdir.joinpath(*target) / src.name))
+    return out
+
+
+# --- install: the plan ----------------------------------------------------------------------
+
+class _Step:
+    """One planned write: data replaces path, which is backed up first when it exists."""
+
+    def __init__(self, path: Path, data: bytes, existed: bool, backup_rel: str,
+                 record: Callable[[dict, str], dict], note: str, group: str | None = None):
+        self.path = path
+        self.data = data
+        self.existed = existed
+        self.backup_rel = backup_rel  # where its backup goes, inside the backup folder
+        self.record = record  # (prior, sha256) -> the journal action
+        self.note = note
+        self.group = group  # "hooks", "agents" or "workflows" (copied files), "rc", or None
+
+
+def _rel(path: Path, cdir: Path) -> str:
+    return path.relative_to(cdir).as_posix()
+
+
+def _preflight() -> tuple:
+    if sys.version_info < (3, 9):
+        raise Stop("Python 3.9 or newer is required (this is %d.%d)"
+                   % tuple(sys.version_info[:2]))
+    python = paths.python_exe()
+    if python is None:
+        raise Stop("cannot tell which Python is running the installer")
+    root, cdir = paths.harness_root(), paths.claude_dir()
+    for p in (python, cdir, root):
+        try:
+            paths.quotable(p)
+        except ValueError as e:
+            raise Stop(e) from None
+    return root, cdir, python
+
+
+def _copy_steps(root: Path, cdir: Path) -> list:
+    steps = []
+    for group, src, dst in _deployed(root, cdir):
+        data = _read(src)
+        if data is None:
+            raise Stop("%s is missing" % paths.posix(src))
+        current = _read(dst)
+        if current != data:
+            steps.append(_Step(dst, data, current is not None, _rel(dst, cdir),
+                               functools.partial(manifest.file_action, dst), "", group))
+    return steps
+
+
+def _policy_step(root: Path, cdir: Path) -> _Step | None:
+    try:
+        policy = (_read(root / "policy.md") or b"").decode("utf-8")
+    except UnicodeDecodeError:
+        raise Stop("%s/policy.md is not UTF-8 text" % paths.posix(root)) from None
+    md = cdir / "CLAUDE.md"
+    try:
+        block = claude_md.render_block(policy, VERSION)
+        existing = manifest.read_text(md)
+        text, mode = claude_md.apply(existing, block)
+    except (claude_md.BlockError, manifest.TextEncodingError) as e:
+        raise Stop(e) from None
+    except OSError as e:
+        raise Stop("%s cannot be read: %s" % (paths.posix(md), e.strerror or e)) from None
+    if mode == "unchanged":
+        return None
+    note = {"created": "CLAUDE.md: created with the policy block",
+            "appended": "CLAUDE.md: policy block added after this machine's notes",
+            "updated": "CLAUDE.md: policy block updated",
+            "replaced_old_policy": "CLAUDE.md: the old policy replaced by the policy block"}[mode]
+    return _Step(md, manifest.encode_text(text), existing is not None, "CLAUDE.md",
+                 functools.partial(manifest.claude_md_action, md, mode=mode), note)
+
+
+def _config_step(root: Path, cdir: Path, python: str) -> _Step | None:
+    path = paths.harness_config_path()
+    want = {"version": VERSION, "root": paths.posix(root), "python": paths.posix(python)}
+    raw = _read(path)
+    try:
+        have = json.loads(raw.decode("utf-8")) if raw is not None else None
+    except (ValueError, RecursionError):
+        have = None
+    if isinstance(have, dict) and all(have.get(k) == v for k, v in want.items()):
+        return None
+    want["installed_at"] = paths.utc_iso()
+    data = (json.dumps(want, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    return _Step(path, data, raw is not None, _rel(path, cdir),
+                 functools.partial(manifest.file_action, path), "gk-harness.json: written")
+
+
+def _settings_step(cdir: Path, python: str) -> _Step | None:
+    path = cdir / "settings.json"
+    try:
+        current = sm.load_strict(path)
+        new, undo = sm.merge({} if current is None else current, python, cdir)
+    except ValueError as e:
+        raise Stop(e) from None
+    text = sm.dumps(new)
+    if current is not None and text == sm.dumps(current):
+        return None
+    note = "settings.json: hook entries registered, ultracode on"
+    n = len(undo["removed"])
+    if n:
+        note += ", %d old gk hook %s removed" % (n, "entry" if n == 1 else "entries")
+    return _Step(path, text.encode("utf-8"), current is not None, "settings.json",
+                 functools.partial(manifest.settings_action, path, undo=undo), note)
+
+
+def _rc_step(root: Path, notices: list) -> _Step | None:
+    windows = _windows()
+    rc = paths.rc_file()
+    if rc is None:
+        notices.append("gk-harness: no PowerShell profile found (neither pwsh nor powershell "
+                       "reported $PROFILE), so the gk shortcuts were not set up")
+        return None
+    try:
+        got = manifest.read_text_encoded(paths.posix(rc))  # posix, as the messages name it
+        text, encoding = got if got is not None else (None, "utf-8")
+        removed: list = []
+        kept = text
+        if text is not None:
+            kept, removed = shell.strip_legacy_aliases(text)
+        new, mode = shell.apply(kept, shell.render_block(root, windows), label=paths.posix(rc),
+                                powershell=windows)
+    except (manifest.TextEncodingError, claude_md.BlockError) as e:
+        problem = str(e)
+    except OSError as e:
+        problem = "%s cannot be read: %s" % (paths.posix(rc), e.strerror or e)
+    else:
+        if new == text:
+            return None
+        note = "%s: gk shortcut block %s" % (paths.posix(rc), {
+            "unchanged": "already present", "updated": "updated"}.get(mode, "added"))
+        if removed:
+            note += ", %s removed" % _plural(len(removed), "old gk alias")
+        return _Step(rc, manifest.encode_text(new, encoding), text is not None,
+                     "rc/" + rc.name,
+                     functools.partial(manifest.shell_rc_action, rc, removed_aliases=removed),
+                     note, "rc")
+    notices.append("gk-harness: %s; the gk shortcuts were not set up" % problem)
+    return None
+
+
+def _plan(root: Path, cdir: Path, python: str, retire: bool) -> dict:
+    _check_sources(root)
+    notices: list = []
+    steps = _copy_steps(root, cdir)
+    # The hooks are in place before settings.json names them, and the old entries leave
+    # settings.json before --retire-legacy moves their files.
+    for step in (_policy_step(root, cdir), _config_step(root, cdir, python),
+                 _settings_step(cdir, python), _rc_step(root, notices)):
+        if step is not None:
+            steps.append(step)
+    backup = paths.new_backup_dir()
+    moves = legacy.retire_plan(cdir, backup) if retire else []
+    return {"steps": steps, "moves": moves, "backup": backup, "notices": notices}
+
+
+# --- install: the writes --------------------------------------------------------------------
+
+def _apply(plan: dict, record: dict, done: list) -> None:
+    backup = plan["backup"]
+    for step in plan["steps"]:
+        prior = manifest.prior_absent()
+        if step.existed:
+            saved = backup.joinpath(*step.backup_rel.split("/"))
+            manifest.copy_file(step.path, saved, private=True)
+            record["backup"] = paths.posix(backup)
+            prior = manifest.prior_backup(saved)
+        created: list = []
+        sha = manifest.write_bytes_atomic(step.path, step.data, created=created)
+        record["actions"].extend(manifest.folder_action(d) for d in created)
+        record["actions"].append(step.record(prior, sha))
+        done.append(step)
+    for move in plan["moves"]:
+        move["dst"].parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(move["src"]), str(move["dst"]))
+        record["backup"] = paths.posix(backup)
+        record["actions"].append(manifest.legacy_move_action(move["src"], move["dst"]))
+        done.append(move)
+
+
+def _report(done: list, record: dict, cdir: Path, root: Path) -> None:
+    print("gk-harness %s installed into %s" % (VERSION, paths.posix(cdir)))
+    for group, label in (("hooks", "hooks/gk-harness"), ("agents", "agents"),
+                         ("workflows", "workflows")):
+        copied = [s for s in done if isinstance(s, _Step) and s.group == group]
+        if copied:
+            saved = sum(1 for s in copied if s.existed)
+            print("  %s: %s copied%s" % (label, _plural(len(copied), "file"),
+                                        " (%d backed up first)" % saved if saved else ""))
+    for step in done:
+        if isinstance(step, _Step) and step.group in (None, "rc"):
+            print("  " + step.note)
+    moves = [m for m in done if isinstance(m, dict)]
+    if moves:
+        print("  %s retired into %s/legacy" % (_plural(len(moves), "old file or folder"),
+                                               record["backup"]))
+    if record["backup"]:
+        print("backups: %s" % record["backup"])
+    print("undo with: %s" % _command_line(root, "uninstall"))
+
+
+def install(retire: bool) -> int:
+    try:
+        root, cdir, python = _preflight()
+        journal = manifest.load(paths.manifest_path())
+        plan = _plan(root, cdir, python, retire)
+    except (Stop, manifest.ManifestError) as e:
+        return _stopped(e)
+    for notice in plan["notices"]:
+        print(notice)
+    if not plan["steps"] and not plan["moves"]:
+        print("gk-harness %s is installed in %s; nothing to change." % (VERSION,
+                                                                       paths.posix(cdir)))
+        return 0
+    record = manifest.new_install(VERSION, None)
+    done: list = []
+    failed = None
+    try:
+        _apply(plan, record, done)
+    except OSError as e:
+        failed = e
+    finally:
+        if record["actions"]:
+            journal["installs"].append(record)
+            manifest.save(paths.manifest_path(), journal)
+    if failed is not None:
+        _warn("%s; install stopped part-way. What it changed is in the journal: run install "
+              "again to finish, or uninstall to undo it." % failed)
+        return 1
+    _report(done, record, cdir, root)
+    if _windows() and any(isinstance(s, _Step) and s.group == "rc" for s in done):
+        print(EXECUTION_POLICY_NOTICE)
+    return 0
+
+
+# --- uninstall ------------------------------------------------------------------------------
+
+def _unlink(path: Path) -> None:
+    try:
+        os.unlink(str(path))
+    except FileNotFoundError:
+        pass
+
+
+def _restore(path: Path, prior: Any, private: bool) -> None:
+    """Put back the state an install recorded as replaced: no file, or its backup."""
+    state = prior.get("state") if isinstance(prior, dict) else None
+    if state == "absent":
+        _unlink(path)
+        return
+    saved = prior.get("backup") if state == "backup" else None
+    if not isinstance(saved, str):
+        _warn("the journal does not say what %s replaced; left in place" % paths.posix(path))
+    elif not Path(saved).is_file():
+        _warn("the backup %s is missing; left in place: %s" % (saved, paths.posix(path)))
+    else:
+        manifest.copy_file(Path(saved), path, private=private)
+
+
+def _undo_file(a: dict, private: bool, surgical: Callable[[Path, dict], None]) -> None:
+    """The shared reverse of a recorded write: the prior state when the file is exactly as the
+    install left it (or gone, when there is a backup to bring back), else surgical()."""
+    path = Path(a["path"])
+    current = _sha(path)
+    if current == a.get("sha256"):
+        _restore(path, a.get("prior"), private)
+    elif current is None:
+        if isinstance(a.get("prior"), dict) and a["prior"].get("state") == "backup":
+            _restore(path, a["prior"], private)
+    else:
+        surgical(path, a)
+
+
+def _changed_copy(path: Path, a: dict) -> None:
+    _warn("changed since install, left in place: %s" % paths.posix(path))
+
+
+def _surgical_settings(path: Path, a: dict) -> None:
+    try:
+        current = sm.load_strict(paths.posix(path))  # posix, so messages name it as the journal
+    except sm.SettingsError as e:
+        _warn("%s; its gk-harness hook entries were left in it" % e)
+        return
+    if current is None:
+        return
+    new = sm.unmerge(current, a.get("undo"))
+    if sm.dumps(new) != sm.dumps(current):
+        manifest.write_text_atomic(path, sm.dumps(new))
+
+
+def _surgical_claude_md(path: Path, a: dict) -> None:
+    try:
+        text = manifest.read_text(paths.posix(path))
+        if text is None:
+            return
+        stripped = claude_md.strip(text)
+    except (manifest.TextEncodingError, claude_md.BlockError) as e:
+        _warn("%s; the policy block was left in it" % e)
+        return
+    except OSError as e:
+        _warn("%s cannot be read (%s); left in place" % (paths.posix(path), e.strerror or e))
+        return
+    prior = a.get("prior") if isinstance(a.get("prior"), dict) else {}
+    if a.get("mode") == "replaced_old_policy" and prior.get("state") == "backup":
+        if _empty(stripped):
+            _restore(path, prior, False)
+            return
+        print("gk-harness: %s changed since install, so only the policy block was removed; the "
+              "old policy it replaced is in %s" % (paths.posix(path), prior.get("backup")))
+    elif prior.get("state") == "absent" and _empty(stripped):
+        _unlink(path)
+        return
+    if stripped != text:
+        manifest.write_text_atomic(path, stripped)
+
+
+def _surgical_rc(path: Path, a: dict) -> None:
+    try:
+        got = manifest.read_text_encoded(paths.posix(path))
+        if got is None:
+            return
+        text, encoding = got
+        stripped = shell.strip(text, label=paths.posix(path))
+    except (manifest.TextEncodingError, claude_md.BlockError) as e:
+        _warn("%s; the gk-harness block was left in it" % e)
+        return
+    except OSError as e:
+        _warn("%s cannot be read (%s); left in place" % (paths.posix(path), e.strerror or e))
+        return
+    prior = a.get("prior") if isinstance(a.get("prior"), dict) else {}
+    if prior.get("state") == "absent" and _empty(stripped):
+        _unlink(path)
+    elif stripped != text:
+        manifest.write_text_atomic(path, stripped, encoding)
+    lines = [r.get("text") for r in a.get("removed_aliases") or [] if isinstance(r, dict)]
+    if lines:
+        print("gk-harness: %s changed since install, so the old gk aliases it held were not put "
+              "back; they were:\n%s" % (paths.posix(path),
+                                        "\n".join("  %s" % s for s in lines)))
+
+
+def _clear_pycache(folder: Path) -> None:
+    """Remove the __pycache__ Python leaves beside the hooks, when it holds only .pyc files."""
+    cache = folder / "__pycache__"
+    if cache.is_symlink() or not cache.is_dir():
+        return
+    names = os.listdir(str(cache))
+    if all(n.endswith(".pyc") for n in names):
+        for n in names:
+            _unlink(cache / n)
+        try:
+            os.rmdir(str(cache))
+        except OSError:
+            pass
+
+
+def _undo_folder(a: dict) -> None:
+    folder = Path(a["path"])
+    if folder.name == "gk-harness" and folder.parent.name == "hooks":
+        _clear_pycache(folder)
+    try:
+        os.rmdir(str(folder))
+    except OSError:
+        pass  # absent, or holds something that is not ours
+
+
+def _undo_move(a: dict) -> None:
+    src, dst = Path(a["src"]), Path(a["dst"])
+    if os.path.lexists(str(src)):
+        _warn("%s exists again, so the retired copy stays in %s" % (a["src"], a["dst"]))
+    elif not os.path.lexists(str(dst)):
+        _warn("the retired copy %s is missing, so %s was not put back" % (a["dst"], a["src"]))
+    else:
+        src.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(dst), str(src))
+
+
+def _undo(a: Any) -> None:
+    kind = a.get("type") if isinstance(a, dict) else None
+    keys = {"legacy_move": ("src", "dst"), "folder": ("path",)}.get(kind, ("path", "sha256"))
+    if kind not in manifest.ACTION_TYPES or not all(isinstance(a.get(k), str) for k in keys):
+        _warn("skipped a journal entry it cannot read: %s" % json.dumps(a)[:200])
+    elif kind == "file":
+        _undo_file(a, False, _changed_copy)
+    elif kind == "settings":
+        _undo_file(a, True, _surgical_settings)
+    elif kind == "claude_md":
+        _undo_file(a, False, _surgical_claude_md)
+    elif kind == "shell_rc":
+        _undo_file(a, True, _surgical_rc)
+    elif kind == "folder":
+        _undo_folder(a)
+    else:
+        _undo_move(a)
+
+
+def uninstall() -> int:
+    path = paths.manifest_path()
+    try:
+        journal = manifest.load(path)
+    except manifest.ManifestError as e:
+        return _stopped(e)
+    if not journal["installs"]:
+        print("gk-harness: nothing to uninstall (no install is recorded in %s)."
+              % paths.posix(path))
+        return 0
+    try:
+        while journal["installs"]:
+            actions = journal["installs"][-1]["actions"]
+            while actions:
+                _undo(actions[-1])
+                actions.pop()
+            journal["installs"].pop()
+    except OSError as e:
+        _warn("%s; uninstall stopped part-way. Run uninstall again to finish." % e)
+        return 1
+    finally:
+        manifest.save(path, journal)
+    print("gk-harness uninstalled from %s; the backups stay in %s"
+          % (paths.posix(paths.claude_dir()), paths.posix(paths.backup_root())))
+    return 0
+
+
+# --- update ---------------------------------------------------------------------------------
+
+def update(options: list) -> int:
+    root = paths.harness_root()
+    python = paths.python_exe()
+    if python is None:
+        return _stopped("cannot tell which Python is running the installer")
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    for key in _GIT_REPO_VARS:
+        env.pop(key, None)
+    sys.stdout.flush()
+    try:
+        pulled = subprocess.run(["git", "-C", str(root), "pull", "--ff-only"],
+                                stdin=subprocess.DEVNULL, env=env)
+    except OSError as e:
+        return _stopped("git could not be run: %s" % (e.strerror or e))
+    if pulled.returncode != 0:
+        return _stopped("git pull --ff-only in %s failed (exit %d)"
+                        % (paths.posix(root), pulled.returncode))
+    # The pull may have changed the installer itself, so the new code runs the install.
+    return subprocess.run([python, str(root / "install.py"), "install"] + options).returncode
+
+
+# --- status ---------------------------------------------------------------------------------
+
+def _status_drift(root: Path, cdir: Path, settings: Any, python: Any) -> list:
+    drift = []
+    for _, src, dst in _deployed(root, cdir):
+        current = _sha(dst)
+        if current is None:
+            drift.append("missing: %s" % paths.posix(dst))
+        elif current != _sha(src):
+            drift.append("changed: %s" % paths.posix(dst))
+    md = cdir / "CLAUDE.md"
+    try:
+        text = manifest.read_text(md)
+        policy = (root / "policy.md").read_text(encoding="utf-8")
+        if text is None or not claude_md.has_block(text):
+            drift.append("missing: %s (policy block)" % paths.posix(md))
+        elif claude_md.apply(text, claude_md.render_block(policy, VERSION))[1] != "unchanged":
+            drift.append("changed: %s (policy block)" % paths.posix(md))
+    except (OSError, ValueError) as e:
+        drift.append("unreadable: %s" % e)
+    if isinstance(settings, dict):
+        try:
+            if sm.dumps(sm.merge(settings, python, cdir)[0]) != sm.dumps(settings):
+                drift.append("changed: %s (hook entries)" % paths.posix(cdir / "settings.json"))
+        except ValueError as e:
+            drift.append("unreadable: %s" % e)
+    return drift
+
+
+def status() -> int:
+    root, cdir = paths.harness_root(), paths.claude_dir()
+    print("gk-harness %s (checkout %s)" % (VERSION, paths.posix(root)))
+    print("claude dir: %s" % paths.posix(cdir))
+    try:
+        cfg = json.loads(paths.harness_config_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        cfg = None
+    if not isinstance(cfg, dict):
+        print("not installed")
+        return 0
+    python = cfg.get("python") if isinstance(cfg.get("python"), str) else paths.python_exe()
+    print("installed: version %s from %s at %s" % (cfg.get("version"), cfg.get("root"),
+                                                   cfg.get("installed_at")))
+    print("python: %s" % cfg.get("python"))
+    drift = []
+    try:
+        settings = sm.load_strict(cdir / "settings.json")
+    except sm.SettingsError as e:
+        settings = None
+        drift.append("unreadable: %s" % e)
+    entries = sm.owned_entries(settings)
+    print("owned settings.json entries: %d" % len(entries))
+    for event, matcher, command in entries:
+        print("  %s%s: %s" % (event, " [%s]" % matcher if matcher else "", command))
+    files = _deployed(root, cdir)
+    print("owned files: %s" % ", ".join(
+        "%d %s" % (sum(1 for g, _, _ in files if g == group), group)
+        for group, _, _ in DEPLOYED))
+    try:
+        journal = manifest.load(paths.manifest_path())
+    except manifest.ManifestError as e:
+        journal = manifest.empty()
+        drift.append("unreadable: %s" % e)
+    rcs = [a.get("path") for inst in journal["installs"] for a in inst["actions"]
+           if isinstance(a, dict) and a.get("type") == "shell_rc"]
+    if rcs:
+        print("shell rc: %s" % rcs[-1])
+        rc = Path(rcs[-1])
+        try:
+            got = manifest.read_text_encoded(rc)
+            if got is None or not shell.has_block(got[0], label=rcs[-1]):
+                drift.append("missing: %s (gk shortcut block)" % rcs[-1])
+        except (OSError, ValueError) as e:
+            drift.append("unreadable: %s" % e)
+    else:
+        print("shell rc: not set up by gk-harness")
+    retired = legacy.retire_plan(cdir, paths.backup_root())
+    if retired:
+        print("legacy: %s still in place (install %s moves them to the backups)"
+              % (_plural(len(retired), "old file or folder"), RETIRE))
+    drift.extend(_status_drift(root, cdir, settings, python))
+    if drift:
+        print("drift:\n%s" % "\n".join("  " + d for d in drift))
+        print("run %s to bring it back in line" % _command_line(root, "install"))
+    else:
+        print("drift: none")
+    return 0
+
+
+# --- entry point ----------------------------------------------------------------------------
+
+def _forgiving_output() -> None:
+    """A path the console cannot show must not crash the installer after it has written."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
 
 
 def main(argv: list[str]) -> int:
-    command = argv[0] if argv else "install"
-    if command not in COMMANDS:
-        sys.stderr.write("usage: install [%s]\n" % "|".join(COMMANDS))
+    args = list(argv)
+    if not args or args[0].startswith("-"):
+        args.insert(0, "install")
+    command, options = args[0], args[1:]
+    allowed = OPTIONS.get(command, ())
+    if command not in COMMANDS or any(o not in allowed for o in options) \
+            or len(set(options)) != len(options):
+        sys.stderr.write(USAGE)
         return 2
-    print("%s: not implemented" % command)
-    return 0
+    _forgiving_output()
+    if command == "install":
+        return install(RETIRE in options)
+    if command == "uninstall":
+        return uninstall()
+    if command == "update":
+        return update(options)
+    return status()
