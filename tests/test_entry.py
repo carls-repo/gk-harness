@@ -34,6 +34,21 @@ class EntryTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("Python 3.9 or newer is required", proc.stderr)
 
+    @unittest.skipUnless(os.name == "nt", "Windows only")
+    def test_install_ps1_status(self):
+        import shutil
+        shells = [s for s in ("powershell", "pwsh") if shutil.which(s)]
+        self.assertTrue(shells, "no PowerShell found")
+        for shell in shells:
+            with self.subTest(shell=shell):
+                proc = subprocess.run(
+                    [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                     os.path.join(ROOT, "install.ps1"), "status"],
+                    cwd=ROOT, capture_output=True, text=True,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("status: not implemented", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
