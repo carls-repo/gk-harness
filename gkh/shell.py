@@ -35,13 +35,18 @@ def apply(existing: str | None, block: str, label: str = LABEL,
           powershell: bool = False) -> tuple:
     """(new_text, mode): mode is "created", "unchanged", "updated" or "appended".
 
-    powershell: the file is a PowerShell profile. One this call creates (existing None) starts
-    with a byte-order mark, so that written as UTF-8 it is read as UTF-8 by Windows PowerShell
-    5.1, which reads a .ps1 without a mark in the ANSI code page and would misread a non-ASCII
-    root. An existing profile keeps its own encoding and mark (manifest.read_text_encoded).
+    powershell: the file is a PowerShell profile read as UTF-8 (pass False for a UTF-16 or
+    UTF-32 one, whose mark comes with its encoding). One this call creates (existing None), or
+    one that exists but is empty (as New-Item $PROFILE -Force leaves it; mode "appended"),
+    starts with a byte-order mark, so that written as UTF-8 it is read as UTF-8 by Windows
+    PowerShell 5.1, which reads a .ps1 without a mark in the ANSI code page and would misread a
+    non-ASCII root. Any other existing profile keeps its own encoding and mark
+    (manifest.read_text_encoded).
     """
-    if existing is None and powershell:
+    if powershell and existing is None:
         return claude_md.BOM + block, "created"
+    if powershell and existing == "":
+        return claude_md.BOM + block, "appended"
     return claude_md.apply_block(existing, block, is_begin, is_end, label)
 
 

@@ -38,6 +38,8 @@ The shell rc file is:
 - Linux: `~/.zshrc` if `$SHELL` ends in `zsh`, else `~/.bashrc`;
 - Windows: the `$PROFILE` that `pwsh` (else `powershell`) reports. If neither answers, the installer says so and skips this step.
 
+An rc file, `CLAUDE.md` or `settings.json` that is a symlink (as stow or home-manager make them) is edited where it points, and stays a link. An rc file that cannot be written, such as a link into a read-only store, is skipped with a notice, as one that cannot be read is. On Windows an empty profile (as `New-Item $PROFILE -Force` leaves it) gets a UTF-8 byte-order mark, as a new one does, so that Windows PowerShell 5.1 reads the block as UTF-8; `uninstall` returns it to empty.
+
 The shortcuts are `gk` (`claude --model fable`), `gk-opus` and `gk-sonnet`. They are launch shortcuts only; nothing depends on them.
 
 On Windows the installer never changes PowerShell's execution policy. The `gk` functions load from your profile only when PowerShell may run profile scripts; if a new PowerShell window does not know them, run:
@@ -65,7 +67,7 @@ Each command is `"<python>" "<claude_dir>/hooks/gk-harness/<script>"`, where `<p
 
 Every file the installer replaces is copied first to `~/.claude/backups/gk-harness/<UTC yyyymmddTHHMMSSZ>/`. Every change is recorded in the action journal `~/.claude/backups/gk-harness/manifest.json`, so that `uninstall` can reverse it. Each change is recorded before it is made, so an install cut short (a closed terminal, a crash, a power cut) is finished by running `install` again, or undone by `uninstall`.
 
-Before its first write, `install` checks that Python is 3.9 or newer, that every source file is present, that `settings.json` is strict JSON (or absent) and that no path it quotes holds `"`, `$` or `` ` ``. If a check fails it exits with `gk-harness: <problem>; nothing was changed.`
+Before its first write, `install` checks that Python is 3.9 or newer, that every source file is present, that `settings.json` is strict JSON (or absent), that no path it quotes holds `"`, `$` or `` ` ``, and that every file it would write (other than the shell rc file) can be written. If a check fails it exits with `gk-harness: <problem>; nothing was changed.`
 
 ### Pre-harness files
 
@@ -93,7 +95,7 @@ Windows PowerShell:
 powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.gk-harness\install.ps1" uninstall
 ```
 
-`uninstall` replays the journal in reverse. A file that is exactly as the installer left it gets its earlier state back. A file changed since is reversed surgically: in `settings.json` the installer's entries go and the removed entries come back; from `CLAUDE.md` and the shell rc file only the block is removed; a copied hook, agent or workflow you edited stays where it is, with the warning `changed since install, left in place: <path>`. A file that already matches its backup is left as it is. An uninstall cut short is finished by running it again. The backups stay.
+`uninstall` replays the journal in reverse. A file that is exactly as the installer left it gets its earlier state back. A file changed since is reversed surgically: in `settings.json` the installer's entries go and the removed entries come back; from `CLAUDE.md` and the shell rc file only the block is removed; a copied hook, agent or workflow you edited stays where it is, with the warning `changed since install, left in place: <path>`. Before it rewrites or removes a file you have edited since install, `uninstall` copies it to `~/.claude/backups/gk-harness/<UTC yyyymmddTHHMMSSZ>-uninstall/`, and names that folder at the end. A file that already matches its backup is left as it is. An uninstall cut short is finished by running it again. The backups stay.
 
 ## Update and status
 
@@ -109,4 +111,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.gk-harness\install.p
 powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.gk-harness\install.ps1" status
 ```
 
-`status` lists as drift every installed file that differs from this checkout, and a policy block or hook entries that `install` would change.
+`status` lists as drift every installed file that differs from this checkout or is missing, a policy block that `install` would change, and each hook entry `install` registers that `settings.json` lacks (all of them when the file is absent or unreadable). When none is lacking, it lists hook entries that `install` would still change.

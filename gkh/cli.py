@@ -96,6 +96,31 @@ def _empty(text: str) -> bool:
     return text.lstrip(claude_md.BOM).strip() == ""
 
 
+def _write_problem(path: Path) -> str | None:
+    """Why a write to path would fail, found before any write; None when it would not.
+
+    The writes go as manifest.write_bytes_atomic makes them: through a symlink to its real path
+    (the link stays a link), as a temp file beside the real file renamed over it. So the real
+    file's folder, or the nearest one that exists when the write must create it, must be
+    writable (a link into a read-only store such as /nix/store is not); on Windows a read-only
+    file also refuses the rename."""
+    name, target = paths.posix(path), str(path)
+    if os.path.islink(target):
+        target = os.path.realpath(target)
+        name = "%s (a link to %s)" % (name, paths.posix(target))
+    folder = os.path.dirname(target)
+    while folder and not os.path.isdir(folder):
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            break
+        folder = parent
+    if folder and not os.access(folder, os.W_OK | os.X_OK):
+        return "%s cannot be written: the folder %s is not writable" % (name, paths.posix(folder))
+    if os.name == "nt" and os.path.isfile(target) and not os.access(target, os.W_OK):
+        return "%s cannot be written: it is read-only" % name
+    return None
+
+
 # --- sources --------------------------------------------------------------------------------
 
 def _required() -> list:
@@ -245,8 +270,9 @@ def _rc_step(root: Path, notices: list) -> _Step | None:
         kept = text
         if text is not None:
             kept, removed = shell.strip_legacy_aliases(text)
+        # A UTF-16 or UTF-32 profile carries its own mark through its encoding.
         new, mode = shell.apply(kept, shell.render_block(root, windows), label=paths.posix(rc),
-                                powershell=windows)
+                                powershell=windows and encoding == "utf-8")
     except (manifest.TextEncodingError, claude_md.BlockError) as e:
         problem = str(e)
     except OSError as e:
@@ -254,14 +280,21 @@ def _rc_step(root: Path, notices: list) -> _Step | None:
     else:
         if new == text:
             return None
-        note = "%s: gk shortcut block %s" % (paths.posix(rc), {
-            "unchanged": "already present", "updated": "updated"}.get(mode, "added"))
-        if removed:
-            note += ", %s removed" % _plural(len(removed), "old gk alias")
-        return _Step(rc, manifest.encode_text(new, encoding), text is not None,
-                     "rc/" + rc.name,
-                     functools.partial(manifest.shell_rc_action, rc, removed_aliases=removed),
-                     note, "rc")
+        problem = _write_problem(rc)
+        if problem is None:
+            note = "%s: gk shortcut block %s" % (paths.posix(rc), {
+                "unchanged": "already present", "updated": "updated"}.get(mode, "added"))
+            if removed:
+                note += ", %s removed" % _plural(len(removed), "old gk alias")
+            # An existing profile that was empty gets the mark a created one gets; uninstall
+            # returns it to empty.
+            mark_added = (text is not None and not claude_md.bom_of(text)
+                          and bool(claude_md.bom_of(new)))
+            return _Step(rc, manifest.encode_text(new, encoding), text is not None,
+                         "rc/" + rc.name,
+                         functools.partial(manifest.shell_rc_action, rc, removed_aliases=removed,
+                                           mark_added=mark_added),
+                         note, "rc")
     notices.append("gk-harness: %s; the gk shortcuts were not set up" % problem)
     return None
 
@@ -278,6 +311,13 @@ def _plan(root: Path, cdir: Path, python: str, retire: bool) -> dict:
             steps.append(step)
     backup = paths.new_backup_dir()
     moves = legacy.retire_plan(cdir, backup) if retire else []
+    # A target that cannot be written would stop every install at the same step, so it stops
+    # this one before the first write (the rc file was judged in _rc_step: it is skipped).
+    if steps or moves:
+        for path in [s.path for s in steps if s.group != "rc"] + [paths.manifest_path()]:
+            problem = _write_problem(path)
+            if problem is not None:
+                raise Stop(problem)
     return {"steps": steps, "moves": moves, "backup": backup, "notices": notices}
 
 
@@ -415,11 +455,49 @@ def _unlink(path: Path) -> None:
         pass
 
 
+def _remove(path: Path) -> None:
+    """Remove a target file. A symlink was written through, so its real file goes and the link
+    stays, as it was before the install made that file."""
+    target = str(path)
+    if os.path.islink(target):
+        target = os.path.realpath(target)
+    _unlink(Path(target))
+
+
+class _Keep:
+    """Copies of the files uninstall rewrites or removes after they were edited since install,
+    taken just before, into backups/gk-harness/<stamp>-uninstall/ under the path install backs
+    them up under (the rc file under rc/). The folder is chosen at the first copy; a file
+    copied once in this run is not copied again, so the copy is the file as uninstall found
+    it."""
+
+    def __init__(self) -> None:
+        self.folder = None  # a Path once chosen
+
+    def save(self, path: Path, kind: str) -> None:
+        if self.folder is None:
+            base = paths.backup_root() / (paths.utc_stamp() + "-uninstall")
+            folder, n = base, 1
+            while os.path.lexists(str(folder)):
+                n += 1
+                folder = base.with_name("%s-%d" % (base.name, n))
+            self.folder = folder
+        rel = "rc/" + path.name
+        if kind != "shell_rc":
+            try:
+                rel = _rel(path, paths.claude_dir())
+            except ValueError:
+                rel = path.name
+        saved = self.folder.joinpath(*rel.split("/"))
+        if not os.path.lexists(str(saved)):
+            manifest.copy_file(path, saved, private=True)
+
+
 def _restore(path: Path, prior: Any, private: bool) -> None:
     """Put back the state an install recorded as replaced: no file, or its backup."""
     state = prior.get("state") if isinstance(prior, dict) else None
     if state == "absent":
-        _unlink(path)
+        _remove(path)
         return
     saved = prior.get("backup") if state == "backup" else None
     if not isinstance(saved, str):
@@ -436,11 +514,13 @@ def _backup_sha(prior: dict) -> str | None:
     return _sha(Path(saved)) if isinstance(saved, str) else None
 
 
-def _undo_file(a: dict, private: bool, surgical: Callable[[Path, dict], None]) -> None:
+def _undo_file(a: dict, private: bool, surgical: Callable[[Path, dict, _Keep], None],
+               keep: _Keep) -> None:
     """The shared reverse of a recorded write: the prior state when the file is exactly as the
     install left it (or gone, when there is a backup to bring back), nothing when it already
     equals its backup (put back by hand, by an uninstall cut short, or never overwritten by an
-    install cut short), else surgical()."""
+    install cut short), else surgical(), which copies the file into keep before it rewrites or
+    removes it."""
     path = Path(a["path"])
     prior = a.get("prior") if isinstance(a.get("prior"), dict) else {}
     current = _sha(path)
@@ -452,10 +532,10 @@ def _undo_file(a: dict, private: bool, surgical: Callable[[Path, dict], None]) -
     elif current and current == _backup_sha(prior):
         return
     else:
-        surgical(path, a)
+        surgical(path, a, keep)
 
 
-def _changed_copy(path: Path, a: dict) -> None:
+def _changed_copy(path: Path, a: dict, keep: _Keep) -> None:
     _warn("changed since install, left in place: %s" % paths.posix(path))
 
 
@@ -485,7 +565,7 @@ def _not_back_yet(settings: dict, removed: list) -> list:
     return out
 
 
-def _surgical_settings(path: Path, a: dict) -> None:
+def _surgical_settings(path: Path, a: dict, keep: _Keep) -> None:
     try:
         current = sm.load_strict(paths.posix(path))  # posix, so messages name it as the journal
     except sm.SettingsError as e:
@@ -498,10 +578,11 @@ def _surgical_settings(path: Path, a: dict) -> None:
         undo = dict(undo, removed=_not_back_yet(current, undo["removed"]))
     new = sm.unmerge(current, undo)
     if sm.dumps(new) != sm.dumps(current):
+        keep.save(path, a["type"])
         manifest.write_text_atomic(path, sm.dumps(new))
 
 
-def _surgical_claude_md(path: Path, a: dict) -> None:
+def _surgical_claude_md(path: Path, a: dict, keep: _Keep) -> None:
     try:
         text = manifest.read_text(paths.posix(path))
         if text is None:
@@ -516,18 +597,21 @@ def _surgical_claude_md(path: Path, a: dict) -> None:
     prior = a.get("prior") if isinstance(a.get("prior"), dict) else {}
     if a.get("mode") == "replaced_old_policy" and prior.get("state") == "backup":
         if _empty(stripped):
+            keep.save(path, a["type"])
             _restore(path, prior, False)
             return
         print("gk-harness: %s changed since install, so only the policy block was removed; the "
               "old policy it replaced is in %s" % (paths.posix(path), prior.get("backup")))
     elif prior.get("state") == "absent" and _empty(stripped):
-        _unlink(path)
+        keep.save(path, a["type"])
+        _remove(path)
         return
     if stripped != text:
+        keep.save(path, a["type"])
         manifest.write_text_atomic(path, stripped)
 
 
-def _surgical_rc(path: Path, a: dict) -> None:
+def _surgical_rc(path: Path, a: dict, keep: _Keep) -> None:
     try:
         got = manifest.read_text_encoded(paths.posix(path))
         if got is None:
@@ -542,8 +626,14 @@ def _surgical_rc(path: Path, a: dict) -> None:
         return
     prior = a.get("prior") if isinstance(a.get("prior"), dict) else {}
     if prior.get("state") == "absent" and _empty(stripped):
-        _unlink(path)
+        keep.save(path, a["type"])
+        _remove(path)
+    elif a.get("mark_added") is True and _empty(stripped):
+        # An empty profile that install gave a mark: empty again, zero bytes.
+        keep.save(path, a["type"])
+        manifest.write_bytes_atomic(path, b"")
     elif stripped != text:
+        keep.save(path, a["type"])
         manifest.write_text_atomic(path, stripped, encoding)
     lines = [r.get("text") for r in a.get("removed_aliases") or [] if isinstance(r, dict)]
     if lines:
@@ -591,19 +681,19 @@ def _undo_move(a: dict) -> None:
         shutil.move(str(dst), str(src))
 
 
-def _undo(a: Any) -> None:
+def _undo(a: Any, keep: _Keep) -> None:
     kind = a.get("type") if isinstance(a, dict) else None
     keys = {"legacy_move": ("src", "dst"), "folder": ("path",)}.get(kind, ("path", "sha256"))
     if kind not in manifest.ACTION_TYPES or not all(isinstance(a.get(k), str) for k in keys):
         _warn("skipped a journal entry it cannot read: %s" % json.dumps(a)[:200])
     elif kind == "file":
-        _undo_file(a, False, _changed_copy)
+        _undo_file(a, False, _changed_copy, keep)
     elif kind == "settings":
-        _undo_file(a, True, _surgical_settings)
+        _undo_file(a, True, _surgical_settings, keep)
     elif kind == "claude_md":
-        _undo_file(a, False, _surgical_claude_md)
+        _undo_file(a, False, _surgical_claude_md, keep)
     elif kind == "shell_rc":
-        _undo_file(a, True, _surgical_rc)
+        _undo_file(a, True, _surgical_rc, keep)
     elif kind == "folder":
         _undo_folder(a)
     else:
@@ -620,23 +710,32 @@ def uninstall() -> int:
         print("gk-harness: nothing to uninstall (no install is recorded in %s)."
               % paths.posix(path))
         return 0
+    keep = _Keep()
     try:
         # The journal is saved after each action is reversed, so a kill leaves at most that one
         # action recorded but done; replayed, it finds its file already as it was.
         while journal["installs"]:
             actions = journal["installs"][-1]["actions"]
             if actions:
-                _undo(actions[-1])
+                _undo(actions[-1], keep)
                 actions.pop()
             if not actions:
                 journal["installs"].pop()
             manifest.save(path, journal)
     except OSError as e:
         _warn("%s; uninstall stopped part-way. Run uninstall again to finish." % e)
+        _report_kept(keep)
         return 1
     print("gk-harness uninstalled from %s; the backups stay in %s"
           % (paths.posix(paths.claude_dir()), paths.posix(paths.backup_root())))
+    _report_kept(keep)
     return 0
+
+
+def _report_kept(keep: _Keep) -> None:
+    if keep.folder is not None and keep.folder.is_dir():
+        print("gk-harness: the files you had edited since install were copied, as uninstall "
+              "found them, into %s before it changed or removed them" % paths.posix(keep.folder))
 
 
 # --- update ---------------------------------------------------------------------------------
@@ -682,13 +781,35 @@ def _status_drift(root: Path, cdir: Path, settings: Any, python: Any) -> list:
             drift.append("changed: %s (policy block)" % paths.posix(md))
     except (OSError, ValueError) as e:
         drift.append("unreadable: %s" % e)
-    if isinstance(settings, dict):
-        try:
-            if sm.dumps(sm.merge(settings, python, cdir)[0]) != sm.dumps(settings):
-                drift.append("changed: %s (hook entries)" % paths.posix(cdir / "settings.json"))
-        except ValueError as e:
-            drift.append("unreadable: %s" % e)
+    drift.extend(_hook_entry_drift(cdir, settings, python))
     return drift
+
+
+def _hook_entry_drift(cdir: Path, settings: Any, python: Any) -> list:
+    """Each hook entry install registers that settings lacks, as "missing: …"; settings is None
+    when settings.json is absent or unreadable, so then every entry is missing. With none
+    missing, "changed: …" when install would still change the hook entries or ultracode."""
+    label = paths.posix(cdir / "settings.json")
+    try:
+        have = sm.owned_entries(settings)
+        missing = []
+        for event, matcher, scripts in sm.REGISTRATIONS:
+            for script in scripts:
+                entry = (event, matcher, sm.hook_command(python, cdir, script))
+                if entry in have:
+                    have.remove(entry)
+                else:
+                    missing.append(entry)
+        if missing:
+            return ["missing: %s (hook entry %s%s: %s)"
+                    % (label, event, " [%s]" % matcher if matcher else "", command)
+                    for event, matcher, command in missing]
+        if isinstance(settings, dict) \
+                and sm.dumps(sm.merge(settings, python, cdir)[0]) != sm.dumps(settings):
+            return ["changed: %s (hook entries)" % label]
+    except (ValueError, TypeError) as e:
+        return ["unreadable: %s" % e]
+    return []
 
 
 def status() -> int:

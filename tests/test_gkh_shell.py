@@ -297,12 +297,16 @@ class EncodedProfileTests(unittest.TestCase):
         body = "Set-Alias ll Get-ChildItem\r\n"
         for mark, original in ((b"", body.encode("utf-8")),
                                (codecs.BOM_UTF8, codecs.BOM_UTF8 + body.encode("utf-8")),
-                               (b"", b""),
-                               (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_LE + body.encode("utf-16-le"))):
+                               (codecs.BOM_UTF8, codecs.BOM_UTF8),
+                               (codecs.BOM_UTF16_LE,
+                                codecs.BOM_UTF16_LE + body.encode("utf-16-le")),
+                               (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_LE)):
             with self.subTest(original=original[:4]):
                 profile.write_bytes(original)
                 text, encoding = manifest.read_text_encoded(profile)
-                new, mode = shell.apply(text, b, powershell=True)
+                # A UTF-16 or UTF-32 profile's mark comes with its encoding: powershell is for
+                # a profile read as UTF-8 (what the installer passes).
+                new, mode = shell.apply(text, b, powershell=encoding == "utf-8")
                 self.assertEqual(mode, "appended")
                 manifest.write_text_atomic(profile, new, encoding)
                 data = profile.read_bytes()
@@ -312,6 +316,24 @@ class EncodedProfileTests(unittest.TestCase):
                 text, encoding = manifest.read_text_encoded(profile)
                 manifest.write_text_atomic(profile, shell.strip(text), encoding)
                 self.assertEqual(profile.read_bytes(), original)
+
+    def test_an_empty_profile_gets_a_mark(self):
+        # New-Item $PROFILE -Force leaves a zero-byte profile, which Windows PowerShell 5.1 would
+        # read in the ANSI code page: it gets the mark a created profile gets.
+        profile = self.tmp / "profile.ps1"
+        profile.write_bytes(b"")
+        b = shell.render_block(PureWindowsPath("C:\\Users\\Zo\u00eb\\.gk-harness"), windows=True)
+        text, encoding = manifest.read_text_encoded(profile)
+        self.assertEqual((text, encoding), ("", "utf-8"))
+        new, mode = shell.apply(text, b, powershell=True)
+        self.assertEqual((new, mode), ("\ufeff" + b, "appended"))
+        manifest.write_text_atomic(profile, new, encoding)
+        self.assertEqual(profile.read_bytes(), codecs.BOM_UTF8 + b.encode("utf-8"))
+        again, encoding = manifest.read_text_encoded(profile)
+        self.assertEqual(shell.apply(again, b, powershell=True), (again, "unchanged"))
+        self.assertEqual(shell.strip(again), "\ufeff")
+        # Not a PowerShell profile: an empty rc file gets no mark.
+        self.assertEqual(shell.apply("", b), (b, "appended"))
 
     def test_utf16le_profile_cannot_be_read_as_utf8(self):
         profile = self.tmp / "profile.ps1"

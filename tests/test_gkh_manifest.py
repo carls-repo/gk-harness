@@ -78,6 +78,11 @@ class JournalTests(unittest.TestCase):
                          {"type": "shell_rc", "path": "/h/.bashrc",
                           "prior": {"state": "backup", "backup": "/b/rc"}, "sha256": SHA,
                           "removed_aliases": removed})
+        self.assertEqual(mf.shell_rc_action("/h/p.ps1", mf.prior_backup("/b/p"), SHA, [],
+                                            mark_added=True),
+                         {"type": "shell_rc", "path": "/h/p.ps1",
+                          "prior": {"state": "backup", "backup": "/b/p"}, "sha256": SHA,
+                          "removed_aliases": [], "mark_added": True})
         self.assertEqual(mf.legacy_move_action("/c/profiles", "/b/legacy/profiles"),
                          {"type": "legacy_move", "src": "/c/profiles", "dst": "/b/legacy/profiles"})
         self.assertEqual(mf.folder_action(w(r"C:\Users\C S\.claude\hooks\gk-harness")),

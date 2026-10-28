@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -48,6 +49,107 @@ BOX_OTHER_KEYS = {
 }
 KEPT_KEYS = ("autoMode", "permissions", "model", "effortLevel", "modelSettings")
 EXECUTION_POLICY = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned"
+# The hook registrations, spelled out from the brief's table rather than taken from gkh: each
+# group's event, matcher (None for none) and scripts, in order.
+EXPECTED_GROUPS = (
+    ("SessionStart", None, ("gk-seat.py", "gk-peers.py")),
+    ("PostModelSwitch", None, ("gk-seat.py",)),
+    ("UserPromptSubmit", None, ("gk-peers.py",)),
+    ("PreToolUse", "Workflow", ("gk-profile.py",)),
+    ("PostToolUse", "Edit|Write|MultiEdit|NotebookEdit", ("gk-claim.py", "gk-remote-pending.py")),
+    ("PostToolUse", "mcp__.*__(batch|update|create)|Artifact|SendUserFile",
+     ("gk-remote-clear.py",)),
+    ("Stop", None, ("gk-remote-stop.py",)),
+    ("SessionEnd", None, ("gk-claims-end.py",)),
+)
+EXPECTED_EVENTS = ["SessionStart", "PostModelSwitch", "UserPromptSubmit", "PreToolUse",
+                   "PostToolUse", "Stop", "SessionEnd"]
+# The commands in tests/fixtures/settings/box-hooks.json, spelled out: the pre-harness gk hooks
+# (gk-peers.py twice: SessionStart and UserPromptSubmit), and the two install leaves alone.
+LEGACY_BOX_COMMANDS = ['python3 "$HOME/.claude/hooks/gk-claim.py"',
+                       'python3 "$HOME/.claude/hooks/gk-remote-pending.py"',
+                       'python3 "$HOME/.claude/hooks/gk-remote-clear.py"',
+                       '"$HOME/.claude/hooks/gk-profile-guard.sh"',
+                       'python3 "$HOME/.claude/hooks/gk-peers.py"',
+                       'python3 "$HOME/.claude/hooks/gk-peers.py"',
+                       'python3 "$HOME/.claude/hooks/gk-remote-stop.py"',
+                       'python3 "$HOME/.claude/hooks/gk-claims-end.py"']
+OTHER_BOX_COMMANDS = ['"$HOME/.claude/hooks/supabase-row-cap.sh"',
+                      '"$HOME/.claude/hooks/pii-in-logs.sh"']
+# What a legacy command names, from the brief.
+LEGACY_NAMES = ("gk-profile-guard.sh", "hooks/gk-claim.py", "hooks/gk-claims-end.py",
+                "hooks/gk-peers.py", "hooks/gk-remote-clear.py", "hooks/gk-remote-pending.py",
+                "hooks/gk-remote-stop.py")
+
+
+def runner_python() -> str:
+    """The Python running these tests as install records it: absolute, posix, not resolved."""
+    return Path(os.path.abspath(sys.executable)).as_posix()
+
+
+def expected_command(python: str, cdir: Path, script: str) -> str:
+    return '"%s" "%s/hooks/gk-harness/%s"' % (python, cdir.as_posix(), script)
+
+
+def expected_hooks(python: str, cdir: Path) -> dict:
+    """settings.json's "hooks" after an install into an empty home."""
+    hooks: dict = {}
+    for event, matcher, scripts in EXPECTED_GROUPS:
+        group: dict = {} if matcher is None else {"matcher": matcher}
+        group["hooks"] = [{"type": "command", "command": expected_command(python, cdir, s),
+                           "timeout": 10} for s in scripts]
+        hooks.setdefault(event, []).append(group)
+    return hooks
+
+
+def expected_entries(python: str, cdir: Path) -> list:
+    """[(event, matcher, command, timeout)] for each entry install registers, in order."""
+    return [(event, matcher, expected_command(python, cdir, s), 10)
+            for event, matcher, scripts in EXPECTED_GROUPS for s in scripts]
+
+
+def entries_of(settings: dict) -> list:
+    """[(event, matcher, command, timeout)] for each hook entry in settings, in file order."""
+    return [(event, group.get("matcher"), e.get("command"), e.get("timeout"))
+            for event, groups in settings.get("hooks", {}).items() for group in groups
+            for e in group.get("hooks", [])]
+
+
+def insert_in_block(text: str, line: str) -> str:
+    """text with line put just after its first line, which must be a gk-harness begin marker
+    (a file install created, or whose old policy it replaced, starts with its block), so that
+    the edit is inside the block whatever the policy says."""
+    first, nl, rest = text.partition("\n")
+    if not first.lstrip("\ufeff").startswith(("<!-- gk-harness:begin v", "# >>> gk-harness >>>")):
+        raise AssertionError("the first line is not a begin marker: %r" % first)
+    return first + nl + line + rest
+
+
+def find_bash() -> tuple:
+    """(the bash Claude Code runs hook commands with, None), or (None, why there is none). On
+    Windows that is Git Bash: CLAUDE_CODE_GIT_BASH_PATH, else a bash on PATH that is not the WSL
+    launcher (in System32 or WindowsApps), else the bash.exe of the Git for Windows that the git
+    on PATH belongs to."""
+    if os.name != "nt":
+        bash = shutil.which("bash")
+        return (bash, None) if bash else (None, "bash is not on PATH")
+    named = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
+    if named and os.path.isfile(named):
+        return named, None
+    found = shutil.which("bash")
+    wsl = bool(found) and any(p in found.lower() for p in ("\\system32\\", "\\windowsapps\\"))
+    if found and not wsl:
+        return found, None
+    git = shutil.which("git")
+    if git:
+        top = Path(git).resolve().parent.parent  # <Git>\cmd\git.exe, or <Git>\mingw64\bin\git.exe
+        for bash in (top / "bin" / "bash.exe", top.parent / "bin" / "bash.exe"):
+            if bash.is_file():
+                return str(bash), None
+    if wsl:
+        return None, "only the WSL launcher %s was found, not Git Bash" % found
+    return None, "Git Bash was not found (no bash on PATH or beside git, and no " \
+                 "CLAUDE_CODE_GIT_BASH_PATH)"
 
 
 def box_settings() -> dict:
@@ -191,6 +293,28 @@ class InstallBase(unittest.TestCase):
     def journal_path(self) -> Path:
         return self.cdir / "backups" / "gk-harness" / "manifest.json"
 
+    def uninstall_copies(self) -> set:
+        """The folders uninstall has copied edited files into."""
+        root = self.cdir / "backups" / "gk-harness"
+        return {p for p in root.iterdir() if "-uninstall" in p.name} if root.is_dir() else set()
+
+    def uninstall_keeping(self) -> tuple:
+        """Run uninstall: (stdout, stderr, the folder it copied edited files into, or None)."""
+        before = self.uninstall_copies()
+        out, err = self.ok("uninstall")
+        new = self.uninstall_copies() - before
+        self.assertLessEqual(len(new), 1, new)
+        return out, err, (new.pop() if new else None)
+
+    def link(self, path: Path, target: Path) -> Path:
+        """path made a symlink to target, or the test skipped where symlinks cannot be made."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(str(target), str(path))
+        except (OSError, NotImplementedError) as e:
+            self.skipTest("cannot make a symlink here: %s" % e)
+        return path
+
     def fresh_home(self) -> None:
         shutil.rmtree(str(self.home))
         self.cdir.mkdir(parents=True)
@@ -240,9 +364,9 @@ class RoundTripTests(InstallBase):
         self.assertEqual(sorted(os.listdir(str(self.cdir / "agents"))), REPO_AGENTS)
         self.assertEqual((self.cdir / "CLAUDE.md").read_text(encoding="utf-8"), POLICY_BLOCK)
         settings = self.settings()
-        self.assertIs(settings["ultracode"], True)
-        self.assertEqual(sm.dumps(settings), sm.dumps(sm.merge({}, paths.python_exe(),
-                                                                self.cdir)[0]))
+        self.assertEqual(settings, {"hooks": expected_hooks(runner_python(), self.cdir),
+                                    "ultracode": True})
+        self.assertEqual(list(settings["hooks"]), EXPECTED_EVENTS)
         cfg = json.loads((self.cdir / "gk-harness.json").read_text(encoding="utf-8"))
         self.assertEqual(sorted(cfg), ["installed_at", "python", "root", "version"])
         self.assertEqual((cfg["version"], cfg["root"], cfg["python"]),
@@ -265,12 +389,17 @@ class RoundTripTests(InstallBase):
     def test_round_trip_legacy_box(self):
         c = self.cdir
         before = self.make_box()
+        self.assertEqual(sorted(commands_of(before)),
+                         sorted(LEGACY_BOX_COMMANDS + OTHER_BOX_COMMANDS))
         start = snapshot(self.home)
 
         self.ok("install")
         self.assertEqual((c / "CLAUDE.md").read_text(encoding="utf-8"), POLICY_BLOCK)
         after = self.settings()
-        self.assertEqual([x for x in commands_of(after) if legacy.is_legacy_command(x)], [])
+        self.assertEqual([x for x in commands_of(after) if any(n in x for n in LEGACY_NAMES)], [])
+        # The box's events come in its own order, so the entries are compared as a multiset.
+        self.assertCountEqual([e for e in entries_of(after) if e[2] not in OTHER_BOX_COMMANDS],
+                              expected_entries(runner_python(), c))
         for key in KEPT_KEYS:
             self.assertEqual(sm.dumps(after[key]), sm.dumps(before[key]), key)
         self.assertEqual([g for g in after["hooks"]["PostToolUse"]
@@ -501,8 +630,7 @@ class UninstallTests(InstallBase):
         start = snapshot(self.home)
         md = self.cdir / "CLAUDE.md"
         for name, edit, expected in (
-                ("edited inside the block", lambda t: t.replace(">>>\n", ">>>\n# mine\n").replace(
-                    "(read first)", "(read me)"), None),
+                ("edited inside the block", lambda t: insert_in_block(t, "# mine\n"), None),
                 ("notes added", lambda t: claude_md.bom_of(t) + "# notes\n\n"
                  + t[len(claude_md.bom_of(t)):], "# notes\n")):
             with self.subTest(name):
@@ -511,7 +639,9 @@ class UninstallTests(InstallBase):
                 for path in (md, self.rc):
                     text = path.read_text(encoding="utf-8")
                     marks[path] = claude_md.bom_of(text)
-                    write(path, edit(text))
+                    edited = edit(text)
+                    self.assertNotEqual(edited, text, path)  # so the surgical path runs
+                    write(path, edited)
                 self.ok("uninstall")
                 for path in (md, self.rc):
                     if expected is None:
@@ -522,11 +652,49 @@ class UninstallTests(InstallBase):
                         path.unlink()
                 self.assertTreeEqual(start, snapshot(self.home))
 
+    def test_edited_files_are_copied_before_uninstall_changes_them(self):
+        # Nothing edited since install: nothing copied, no folder.
+        self.ok("install")
+        out, err, kept = self.uninstall_keeping()
+        self.assertIsNone(kept)
+        self.assertNotIn("were copied", out)
+
+        # Each file uninstall rewrites or removes after an edit is copied first, as it found it:
+        # settings.json (rewritten), CLAUDE.md (an edited block overwritten by the old policy it
+        # replaced) and the rc file install created (removed once stripped, a line the user
+        # wrote inside the block with it).
+        write(self.cdir / "CLAUDE.md", OLD_POLICY)
+        write(self.cdir / "settings.json", sm.dumps({"model": "opus"}), 0o600)
+        self.ok("install")
+        settings = self.settings()
+        settings["permissions"] = {"allow": ["Bash(ls:*)"]}
+        edited = {"settings.json": json.dumps(settings, indent=4),
+                  "CLAUDE.md": insert_in_block(POLICY_BLOCK, "- my own rule\n"),
+                  "rc/.bashrc": insert_in_block(self.rc.read_text(encoding="utf-8"),
+                                                "alias gl='git log'\n")}
+        for rel, text in edited.items():
+            write(self.rc if rel.startswith("rc/") else self.cdir / rel, text)
+        out, err, kept = self.uninstall_keeping()
+        self.assertEqual(err, "")
+        self.assertIsNotNone(kept)
+        self.assertEqual(out.count(paths.posix(kept)), 1)
+        self.assertEqual(self.settings(),
+                         {"model": "opus", "permissions": {"allow": ["Bash(ls:*)"]}})
+        self.assertEqual((self.cdir / "CLAUDE.md").read_text(encoding="utf-8"), OLD_POLICY)
+        self.assertFalse(self.rc.exists())
+        copies = sorted(p.relative_to(kept).as_posix() for p in kept.rglob("*") if p.is_file())
+        self.assertEqual(copies, sorted(edited))
+        for rel, text in edited.items():
+            copy = kept.joinpath(*rel.split("/"))
+            self.assertEqual(copy.read_bytes().decode("utf-8"), text, rel)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(os.stat(str(copy)).st_mode), 0o600, rel)
+
     def test_replaced_old_policy_changed_since(self):
         md = self.cdir / "CLAUDE.md"
         cases = (
             ("notes added after the block", lambda t: t + "\n## Mine\n", "\n## Mine\n"),
-            ("edited inside the block", lambda t: t.replace("(read first)", "(read me)"),
+            ("edited inside the block", lambda t: insert_in_block(t, "- my own rule\n"),
              OLD_POLICY),
             ("byte-order mark added", lambda t: "\ufeff" + t, OLD_POLICY),
             ("blank lines added", lambda t: t + "\n\n", OLD_POLICY),
@@ -538,12 +706,16 @@ class UninstallTests(InstallBase):
                 self.assertEqual(md.read_text(encoding="utf-8"), POLICY_BLOCK)
                 saved = [a["prior"]["backup"] for a in self.journal()["installs"][-1]["actions"]
                          if a["type"] == "claude_md"][0]
-                write(md, edit(md.read_text(encoding="utf-8")))
-                out, err = self.ok("uninstall")
+                edited = edit(md.read_text(encoding="utf-8"))
+                self.assertNotEqual(edited, POLICY_BLOCK)  # so the surgical path runs
+                write(md, edited)
+                out, err, kept = self.uninstall_keeping()
                 self.assertEqual(md.read_bytes().decode("utf-8"), expected)
                 self.assertEqual(Path(saved).read_text(encoding="utf-8"), OLD_POLICY)
                 if expected != OLD_POLICY:
                     self.assertIn(saved, out)
+                # The edited file, overwritten or rewritten, was copied first.
+                self.assertEqual((kept / "CLAUDE.md").read_bytes().decode("utf-8"), edited)
 
     def test_two_installs_unwind_newest_first(self):
         # An update: the second install replaces what the first wrote, backing it up first, and
@@ -596,6 +768,109 @@ class UninstallTests(InstallBase):
                              "// my own review\n")
             self.ok("uninstall")
         self.assertTreeEqual(start, snapshot(self.home))
+
+
+class LinkTests(InstallBase):
+    """Targets that are symlinks, as a dotfile manager (stow, home-manager) makes them, and
+    targets that cannot be written, such as a link into a read-only store."""
+
+    def test_symlinked_targets_are_edited_where_they_point(self):
+        dots = self.tmp / "dotfiles"
+        real = {"rc": write(dots / "bashrc", "# ~/.bashrc\nexport EDITOR=vi\n"),
+                "settings": write(dots / "settings.json", sm.dumps({"model": "opus"})),
+                "md": write(dots / "CLAUDE.md", NOTES)}
+        links = {"rc": self.link(self.rc, Path("..") / "dotfiles" / "bashrc"),  # relative, as stow
+                 "settings": self.link(self.cdir / "settings.json", real["settings"]),
+                 "md": self.link(self.cdir / "CLAUDE.md", real["md"])}
+        originals = {k: p.read_bytes() for k, p in real.items()}
+        start = snapshot(self.home)
+        for edited in (False, True):
+            with self.subTest(edited=edited):
+                self.ok("install")
+                for k, link in links.items():
+                    self.assertTrue(os.path.islink(str(link)), link)
+                    self.assertEqual(os.path.realpath(str(link)), os.path.realpath(str(real[k])))
+                self.assertTrue(shell.has_block(real["rc"].read_text(encoding="utf-8")))
+                self.assertIs(json.loads(real["settings"].read_text(encoding="utf-8"))
+                              ["ultracode"], True)
+                self.assertIn(claude_md.END_MARKER, real["md"].read_text(encoding="utf-8"))
+                if edited:  # so uninstall takes the surgical path through each link
+                    for k in ("rc", "md"):
+                        write(real[k], "# edited\n" + real[k].read_text(encoding="utf-8"))
+                    write(real["settings"], json.dumps(json.loads(
+                        real["settings"].read_text(encoding="utf-8")), indent=4))
+                self.ok("uninstall")
+                for k, link in links.items():
+                    self.assertTrue(os.path.islink(str(link)), link)
+                    added = b"# edited\n" if edited and k != "settings" else b""
+                    self.assertEqual(real[k].read_bytes(), added + originals[k], k)
+                for k, p in real.items():
+                    p.write_bytes(originals[k])
+                self.assertTreeEqual(start, snapshot(self.home))
+
+    def test_dangling_symlinked_rc_is_created_where_it_points(self):
+        target = self.tmp / "dotfiles" / "shell" / "bashrc"
+        self.link(self.rc, target)
+        self.ok("install")
+        self.assertTrue(os.path.islink(str(self.rc)))
+        self.assertTrue(shell.has_block(target.read_text(encoding="utf-8")))
+        self.ok("uninstall")
+        self.assertTrue(os.path.islink(str(self.rc)))
+        self.assertEqual(os.readlink(str(self.rc)), str(target))
+        self.assertFalse(os.path.lexists(str(target.parent)))  # the folders it made, too
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "folder write permission is POSIX, and root writes anyway")
+    def test_targets_that_cannot_be_written(self):
+        store = self.tmp / "store"
+        for name, text in (("bashrc", "# managed\n"), ("settings.json", '{"model": "opus"}\n'),
+                           ("CLAUDE.md", NOTES)):
+            write(store / name, text)
+        os.chmod(str(store), 0o555)
+        self.addCleanup(os.chmod, str(store), 0o755)
+        real_store = Path(os.path.realpath(str(store))).as_posix()
+
+        with self.subTest("rc file: skipped with a notice, every time"):
+            self.link(self.rc, store / "bashrc")
+            notice = ("gk-harness: %s (a link to %s/bashrc) cannot be written: the folder %s is "
+                      "not writable; the gk shortcuts were not set up\n"
+                      % (paths.posix(self.rc), real_store, real_store))
+            out, err = self.ok("install")
+            self.assertIn(notice, out)
+            self.assertEqual(err, "")
+            self.assertTrue((self.cdir / "settings.json").is_file())
+            out, err = self.ok("install")
+            self.assertIn(notice, out)
+            self.assertIn("nothing to change", out)
+            self.assertEqual((store / "bashrc").read_text(encoding="utf-8"), "# managed\n")
+            self.assertEqual([a for inst in self.journal()["installs"] for a in inst["actions"]
+                              if a["type"] == "shell_rc"], [])
+            self.ok("uninstall")
+
+        for name in ("settings.json", "CLAUDE.md"):
+            with self.subTest(name + ": the install stops"):
+                self.fresh_home()
+                link = self.link(self.cdir / name, store / name)
+                start = snapshot(self.home, mtimes=True, skip=())
+                code, out, err = self.gk("install")
+                self.assertEqual(code, 2, out + err)
+                self.assertEqual(err, "gk-harness: %s (a link to %s/%s) cannot be written: the "
+                                      "folder %s is not writable; nothing was changed.\n"
+                                 % (paths.posix(link), real_store, name, real_store))
+                self.assertEqual(snapshot(self.home, mtimes=True, skip=()), start)
+
+        with self.subTest("a folder of copied files: the install stops"):
+            self.fresh_home()
+            agents = self.cdir / "agents"
+            agents.mkdir()
+            os.chmod(str(agents), 0o555)
+            self.addCleanup(os.chmod, str(agents), 0o755)
+            start = snapshot(self.home, mtimes=True, skip=())
+            code, out, err = self.gk("install")
+            self.assertEqual(code, 2, out + err)
+            self.assertIn("cannot be written: the folder %s is not writable; nothing was changed."
+                          % paths.posix(agents), err)
+            self.assertEqual(snapshot(self.home, mtimes=True, skip=()), start)
 
 
 class InterruptionTests(InstallBase):
@@ -739,17 +1014,33 @@ class CommandTests(InstallBase):
         return base
 
     def test_registered_commands_execute_with_space_in_home(self):
-        self.ok("install")
+        # The Python lives under the spaced home too, as it often does on Windows
+        # (C:\Users\Carl Selby\AppData\Local\Programs\Python), so both paths in every command
+        # hold a space: install runs with a venv's Python made there.
+        venv = self.home / "venv"
+        made = subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)],
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        self.assertTrue(python.is_file(), python)
+        with mock.patch.object(paths, "python_exe", lambda: str(python)):
+            self.ok("install")
+        # The once-a-day update check has just run, so no hook here goes to the network.
+        write(self.cdir / "state" / "gk-harness-update.json", json.dumps(
+            {"checked": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "available": False}))
         entries = sm.owned_entries(self.settings())
-        self.assertEqual(len(entries), sum(len(s) for _, _, s in sm.REGISTRATIONS))
-        bash = shutil.which("bash")
-        if bash and os.name == "nt" and "system32" in bash.lower():
-            bash = None  # the WSL launcher, not the Git Bash that Claude Code uses
+        self.assertEqual(len(entries), sum(len(s) for _, _, s in EXPECTED_GROUPS))
+        bash, why = find_bash()
+        if bash is None:
+            with self.subTest(shell="bash"):
+                self.skipTest(why)  # recorded, so the run shows the bash leg did not run
         env = dict(os.environ)  # HOME, USERPROFILE and GK_CLAUDE_DIR point into the temp home
         for key in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX"):
             env.pop(key, None)  # Python caches the hooks' imports, as under Claude Code
         seen_card = 0
         for event, matcher, command in entries:
+            self.assertTrue(command.startswith('"%s" "' % python.as_posix()), command)
+            self.assertIn(" Selby/venv/", command)
             self.assertIn(" Selby/.claude/hooks/gk-harness/", command)
             data = json.dumps(self.payload(event, matcher)).encode("utf-8")
             runs = [("platform shell", dict(args=command, shell=True))]
@@ -807,6 +1098,39 @@ class StatusTests(InstallBase):
         self.assertNotIn("gk-peers.py", drift)
         self.assertNotIn("settings.json", drift)
 
+    def test_status_reports_missing_hook_entries(self):
+        self.ok("install")
+        path = self.cdir / "settings.json"
+        full = self.settings()
+        entries = expected_entries(runner_python(), self.cdir)
+        no_hooks = {k: v for k, v in full.items() if k != "hooks"}
+        no_stop = json.loads(json.dumps(full))
+        del no_stop["hooks"]["Stop"]
+        for name, text, gone in (
+                ("absent", None, entries),
+                ("unreadable", '{"hooks": {,}', entries),
+                ("stripped", json.dumps(no_hooks, indent=2), entries),
+                ("one group removed", json.dumps(no_stop, indent=2),
+                 [e for e in entries if e[0] == "Stop"])):
+            with self.subTest(name):
+                if text is None:
+                    path.unlink()
+                else:
+                    write(path, text)
+                out, err = self.ok("status")
+                self.assertNotIn("drift: none", out)
+                drift = out[out.index("drift:"):]
+                for event, matcher, command, _ in entries:
+                    line = "missing: %s (hook entry %s%s: %s)\n" % (
+                        paths.posix(path), event, " [%s]" % matcher if matcher else "", command)
+                    if (event, matcher, command, 10) in gone:
+                        self.assertIn(line, drift)
+                    else:
+                        self.assertNotIn(line, drift)
+                self.assertEqual(drift.count("(hook entry "), len(gone))
+                write(path, sm.dumps(full))
+                self.assertIn("drift: none", self.ok("status")[0])
+
 
 class RcChoiceTests(InstallBase):
     patch_rc = False
@@ -858,6 +1182,31 @@ class RcChoiceTests(InstallBase):
                 self.assertNotIn(EXECUTION_POLICY, again)
                 self.ok("uninstall")
             self.assertTreeEqual(begin, snapshot(self.home))
+
+        # New-Item $PROFILE -Force leaves an empty profile: it gets the mark a new one gets, and
+        # uninstall returns it to zero bytes, whether or not it was edited inside the block. A
+        # UTF-16 profile holding only its mark keeps that mark and gets no second one.
+        profile = self.home / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
+        block = '# >>> gk-harness >>>\n. "%s/shell/aliases.ps1"\n# <<< gk-harness <<<\n' % root
+        for original, edited, encoding, mark in (
+                (b"", False, "utf-8", codecs.BOM_UTF8), (b"", True, "utf-8", codecs.BOM_UTF8),
+                (codecs.BOM_UTF16_LE, False, "utf-16-le", codecs.BOM_UTF16_LE)):
+            write(profile, "")
+            profile.write_bytes(original)
+            begin = snapshot(self.home)
+            with self.subTest(platform="win32", profile=original, edited=edited), \
+                    mock.patch.object(sys, "platform", "win32"), \
+                    mock.patch.object(paths, "rc_file", lambda *a, **k: profile):
+                self.ok("install")
+                data = profile.read_bytes()
+                self.assertEqual(data, mark + block.encode(encoding))
+                self.assertEqual([a.get("mark_added") for a in self.journal()["installs"][-1][
+                    "actions"] if a["type"] == "shell_rc"], [True if original == b"" else None])
+                if edited:
+                    write(profile, insert_in_block(data.decode("utf-8"), "Set-Alias ll ls\n"))
+                self.ok("uninstall")
+                self.assertEqual(profile.read_bytes(), original)
+                self.assertTreeEqual(begin, snapshot(self.home))
 
 
 @unittest.skipIf(shutil.which("git") is None, "git is not on PATH")

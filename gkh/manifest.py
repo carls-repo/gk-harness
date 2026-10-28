@@ -104,10 +104,17 @@ def claude_md_action(path: Any, prior: dict, sha256: str, mode: str) -> dict:
             "mode": mode}
 
 
-def shell_rc_action(path: Any, prior: dict, sha256: str, removed_aliases: list) -> dict:
-    """The shell startup file; removed_aliases is shell.strip_legacy_aliases's record."""
-    return {"type": "shell_rc", "path": posix(path), "prior": prior, "sha256": sha256,
-            "removed_aliases": removed_aliases}
+def shell_rc_action(path: Any, prior: dict, sha256: str, removed_aliases: list,
+                    mark_added: bool = False) -> dict:
+    """The shell startup file; removed_aliases is shell.strip_legacy_aliases's record.
+    mark_added: the write put a UTF-8 byte-order mark at the start of an existing file that had
+    none (an empty PowerShell profile), recorded as "mark_added": true, so that uninstall can
+    return the file to empty; the key is absent otherwise."""
+    action = {"type": "shell_rc", "path": posix(path), "prior": prior, "sha256": sha256,
+              "removed_aliases": removed_aliases}
+    if mark_added:
+        action["mark_added"] = True
+    return action
 
 
 def legacy_move_action(src: Any, dst: Any) -> dict:
