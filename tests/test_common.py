@@ -33,8 +33,53 @@ with gk_common.locked(sys.argv[2]):
 """
 
 
+# Today's hooks (~/.claude/hooks/gk-remote-clear.py dir_lock): a blocking flock on the
+# folder's own descriptor. The child takes it, says so, holds it, then lets go.
+OLD_LOCK_HOLDER = r"""
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDONLY)
+fcntl.flock(fd, fcntl.LOCK_EX)
+sys.stdout.write("locked\n")
+sys.stdout.flush()
+time.sleep(float(sys.argv[2]))
+os.close(fd)
+"""
+
+# Today's blocking flock, cut short by a 1 s alarm: prints GOT or TIMEOUT.
+OLD_LOCK_TRY = r"""
+import fcntl, os, signal, sys
+
+class Alarm(Exception):
+    pass
+
+def on_alarm(signum, frame):
+    raise Alarm()
+
+signal.signal(signal.SIGALRM, on_alarm)
+fd = os.open(sys.argv[1], os.O_RDONLY)
+signal.alarm(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    print("GOT")
+except Alarm:
+    print("TIMEOUT")
+finally:
+    signal.alarm(0)
+    os.close(fd)
+"""
+
+# Temp folders carry a space, as a Windows home such as C:\Users\Carl Selby does.
+TMP_PREFIX = "gk common "
+
+
 def stdin_bytes(data):
     return io.TextIOWrapper(io.BytesIO(data), encoding="utf-8")
+
+
+def same_path(a, b):
+    """Path equality that survives Windows 8.3 short names and case differences."""
+    return os.path.normcase(os.path.realpath(os.fspath(a))) == os.path.normcase(
+        os.path.realpath(os.fspath(b)))
 
 
 class PidAliveTests(unittest.TestCase):
@@ -81,8 +126,17 @@ class PidAliveTests(unittest.TestCase):
             p.wait()
 
     def test_pid_alive_rejects(self):
-        for v in (None, True, False, 0, -1, "12", 12.0):
+        for v in (None, True, False, 0, -1, "12", 12.0, 2**32 + 4):
             self.assertFalse(gk_common.pid_alive(v), repr(v))
+
+    def test_pid_alive_rejects_pid_beyond_dword_before_asking_the_os(self):
+        # A Windows DWORD would truncate 2**32 + 4 to 4 (System, always alive), so the
+        # value must be refused before either OS call. Both are stubbed to say "alive".
+        with mock.patch.object(gk_common, "_pid_alive_windows", return_value=True) as win, \
+                mock.patch("os.kill") as kill:
+            self.assertFalse(gk_common.pid_alive(2**32 + 4))
+        win.assert_not_called()
+        kill.assert_not_called()
 
 
 class SidAndDirTests(unittest.TestCase):
@@ -101,7 +155,7 @@ class SidAndDirTests(unittest.TestCase):
 
 class JsonFileTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = tempfile.mkdtemp(prefix=TMP_PREFIX)
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
     def test_read_json_missing_and_invalid(self):
@@ -143,6 +197,25 @@ class JsonFileTests(unittest.TestCase):
         self.assertFalse(os.path.exists(path))
         self.assertEqual(list(Path(self.tmp).glob("*.tmp")), [])
 
+    def test_write_json_retries_temp_removal(self):
+        # Windows: antivirus or the indexer can hold the new temp file for a moment, so
+        # the first removals fail; the temp file must still be gone at the end.
+        path = os.path.join(self.tmp, "a.json")
+        real = os.unlink
+        calls = []
+
+        def flaky(p):
+            calls.append(p)
+            if len(calls) <= 2:
+                raise PermissionError("held by a scanner")
+            return real(p)
+
+        with mock.patch("os.replace", side_effect=PermissionError("locked")), \
+                mock.patch("os.unlink", side_effect=flaky):
+            self.assertFalse(gk_common.write_json(path, {"x": 1}))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(list(Path(self.tmp).glob("*.tmp")), [])
+
     def test_write_json_unserialisable_is_false(self):
         path = os.path.join(self.tmp, "a.json")
         self.assertFalse(gk_common.write_json(path, {"x": object()}))
@@ -152,7 +225,7 @@ class JsonFileTests(unittest.TestCase):
 
 class LockTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = tempfile.mkdtemp(prefix=TMP_PREFIX)
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.lockdir = os.path.join(self.tmp, "state")
         os.makedirs(self.lockdir)
@@ -200,29 +273,58 @@ class LockTests(unittest.TestCase):
             pass
         self.assertLess(time.monotonic() - t0, 1.0)
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: today's hooks lock with fcntl.flock")
+    def test_locked_excludes_todays_lock(self):
+        # Old and new hooks run side by side during the changeover (Task 6).
+        p = subprocess.Popen([sys.executable, "-c", OLD_LOCK_HOLDER, self.lockdir, "3"],
+                             stdout=subprocess.PIPE, text=True)
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)
+        self.addCleanup(p.stdout.close)
+        self.assertEqual(p.stdout.readline().strip(), "locked")
+        with self.assertRaises(gk_common.LockTimeout):
+            with gk_common.locked(self.lockdir):
+                self.fail("new locked() acquired while today's lock was held")
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: today's hooks lock with fcntl.flock")
+    def test_todays_lock_excluded_by_locked(self):
+        def old_try():
+            return subprocess.run([sys.executable, "-c", OLD_LOCK_TRY, self.lockdir],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True, timeout=30)
+
+        with gk_common.locked(self.lockdir):
+            r = old_try()
+            self.assertEqual((r.returncode, r.stdout.strip()), (0, "TIMEOUT"), r.stderr)
+        # Control: once released, the same old-style lock is granted.
+        r = old_try()
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "GOT"), r.stderr)
+
 
 class RelPosixTests(unittest.TestCase):
     def test_rel_posix(self):
-        root = os.path.abspath(os.path.join(os.sep, "repo"))
-        inside = os.path.join(root, "src", "a.py")
-        self.assertEqual(gk_common.rel_posix(inside, root), "src/a.py")
-        self.assertEqual(gk_common.rel_posix(Path(inside), Path(root)), "src/a.py")
-        outside = os.path.abspath(os.path.join(os.sep, "elsewhere", "a.py"))
+        root = os.path.abspath(os.path.join(os.sep, "Users", "Carl Selby", "repo"))
+        inside = os.path.join(root, "my src", "a.py")
+        self.assertEqual(gk_common.rel_posix(inside, root), "my src/a.py")
+        self.assertEqual(gk_common.rel_posix(Path(inside), Path(root)), "my src/a.py")
+        outside = os.path.abspath(os.path.join(os.sep, "Users", "Carl Selby", "elsewhere", "a.py"))
         self.assertIsNone(gk_common.rel_posix(outside, root))
         self.assertIsNone(gk_common.rel_posix(os.path.join(root + "x", "a.py"), root))
         self.assertIsNone(gk_common.rel_posix(root, root))
 
     def test_rel_posix_windows_separator(self):
         with mock.patch.object(gk_common, "_path", ntpath):
-            self.assertEqual(gk_common.rel_posix(r"C:\repo\src\a.py", r"C:\repo"), "src/a.py")
-            self.assertEqual(gk_common.rel_posix(r"C:\Repo\src\a.py", r"c:\repo"), "src/a.py")
-            self.assertIsNone(gk_common.rel_posix(r"C:\other\a.py", r"C:\repo"))
-            self.assertIsNone(gk_common.rel_posix(r"D:\repo\a.py", r"C:\repo"))
+            root = r"C:\Users\Carl Selby\repo"
+            self.assertEqual(gk_common.rel_posix(root + r"\my src\a.py", root), "my src/a.py")
+            self.assertEqual(gk_common.rel_posix(r"C:\users\carl selby\Repo\src\a.py", r"c:\Users\Carl Selby\repo"),
+                             "src/a.py")
+            self.assertIsNone(gk_common.rel_posix(r"C:\Users\Carl Selby\other\a.py", root))
+            self.assertIsNone(gk_common.rel_posix(r"D:\Users\Carl Selby\repo\a.py", root))
 
 
 class ProjectTests(unittest.TestCase):
     def setUp(self):
-        self.top = tempfile.mkdtemp()
+        self.top = tempfile.mkdtemp(prefix=TMP_PREFIX)
         self.addCleanup(shutil.rmtree, self.top, True)
 
     def put(self, text):
@@ -239,18 +341,19 @@ class ProjectTests(unittest.TestCase):
                          ({"version": 1, "guards": ["dev only"]}, None))
 
         for bad in (json.dumps({"version": 2}), json.dumps({"version": True}),
-                    json.dumps({"guards": []}), "[1, 2]", "{broken"):
+                    json.dumps({"guards": []}), "[1, 2]", "{broken",
+                    "[" * 100000 + "]" * 100000):  # nesting past the recursion limit
             self.put(bad)
             data, reason = gk_common.load_project(self.top)
-            self.assertIsNone(data, bad)
-            self.assertIsInstance(reason, str, bad)
-            self.assertTrue(reason, bad)
+            self.assertIsNone(data, bad[:40])
+            self.assertIsInstance(reason, str, bad[:40])
+            self.assertTrue(reason, bad[:40])
 
 
 @unittest.skipIf(shutil.which("git") is None, "git not on PATH")
 class GitTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix=TMP_PREFIX))
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.repo, "sub"))
@@ -267,14 +370,19 @@ class GitTests(unittest.TestCase):
         self.git("init", "-q")
         self.git("symbolic-ref", "HEAD", "refs/heads/trunk")
         sub = os.path.join(self.repo, "sub")
+        self.assertIn(" ", self.repo)
         common, top, branch = gk_common.git_identity(sub)
-        self.assertEqual(common, os.path.join(self.repo, ".git"))
-        self.assertEqual(top, self.repo)
+        self.assertTrue(same_path(common, os.path.join(self.repo, ".git")), common)
+        self.assertTrue(same_path(top, self.repo), top)
         self.assertEqual(branch, "(unborn)")
         self.git("commit", "-q", "--allow-empty", "-m", "x")
-        self.assertEqual(gk_common.git_identity(Path(sub)),
-                         (os.path.join(self.repo, ".git"), self.repo, "trunk"))
-        self.assertEqual(gk_common.git_toplevel(sub), Path(self.repo))
+        common, top, branch = gk_common.git_identity(Path(sub))
+        self.assertTrue(same_path(common, os.path.join(self.repo, ".git")), common)
+        self.assertTrue(same_path(top, self.repo), top)
+        self.assertEqual(branch, "trunk")
+        top = gk_common.git_toplevel(sub)
+        self.assertIsInstance(top, Path)
+        self.assertTrue(same_path(top, self.repo), top)
 
     def test_git_outside_repo(self):
         self.assertIsNone(gk_common.git_identity(self.repo))

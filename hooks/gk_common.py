@@ -30,6 +30,7 @@ GIT_TIMEOUT = 5
 PROJECT_FILE = (".claude", "gk-project.json")
 
 _ERROR_ACCESS_DENIED = 5
+_DWORD_MAX = 0xFFFFFFFF
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _STILL_ACTIVE = 259
 
@@ -83,12 +84,24 @@ def write_json(path: str | os.PathLike, obj: Any) -> bool:
                 time.sleep(WRITE_RETRY_DELAY)
     except Exception:
         if tmp is not None:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            _remove_quietly(tmp)
         return False
     return False  # not reached: the loop either returns or raises
+
+
+def _remove_quietly(path: str) -> None:
+    """Remove path, retrying like write_json does (on Windows an antivirus scanner or the
+    indexer can hold a new file for a moment); give up quietly after the last retry."""
+    for attempt in range(WRITE_RETRIES + 1):
+        try:
+            os.unlink(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if attempt == WRITE_RETRIES:
+                return
+            time.sleep(WRITE_RETRY_DELAY)
 
 
 @contextlib.contextmanager
@@ -163,6 +176,10 @@ def _lock_windows(d: str) -> tuple[Callable[[], bool], Callable[[], None], int]:
 def pid_alive(pid: Any) -> bool:
     """Whether a process with this pid exists. Never signals or opens it for writing."""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if pid > _DWORD_MAX:
+        # No OS hands out such a pid, and on Windows the DWORD argument would silently
+        # truncate it (2**32 + 4 would open pid 4, System), so it is never alive.
         return False
     if os.name == "nt":
         return _pid_alive_windows(pid)
@@ -294,7 +311,8 @@ def load_project(toplevel: str | os.PathLike) -> tuple[dict | None, str | None]:
         return None, "%s is unreadable: %s" % (path, e)
     try:
         data = json.loads(raw.decode("utf-8-sig"))
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:
+        # RecursionError: nesting deeper than the interpreter's recursion limit.
         return None, "%s is not valid JSON: %s" % (path, e)
     if not isinstance(data, dict):
         return None, "%s is not a JSON object" % path
