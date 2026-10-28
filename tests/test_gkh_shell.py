@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import os
 import re
 import shutil
@@ -43,6 +44,16 @@ class BlockTests(unittest.TestCase):
                          '# >>> gk-harness >>>\n. "C:/Users/Carl Selby/.gk-harness/shell/aliases.ps1"\n'
                          "# <<< gk-harness <<<\n")
 
+    def test_a_root_a_shell_would_expand_or_unquote_is_refused(self):
+        for ch in ('"', "$", "`"):
+            for windows in (False, True):
+                root = "/home/c%sx/.gk-harness" % ch
+                with self.subTest(ch=ch, windows=windows):
+                    with self.assertRaises(ValueError) as ctx:
+                        shell.render_block(root, windows=windows)
+                    self.assertIn(root, str(ctx.exception))
+                    self.assertIn("contains %s," % ch, str(ctx.exception))
+
     def test_apply_modes(self):
         b = shell.render_block("/r", windows=False)
         self.assertEqual(shell.apply(None, b), (b, "created"))
@@ -66,6 +77,16 @@ class BlockTests(unittest.TestCase):
         new, _ = shell.apply(profile, b)
         self.assertEqual(new, profile + "\r\n" + b.replace("\n", "\r\n"))
         self.assertEqual(shell.strip(new), profile)
+
+    def test_strip_undoes_apply_for_lf_crlf_and_mixed_newlines(self):
+        for windows in (False, True):
+            b = shell.render_block("/r", windows=windows)
+            for start in ("a\nb\n", "a\r\nb\r\n", "a\r\nb\n", "a\nb\r\n", "a\r\nb\n\n",
+                          "a\r\nb\n\r\n"):
+                with self.subTest(windows=windows, start=start):
+                    new, mode = shell.apply(start, b)
+                    self.assertEqual(mode, "appended")
+                    self.assertEqual(shell.strip(new).encode("utf-8"), start.encode("utf-8"))
 
     def test_profile_resaved_with_a_byte_order_mark(self):
         # A created PowerShell profile that a Windows editor then saved with a byte-order mark:
@@ -110,12 +131,12 @@ class LegacyAliasTests(unittest.TestCase):
         self.assertEqual([r["text"] for r in removed], ["alias gk='claude'", "alias gk-opus='x'"])
 
     def test_alias_on_line_one_after_a_byte_order_mark(self):
-        new, removed = shell.strip_legacy_aliases("﻿" + BASHRC[len("# ~/.bashrc\n"):])
-        self.assertEqual(new, "﻿export PATH=$HOME/bin:$PATH\nalias ll='ls -l'\n")
+        new, removed = shell.strip_legacy_aliases("\ufeff" + BASHRC[len("# ~/.bashrc\n"):])
+        self.assertEqual(new, "\ufeffexport PATH=$HOME/bin:$PATH\nalias ll='ls -l'\n")
         self.assertEqual(removed[0], {"line": 2, "text": "alias gk='claude'"})
-        new, removed = shell.strip_legacy_aliases("﻿alias gk='claude'\r\nx\r\n")
-        self.assertEqual((new, removed), ("﻿x\r\n", [{"line": 1, "text": "alias gk='claude'"}]))
-        self.assertEqual(shell.strip_legacy_aliases("﻿"), ("﻿", []))
+        new, removed = shell.strip_legacy_aliases("\ufeffalias gk='claude'\r\nx\r\n")
+        self.assertEqual((new, removed), ("\ufeffx\r\n", [{"line": 1, "text": "alias gk='claude'"}]))
+        self.assertEqual(shell.strip_legacy_aliases("\ufeff"), ("\ufeff", []))
 
     def test_nothing_to_remove(self):
         self.assertEqual(shell.strip_legacy_aliases("alias ll='ls'\n"), ("alias ll='ls'\n", []))
@@ -196,6 +217,30 @@ class AliasFileTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.splitlines(), ["kept", "ARGS:--model fable -p hi"])
 
+    def test_created_profile_with_a_non_ascii_root_loads_in_powershell(self):
+        # Windows PowerShell 5.1 (powershell.exe) is the reader that needs the mark; pwsh too.
+        exes = [e for e in ((shutil.which("powershell") if os.name == "nt" else None),
+                            shutil.which("pwsh")) if e]
+        if not exes:
+            self.skipTest("no PowerShell on PATH")
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = tmp / "Zoë" / ".gk-harness"
+        (root / "shell").mkdir(parents=True)
+        shutil.copyfile(str(ALIASES_PS1), str(root / "shell" / "aliases.ps1"))
+        profile = tmp / "profile.ps1"
+        text, mode = shell.apply(None, shell.render_block(root, windows=True), powershell=True)
+        self.assertEqual(mode, "created")
+        manifest.write_text_atomic(profile, text)
+        command = ("function claude { 'ARGS:' + ($args -join ' ') }; . '%s'; gk -p hi"
+                   % profile.as_posix())
+        for exe in exes:
+            with self.subTest(exe=exe):
+                proc = subprocess.run([exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                                       command], capture_output=True, text=True, timeout=60)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stdout.splitlines(), ["ARGS:--model fable -p hi"])
+
 
 class EncodedProfileTests(unittest.TestCase):
     """Windows PowerShell 5.1's >, >> and Out-File write the profile as UTF-16LE with a
@@ -228,6 +273,45 @@ class EncodedProfileTests(unittest.TestCase):
         self.assertEqual(shell.apply(again, b), (again, "unchanged"))
         manifest.write_text_atomic(profile, shell.strip(again), encoding)
         self.assertEqual(profile.read_bytes(), original)
+
+    def test_a_created_profile_is_utf8_with_a_mark(self):
+        # Windows PowerShell 5.1 reads a .ps1 without a mark in the ANSI code page, so a new
+        # profile starts with the UTF-8 mark and the non-ASCII root comes through.
+        profile = self.tmp / "Microsoft.PowerShell_profile.ps1"
+        b = shell.render_block(PureWindowsPath("C:\\Users\\Zo\u00eb\\.gk-harness"), windows=True)
+        text, mode = shell.apply(None, b, powershell=True)
+        self.assertEqual((text, mode), ("\ufeff" + b, "created"))
+        manifest.write_text_atomic(profile, text)
+        data = profile.read_bytes()
+        self.assertEqual(data, codecs.BOM_UTF8 + b.encode("utf-8"))
+        again, encoding = manifest.read_text_encoded(profile)
+        self.assertEqual(shell.apply(again, b, powershell=True), (again, "unchanged"))
+        self.assertEqual(shell.strip(again), "\ufeff")
+        # Not a PowerShell profile: a created rc file has no mark.
+        posix_block = shell.render_block("/home/zo\u00eb/.gk-harness", windows=False)
+        self.assertEqual(shell.apply(None, posix_block), (posix_block, "created"))
+
+    def test_an_existing_profile_keeps_its_encoding_and_mark(self):
+        profile = self.tmp / "profile.ps1"
+        b = shell.render_block(PureWindowsPath("C:\\Users\\Zo\u00eb\\.gk-harness"), windows=True)
+        body = "Set-Alias ll Get-ChildItem\r\n"
+        for mark, original in ((b"", body.encode("utf-8")),
+                               (codecs.BOM_UTF8, codecs.BOM_UTF8 + body.encode("utf-8")),
+                               (b"", b""),
+                               (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_LE + body.encode("utf-16-le"))):
+            with self.subTest(original=original[:4]):
+                profile.write_bytes(original)
+                text, encoding = manifest.read_text_encoded(profile)
+                new, mode = shell.apply(text, b, powershell=True)
+                self.assertEqual(mode, "appended")
+                manifest.write_text_atomic(profile, new, encoding)
+                data = profile.read_bytes()
+                self.assertTrue(data.startswith(mark))
+                self.assertFalse(data[len(mark):].startswith(codecs.BOM_UTF8))
+                self.assertEqual(data[len(mark):].decode(encoding), new.lstrip("\ufeff"))
+                text, encoding = manifest.read_text_encoded(profile)
+                manifest.write_text_atomic(profile, shell.strip(text), encoding)
+                self.assertEqual(profile.read_bytes(), original)
 
     def test_utf16le_profile_cannot_be_read_as_utf8(self):
         profile = self.tmp / "profile.ps1"

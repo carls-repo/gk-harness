@@ -125,6 +125,19 @@ class StripTests(unittest.TestCase):
                 new, _ = cm.apply(start, block())
                 self.assertEqual(cm.strip(new), start)
 
+    def test_strip_undoes_apply_for_lf_crlf_and_mixed_newlines(self):
+        # A file with any CRLF gets the block, and the blank line before it, in CRLF; strip
+        # takes back exactly that blank line, even after an LF line end.
+        for start in ("a\nb\n", "a\r\nb\r\n", "a\r\nb\n", "a\nb\r\n", "a\r\nb\n\n",
+                      "a\nb\r\n\r\n", "a\r\nb\n\r\n"):
+            with self.subTest(start=start):
+                new, mode = cm.apply(start, block())
+                self.assertEqual(mode, "appended")
+                self.assertEqual(cm.strip(new).encode("utf-8"), start.encode("utf-8"))
+                updated, mode = cm.apply(new, block("1.1.0", "new policy\n"))
+                self.assertEqual(mode, "updated")
+                self.assertEqual(cm.strip(updated), start)
+
     def test_unterminated_notes_gain_only_a_newline(self):
         new, _ = cm.apply("notes", block())
         self.assertEqual(cm.strip(new), "notes\n")
@@ -153,43 +166,51 @@ class ByteOrderMarkTests(unittest.TestCase):
 
     def test_created_file_resaved_with_a_mark(self):
         created, _ = cm.apply(None, block("1.0.0"))
-        text = "﻿" + created
+        text = "\ufeff" + created
         self.assertTrue(cm.has_block(text))
         self.assertEqual(cm.apply(text, block("1.0.0")), (text, "unchanged"))
-        self.assertEqual(cm.apply(text, block("1.1.0")), ("﻿" + block("1.1.0"), "updated"))
-        self.assertEqual(cm.strip(text), "﻿")
+        self.assertEqual(cm.apply(text, block("1.1.0")), ("\ufeff" + block("1.1.0"), "updated"))
+        self.assertEqual(cm.strip(text), "\ufeff")
 
     def test_replaced_old_policy_resaved_with_a_mark_and_crlf(self):
         replaced, mode = cm.apply(OLD.replace("\n", "\r\n"), block())
         self.assertEqual(mode, "replaced_old_policy")
-        text = "﻿" + replaced + "my notes\r\n"
+        text = "\ufeff" + replaced + "my notes\r\n"
         self.assertFalse(cm.is_old_policy(text))
         new, mode = cm.apply(text, block("1.1.0"))
         self.assertEqual(mode, "updated")
-        self.assertEqual(new, "﻿" + block("1.1.0").replace("\n", "\r\n") + "my notes\r\n")
-        self.assertEqual(cm.strip(text), "﻿my notes\r\n")
+        self.assertEqual(new, "\ufeff" + block("1.1.0").replace("\n", "\r\n") + "my notes\r\n")
+        self.assertEqual(cm.strip(text), "\ufeffmy notes\r\n")
 
     def test_round_trips_with_a_mark(self):
-        for start in ("﻿", "﻿" + NOTES, "﻿" + NOTES.replace("\n", "\r\n")):
+        for start in ("\ufeff", "\ufeff" + NOTES, "\ufeff" + NOTES.replace("\n", "\r\n")):
             with self.subTest(start=start):
                 new, mode = cm.apply(start, block())
                 self.assertEqual(mode, "appended")
-                self.assertTrue(new.startswith("﻿") and not new.startswith("﻿﻿"))
+                self.assertTrue(new.startswith("\ufeff") and not new.startswith("\ufeff\ufeff"))
                 self.assertEqual(cm.strip(new), start)
                 self.assertEqual(cm.apply(new, block()), (new, "unchanged"))
-        self.assertEqual(cm.apply("﻿", block())[0], "﻿" + block())
+        self.assertEqual(cm.apply("\ufeff", block())[0], "\ufeff" + block())
 
     def test_a_mark_elsewhere_is_not_skipped(self):
         # Only a mark at the very start is set aside; anywhere else it is part of the line.
-        text = "notes\n﻿<!-- gk-harness:end -->\n"
+        text = "notes\n\ufeff<!-- gk-harness:end -->\n"
         self.assertEqual(cm.strip(text), text)
+
+    def test_sources_spell_the_mark_as_an_escape(self):
+        # A raw U+FEFF is invisible in an editor and in review, and easy to lose; the installer
+        # and its tests write it as the escape \\ufeff.
+        for folder in ("gkh", "tests"):
+            for path in sorted(Path(ROOT, folder).rglob("*.py")):
+                with self.subTest(path=path.name):
+                    self.assertNotIn("\ufeff", path.read_bytes().decode("utf-8"))
 
 
 class OldPolicyTests(unittest.TestCase):
     def test_detection(self):
         self.assertTrue(cm.is_old_policy(OLD))
         self.assertTrue(cm.is_old_policy("# Model orchestration policy"))
-        self.assertTrue(cm.is_old_policy("﻿# Model orchestration policy\r\nx"))
+        self.assertTrue(cm.is_old_policy("\ufeff# Model orchestration policy\r\nx"))
         self.assertFalse(cm.is_old_policy(NOTES))
         self.assertFalse(cm.is_old_policy(""))
 

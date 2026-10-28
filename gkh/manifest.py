@@ -20,7 +20,7 @@ from typing import Any
 from .paths import posix, utc_iso
 
 FORMAT = 1
-ACTION_TYPES = ("file", "settings", "claude_md", "shell_rc", "legacy_move")
+ACTION_TYPES = ("file", "settings", "claude_md", "shell_rc", "legacy_move", "folder")
 WRITE_RETRIES = 10
 WRITE_RETRY_DELAY = 0.1
 # The encodings a text file the installer edits may be in. A UTF-16 or UTF-32 file is known by
@@ -115,6 +115,13 @@ def legacy_move_action(src: Any, dst: Any) -> dict:
     return {"type": "legacy_move", "src": posix(src), "dst": posix(dst)}
 
 
+def folder_action(path: Any) -> dict:
+    """A folder a write created (one of its `created` list). Record these, in that list's
+    order, before the action of the write that needed them, so that uninstall, replaying newest
+    first, reaches each folder after the files in it and removes it only when it is empty."""
+    return {"type": "folder", "path": posix(path)}
+
+
 def actions_newest_first(journal: dict) -> list:
     """Every action of every install, in the order uninstall replays them."""
     return [a for inst in reversed(journal["installs"]) for a in reversed(inst["actions"])]
@@ -205,29 +212,85 @@ def _remove_quietly(path: str) -> None:
             time.sleep(WRITE_RETRY_DELAY)
 
 
-def write_bytes_atomic(path: Any, data: bytes) -> str:
+def _remove_folders(made: list) -> None:
+    """Remove the folders in made (outermost first), innermost first, each only when empty."""
+    for folder in reversed(made):
+        try:
+            os.rmdir(folder)
+        except OSError:
+            pass
+
+
+def _make_folders(folder: str) -> list:
+    """Create folder and any missing parents; returns the folders created, outermost first. A
+    folder that appears meanwhile is not counted. On failure the folders created so far are
+    removed again and the error raised."""
+    missing = []
+    cur = folder
+    while cur and not os.path.isdir(cur):
+        missing.append(cur)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    made: list = []
+    try:
+        for d in reversed(missing):
+            try:
+                os.mkdir(d)
+            except FileExistsError:
+                if not os.path.isdir(d):
+                    raise
+                continue
+            made.append(d)
+    except BaseException:
+        _remove_folders(made)
+        raise
+    return made
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+def write_bytes_atomic(path: Any, data: bytes, created: list | None = None,
+                       private: bool = False) -> str:
     """Write data through a temp file in the same folder and os.replace; returns its sha256.
 
-    A symlink is written through (its target is replaced, the link kept). An existing file's
-    permission bits are kept. os.replace is retried while Windows reports the file locked.
-    Raises on failure, leaving the old file and no temp file behind.
+    A symlink is written through (its target is replaced, the link kept). os.replace is
+    retried while Windows reports the file locked. Raises on failure, leaving the old file, no
+    temp file and none of the folders this write created (each removed when empty).
+
+    Permissions (POSIX): an existing file keeps its mode, and a new one gets the umask default,
+    or 0600 when private is true. The temp file is created 0600 (or narrower, by the umask) and
+    set to that mode before any byte is written, so data such as a 0600 settings.json is never
+    readable more widely than the file it replaces.
+
+    created: when a list, the folders this write had to create (to hold path) are appended to
+    it, outermost first, as Paths, so the caller can journal them with folder_action. Nothing
+    is appended when the write fails.
     """
     target = os.fspath(path)
     if os.path.islink(target):
         target = os.path.realpath(target)
     folder = os.path.dirname(target)
-    if folder:
-        os.makedirs(folder, exist_ok=True)
+    made = _make_folders(folder) if folder else []
     tmp = "%s.%d.%s.tmp" % (target, os.getpid(), os.urandom(4).hex())
     try:
-        with open(tmp, "xb") as f:
-            f.write(data)
         try:
             mode = stat.S_IMODE(os.stat(target).st_mode)
         except FileNotFoundError:
-            mode = None
-        if mode is not None and os.name != "nt":
-            os.chmod(tmp, mode)
+            mode = 0o600 if private else None
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        fd = os.open(tmp, flags, 0o666 if mode is None else 0o600)
+        try:
+            if mode is not None and os.name != "nt":
+                os.fchmod(fd, mode)
+            _write_all(fd, data)
+        finally:
+            os.close(fd)
         for attempt in range(WRITE_RETRIES + 1):
             try:
                 os.replace(tmp, target)
@@ -238,21 +301,28 @@ def write_bytes_atomic(path: Any, data: bytes) -> str:
                 time.sleep(WRITE_RETRY_DELAY)
     except BaseException:
         _remove_quietly(tmp)
+        _remove_folders(made)
         raise
+    if created is not None:
+        created.extend(Path(d) for d in made)
     return sha256_bytes(data)
 
 
-def write_text_atomic(path: Any, text: str, encoding: str = "utf-8") -> str:
+def write_text_atomic(path: Any, text: str, encoding: str = "utf-8", created: list | None = None,
+                      private: bool = False) -> str:
     """write_bytes_atomic of encode_text(text, encoding): UTF-8 by default (surrogateescape, as
     read_text), newlines untouched; returns the sha256 of the bytes written."""
-    return write_bytes_atomic(path, encode_text(text, encoding))
+    return write_bytes_atomic(path, encode_text(text, encoding), created, private)
 
 
-def write_json_atomic(path: Any, obj: Any) -> str:
+def write_json_atomic(path: Any, obj: Any, created: list | None = None,
+                      private: bool = False) -> str:
     """obj as two-space-indented JSON with a final newline, non-ASCII kept."""
-    return write_text_atomic(path, json.dumps(obj, indent=2, ensure_ascii=False) + "\n")
+    return write_text_atomic(path, json.dumps(obj, indent=2, ensure_ascii=False) + "\n",
+                             created=created, private=private)
 
 
-def copy_file(src: Any, dst: Any) -> str:
-    """Copy src's bytes to dst atomically; returns their sha256."""
-    return write_bytes_atomic(dst, Path(src).read_bytes())
+def copy_file(src: Any, dst: Any, created: list | None = None, private: bool = False) -> str:
+    """Copy src's bytes to dst atomically; returns their sha256. A backup of a file that may
+    hold secrets, such as settings.json, is copied with private=True."""
+    return write_bytes_atomic(dst, Path(src).read_bytes(), created, private)

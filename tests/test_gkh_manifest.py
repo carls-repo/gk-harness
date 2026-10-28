@@ -80,7 +80,10 @@ class JournalTests(unittest.TestCase):
                           "removed_aliases": removed})
         self.assertEqual(mf.legacy_move_action("/c/profiles", "/b/legacy/profiles"),
                          {"type": "legacy_move", "src": "/c/profiles", "dst": "/b/legacy/profiles"})
-        self.assertEqual(mf.ACTION_TYPES, ("file", "settings", "claude_md", "shell_rc", "legacy_move"))
+        self.assertEqual(mf.folder_action(w(r"C:\Users\C S\.claude\hooks\gk-harness")),
+                         {"type": "folder", "path": "C:/Users/C S/.claude/hooks/gk-harness"})
+        self.assertEqual(mf.ACTION_TYPES,
+                         ("file", "settings", "claude_md", "shell_rc", "legacy_move", "folder"))
 
     def test_actions_newest_first(self):
         m = mf.empty()
@@ -144,12 +147,12 @@ class FileHelperTests(unittest.TestCase):
 
     def test_utf8_keeps_its_mark_in_the_text(self):
         data = b"\xef\xbb\xbfalias ll='ls'\n"
-        self.assertEqual(mf.decode_text(data), ("﻿alias ll='ls'\n", "utf-8"))
-        self.assertEqual(mf.encode_text("﻿alias ll='ls'\n"), data)
+        self.assertEqual(mf.decode_text(data), ("\ufeffalias ll='ls'\n", "utf-8"))
+        self.assertEqual(mf.encode_text("\ufeffalias ll='ls'\n"), data)
         p = self.tmp / "rc"
         p.write_bytes(data)
-        self.assertEqual(mf.read_text(p), "﻿alias ll='ls'\n")
-        self.assertEqual(mf.read_text_encoded(p), ("﻿alias ll='ls'\n", "utf-8"))
+        self.assertEqual(mf.read_text(p), "\ufeffalias ll='ls'\n")
+        self.assertEqual(mf.read_text_encoded(p), ("\ufeffalias ll='ls'\n", "utf-8"))
         self.assertIsNone(mf.read_text_encoded(self.tmp / "nope"))
 
     def test_text_an_edit_would_corrupt_is_refused(self):
@@ -177,6 +180,111 @@ class FileHelperTests(unittest.TestCase):
         os.chmod(str(p), 0o600)
         mf.write_text_atomic(p, "{}\n")
         self.assertEqual(stat.S_IMODE(os.stat(str(p)).st_mode), 0o600)
+
+    def modes_while_writing(self, write):
+        """Run write() under umask 022 and return the temp file's mode at each os.write."""
+        seen = []
+        real_write = os.write
+
+        def spy(fd, data):
+            seen.append(stat.S_IMODE(os.fstat(fd).st_mode))
+            return real_write(fd, data)
+
+        old = os.umask(0o022)
+        try:
+            with mock.patch.object(mf.os, "write", side_effect=spy):
+                write()
+        finally:
+            os.umask(old)
+        self.assertTrue(seen, "the data was not written through os.write")
+        return seen
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions")
+    def test_temp_file_is_never_wider_than_a_private_target_while_data_goes_in(self):
+        # settings.json may hold env tokens. Under umask 022 a temp file would start 0644; it
+        # must be 0600 before the first byte goes in, not chmod-ed after.
+        p = self.tmp / "settings.json"
+        p.write_text("{}")
+        os.chmod(str(p), 0o600)
+        seen = self.modes_while_writing(lambda: mf.write_text_atomic(p, '{"env": {"T": "s"}}\n'))
+        self.assertEqual(set(seen), {0o600})
+        self.assertEqual(stat.S_IMODE(os.stat(str(p)).st_mode), 0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions")
+    def test_new_file_modes(self):
+        # A new private file is 0600 from the start; a new file otherwise gets the umask default,
+        # and an existing 0644 file stays 0644.
+        private = self.tmp / "backup" / "settings.json"
+        seen = self.modes_while_writing(lambda: mf.write_text_atomic(private, "{}", private=True))
+        self.assertEqual(set(seen), {0o600})
+        self.assertEqual(stat.S_IMODE(os.stat(str(private)).st_mode), 0o600)
+        copied = self.tmp / "backup" / "copy.json"
+        self.modes_while_writing(lambda: mf.copy_file(private, copied, private=True))
+        self.assertEqual(stat.S_IMODE(os.stat(str(copied)).st_mode), 0o600)
+        plain = self.tmp / "plain.md"
+        self.modes_while_writing(lambda: mf.write_text_atomic(plain, "x"))
+        self.assertEqual(stat.S_IMODE(os.stat(str(plain)).st_mode), 0o644)
+        seen = self.modes_while_writing(lambda: mf.write_text_atomic(plain, "y", private=True))
+        self.assertTrue(all(m & ~0o644 == 0 for m in seen), seen)
+        self.assertEqual(stat.S_IMODE(os.stat(str(plain)).st_mode), 0o644)
+
+    def test_created_folders_are_reported_outermost_first(self):
+        p = self.tmp / "hooks" / "gk-harness" / "gk-seat.py"
+        made = []
+        sha = mf.write_text_atomic(p, "x", created=made)
+        self.assertEqual(made, [self.tmp / "hooks", self.tmp / "hooks" / "gk-harness"])
+        self.assertEqual(sha, mf.sha256_file(p))
+        again = []
+        mf.write_text_atomic(p, "y", created=again)
+        self.assertEqual(again, [])
+        for write in (lambda m: mf.write_bytes_atomic(self.tmp / "b1" / "f", b"x", created=m),
+                      lambda m: mf.write_json_atomic(self.tmp / "b2" / "f.json", {}, created=m),
+                      lambda m: mf.copy_file(p, self.tmp / "agents" / "worker-opus.md", created=m)):
+            m = []
+            write(m)
+            self.assertEqual(len(m), 1)
+            self.assertTrue(m[0].is_dir())
+        mf.write_text_atomic(self.tmp / "b3" / "f", "x")  # no list: still creates the folder
+        self.assertTrue((self.tmp / "b3" / "f").is_file())
+
+    def test_a_failed_write_removes_the_folders_it_created(self):
+        (self.tmp / "agents").mkdir()
+        p = self.tmp / "agents" / "a" / "b" / "worker-opus.md"
+        made = []
+        with mock.patch.object(mf.os, "replace", side_effect=PermissionError("locked")), \
+                mock.patch.object(mf.time, "sleep"):
+            with self.assertRaises(PermissionError):
+                mf.write_text_atomic(p, "x", created=made)
+        self.assertEqual(made, [])
+        self.assertEqual(os.listdir(str(self.tmp / "agents")), [])
+
+    def test_a_folder_that_appears_meanwhile_is_not_counted(self):
+        # Another process makes hooks/ between the check and the mkdir: it is not this write's.
+        p = self.tmp / "hooks" / "gk-harness" / "gk-seat.py"
+        real_mkdir = os.mkdir
+
+        def racing_mkdir(path, *args):
+            if os.path.basename(path) == "hooks":
+                real_mkdir(path)
+                raise FileExistsError(path)
+            return real_mkdir(path, *args)
+
+        made = []
+        with mock.patch.object(mf.os, "mkdir", side_effect=racing_mkdir):
+            mf.write_text_atomic(p, "x", created=made)
+        self.assertEqual(made, [self.tmp / "hooks" / "gk-harness"])
+
+    def test_a_failed_write_keeps_a_created_folder_something_else_wrote_into(self):
+        p = self.tmp / "a" / "b" / "f.md"
+
+        def replace_after_another_writer(src, dst):
+            (self.tmp / "a" / "other.txt").write_text("not ours to delete")
+            raise OSError("disk full")
+
+        with mock.patch.object(mf.os, "replace", side_effect=replace_after_another_writer):
+            with self.assertRaises(OSError):
+                mf.write_text_atomic(p, "x")
+        self.assertEqual(os.listdir(str(self.tmp / "a")), ["other.txt"])
 
     @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
     def test_a_symlinked_target_is_written_through(self):

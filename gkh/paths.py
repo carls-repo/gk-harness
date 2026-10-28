@@ -16,6 +16,10 @@ PS_TIMEOUT = 5
 # The installer owns a settings.json hook entry exactly when its command, with "\\" read as
 # "/", contains this.
 OWNED_MARKER = "hooks/gk-harness/"
+# The characters a path may not hold where it stands inside double quotes in a hook command or
+# the shell rc block: '"' ends the quotes, and sh, bash, zsh and PowerShell expand "$" and "`"
+# inside them, so the command would name a different path.
+UNQUOTABLE = ('"', "$", "`")
 _STAMP = "%Y%m%dT%H%M%SZ"
 _ISO = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -52,6 +56,18 @@ def posix(p: str | os.PathLike) -> str:
     """p with forward slashes. A PureWindowsPath converts on any OS; a str or native path
     converts by the running OS's rules (a backslash is a legal file-name character on POSIX)."""
     return p.as_posix() if isinstance(p, PurePath) else Path(p).as_posix()
+
+
+def quotable(p: str | os.PathLike) -> str:
+    """posix(p), for a path that goes inside double quotes in a shell command. Raises
+    ValueError, naming the path and the character, when it holds one of UNQUOTABLE."""
+    s = posix(p)
+    bad = next((c for c in s if c in UNQUOTABLE), None)
+    if bad is not None:
+        why = ("would end the double quotes around it" if bad == '"'
+               else "a shell would expand inside double quotes")
+        raise ValueError("the path %s contains %s, which %s" % (s, bad, why))
+    return s
 
 
 def python_exe() -> str | None:

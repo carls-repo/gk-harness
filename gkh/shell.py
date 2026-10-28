@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from . import claude_md, legacy
-from .paths import posix
+from .paths import quotable
 
 _LINE = re.compile(r"[^\n]*\n|[^\n]+")  # each line with its "\n"; splits on "\n" only
 
@@ -25,13 +25,23 @@ def is_end(line: str) -> bool:
 
 def render_block(root: Any, windows: bool) -> str:
     """The block that sources <root>/shell/aliases.sh, or dot-sources <root>/shell/aliases.ps1
-    on Windows (PowerShell reads `#` as a comment too). The path is posix and double-quoted."""
+    on Windows (PowerShell reads `#` as a comment too). The path is posix and double-quoted;
+    raises ValueError (paths.quotable) when it holds '"', '$' or '`'."""
     name = "aliases.ps1" if windows else "aliases.sh"
-    return '%s\n. "%s/shell/%s"\n%s\n' % (BEGIN_MARKER, posix(root), name, END_MARKER)
+    return '%s\n. "%s/shell/%s"\n%s\n' % (BEGIN_MARKER, quotable(root), name, END_MARKER)
 
 
-def apply(existing: str | None, block: str, label: str = LABEL) -> tuple:
-    """(new_text, mode): mode is "created", "unchanged", "updated" or "appended"."""
+def apply(existing: str | None, block: str, label: str = LABEL,
+          powershell: bool = False) -> tuple:
+    """(new_text, mode): mode is "created", "unchanged", "updated" or "appended".
+
+    powershell: the file is a PowerShell profile. One this call creates (existing None) starts
+    with a byte-order mark, so that written as UTF-8 it is read as UTF-8 by Windows PowerShell
+    5.1, which reads a .ps1 without a mark in the ANSI code page and would misread a non-ASCII
+    root. An existing profile keeps its own encoding and mark (manifest.read_text_encoded).
+    """
+    if existing is None and powershell:
+        return claude_md.BOM + block, "created"
     return claude_md.apply_block(existing, block, is_begin, is_end, label)
 
 

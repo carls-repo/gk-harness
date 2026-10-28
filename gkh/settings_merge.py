@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from pathlib import Path
 from typing import Any
 
 from . import legacy
-from .paths import OWNED_MARKER, posix
+from .paths import OWNED_MARKER, quotable
 
 HOOK_TIMEOUT = 10
 
@@ -41,11 +42,9 @@ class SettingsError(ValueError):
 
 
 def hook_command(python: Any, claude_dir: Any, script: str) -> str:
-    """'"<python>" "<claude_dir>/hooks/gk-harness/<script>"', both paths posix and quoted."""
-    py, cdir = posix(python), posix(claude_dir)
-    if '"' in py or '"' in cdir:
-        raise ValueError("a hook path may not contain a double quote")
-    return '"%s" "%s/%s%s"' % (py, cdir, OWNED_MARKER, script)
+    """'"<python>" "<claude_dir>/hooks/gk-harness/<script>"', both paths posix and quoted.
+    Raises ValueError (paths.quotable) when either path holds '"', '$' or '`'."""
+    return '"%s" "%s/%s%s"' % (quotable(python), quotable(claude_dir), OWNED_MARKER, script)
 
 
 def is_owned(command: Any) -> bool:
@@ -78,6 +77,15 @@ def _no_constants(name: str) -> Any:
     raise ValueError("%s is not allowed" % name)
 
 
+def _finite_float(text: str) -> float:
+    """A JSON number with a fraction or exponent, refused when it overflows to infinity (such as
+    1e400), which dumps would write back as Infinity, which is not JSON."""
+    value = float(text)
+    if math.isinf(value) or math.isnan(value):
+        raise ValueError("the number %s is out of range" % text)
+    return value
+
+
 def check_shape(settings: Any, label: str = "settings.json") -> None:
     """Raise SettingsError unless settings is an object whose `hooks`, if present, is an object
     and whose registered events, if present, are lists. Other events are not ours to judge."""
@@ -96,8 +104,9 @@ def check_shape(settings: Any, label: str = "settings.json") -> None:
 def load_strict(path: Any) -> dict | None:
     """The parsed settings, or None when the file is absent.
 
-    Strict: no comments, no trailing commas, nothing truncated or trailing, no NaN/Infinity,
-    no duplicate keys (a rewrite would silently drop one). A UTF-8 byte-order mark is allowed.
+    Strict: no comments, no trailing commas, nothing truncated or trailing, no NaN/Infinity and
+    no number that overflows to infinity (a rewrite would write Infinity), no duplicate keys (a
+    rewrite would silently drop one). A UTF-8 byte-order mark is allowed.
     Raises SettingsError, naming the file and where it fails.
     """
     label = str(path)
@@ -113,7 +122,7 @@ def load_strict(path: Any) -> dict | None:
         raise SettingsError("%s is not UTF-8 text" % label) from None
     try:
         settings = json.loads(text, object_pairs_hook=_no_duplicate_keys,
-                              parse_constant=_no_constants)
+                              parse_constant=_no_constants, parse_float=_finite_float)
     except json.JSONDecodeError as e:
         raise SettingsError("%s is not strict JSON: %s (line %d, column %d)"
                             % (label, e.msg, e.lineno, e.colno)) from None
@@ -194,12 +203,13 @@ def merge(settings: dict, python: Any, claude_dir: Any) -> tuple:
                       "kept_index", "entry_index", "entry"}, ...]  # each legacy entry taken
                                                                # out, in order
        "ultracode": {"present": False} or {"present": True, "value": <prior value>},
-       "events":    [event names in `hooks` before the merge], or None when `hooks` was absent}
+       "events":    [event names in `hooks` before the merge], or None when `hooks` was absent,
+       "created_events": [the event lists this merge added to `hooks`, in order]}
     """
     check_shape(settings)
     new = copy.deepcopy(settings)
     undo = {"removed": [], "ultracode": _ultracode_state(new),
-            "events": list(new["hooks"]) if "hooks" in new else None}
+            "events": list(new["hooks"]) if "hooks" in new else None, "created_events": []}
     hooks = new.setdefault("hooks", {})
     desired = desired_groups(python, claude_dir)
     for event_index, event in enumerate(list(hooks)):
@@ -217,6 +227,7 @@ def merge(settings: dict, python: Any, claude_dir: Any) -> tuple:
     for event, groups in desired.items():
         if event not in hooks:
             hooks[event] = copy.deepcopy(groups)
+            undo["created_events"].append(event)
     new["ultracode"] = True
     return new, undo
 
@@ -310,10 +321,17 @@ def _restore(new: dict, removed: list) -> None:
         group["hooks"].insert(min(r["entry_index"], len(group["hooks"])), copy.deepcopy(r["entry"]))
 
 
+def _names(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(e, str) for e in value)
+
+
 def unmerge(settings: dict, undo: Any) -> dict:
     """Reverse merge() surgically, keeping whatever else changed since: drop the owned entries,
-    put the recorded legacy entries back, restore `ultracode`, and remove the event lists and
-    `hooks` key the merge created once they are empty. Malformed parts of undo are ignored."""
+    put the recorded legacy entries back, restore `ultracode`, and remove an event list only
+    when the merge created it (undo["created_events"]) and it is now empty, and the `hooks` key
+    only when the merge created it and it is now empty. Every other key, an empty event list
+    the user added since included, is left as it is. Malformed parts of undo are ignored; with
+    no usable created_events, only the event lists that held nothing but owned entries go."""
     undo = undo if isinstance(undo, dict) else {}
     new = copy.deepcopy(settings)
     hooks = new.get("hooks")
@@ -328,20 +346,14 @@ def unmerge(settings: dict, undo: Any) -> dict:
     removed = undo.get("removed")
     _restore(new, removed if isinstance(removed, list) else [])
 
-    events = undo.get("events", _MISSING)
-    if isinstance(events, list) and not all(isinstance(e, str) for e in events):
-        events = _MISSING
+    created = undo.get("created_events", _MISSING)
     hooks = new.get("hooks")
     if isinstance(hooks, dict):
-        if isinstance(events, list) or events is None:
-            before = set(events or [])
-            for event in [e for e, v in hooks.items() if v == [] and e not in before]:
+        for event in (created if _names(created) else sorted(emptied)):
+            if hooks.get(event) == []:
                 del hooks[event]
-            if events is None and not hooks:
-                del new["hooks"]
-        else:
-            for event in [e for e in emptied if hooks.get(e) == []]:
-                del hooks[event]
+        if undo.get("events", _MISSING) is None and not hooks:
+            del new["hooks"]
 
     prior = undo.get("ultracode")
     if isinstance(prior, dict) and prior.get("present") is True and "value" in prior:

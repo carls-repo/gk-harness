@@ -80,6 +80,22 @@ class RegistrationTests(unittest.TestCase):
         self.assertNotIn(" -I", got)
         self.assertNotIn(" -E", got)
 
+    def test_hook_command_refuses_what_a_shell_reads_inside_double_quotes(self):
+        # '"' ends the quotes; sh, bash, zsh and PowerShell expand "$" and "`" inside them, so
+        # the command would run a different path.
+        for ch in ('"', "$", "`"):
+            for python, cdir, bad in (("/opt/a%sb/python3" % ch, CDIR, "/opt/a%sb/python3" % ch),
+                                      (PY, "/home/c%sx/.claude" % ch, "/home/c%sx/.claude" % ch),
+                                      (PY, PureWindowsPath("C:\\Users\\c%sx\\.claude" % ch),
+                                       "C:/Users/c%sx/.claude" % ch)):
+                with self.subTest(ch=ch, bad=bad):
+                    with self.assertRaises(ValueError) as ctx:
+                        sm.hook_command(python, cdir, "gk-seat.py")
+                    self.assertIn(bad, str(ctx.exception))
+                    self.assertIn("contains %s," % ch, str(ctx.exception))
+                    with self.assertRaises(ValueError):
+                        sm.merge({}, python, cdir)
+
     def test_is_owned(self):
         self.assertTrue(sm.is_owned(cmd("gk-seat.py")))
         self.assertTrue(sm.is_owned(r'"C:\py.exe" "C:\Users\C\.claude\hooks\gk-harness\gk-seat.py"'))
@@ -90,7 +106,8 @@ class RegistrationTests(unittest.TestCase):
 class MergeTests(unittest.TestCase):
     def test_empty_settings(self):
         new, undo = sm.merge({}, PY, CDIR)
-        self.assertEqual(undo, {"removed": [], "ultracode": {"present": False}, "events": None})
+        self.assertEqual(undo, {"removed": [], "ultracode": {"present": False}, "events": None,
+                                "created_events": list(sm.REGISTERED_EVENTS)})
         self.assertIs(new["ultracode"], True)
         self.assertEqual(new["hooks"], {
             "SessionStart": [{"hooks": [entry("gk-seat.py"), entry("gk-peers.py")]}],
@@ -330,6 +347,27 @@ class UnmergeTests(unittest.TestCase):
             self.assertIn(r["entry"]["command"], [c for _, _, c in commands(back)])
         self.assertIs(back["ultracode"], True)
 
+    def test_created_events_are_recorded(self):
+        _, undo = sm.merge({}, PY, CDIR)
+        self.assertEqual(undo["created_events"], list(sm.REGISTERED_EVENTS))
+        _, undo = sm.merge(box_settings(), PY, CDIR)
+        self.assertEqual(undo["created_events"], ["PostModelSwitch"])
+        s1, _ = sm.merge({}, PY, CDIR)
+        self.assertEqual(sm.merge(s1, PY, CDIR)[1]["created_events"], [])
+
+    def test_an_empty_event_list_added_after_install_is_kept(self):
+        # Only the event lists the merge created go once empty; an empty list the user added
+        # since is a key the installer does not own, whatever its name.
+        for start in ({}, {"model": "x"}, box_settings(), {"hooks": {"Stop": []}}):
+            with self.subTest(start=json.dumps(start)[:60]):
+                new, undo = sm.merge(start, PY, CDIR)
+                new["hooks"]["Notification"] = []
+                new["hooks"]["PreCompact"] = []
+                back = sm.unmerge(new, undo)
+                expected = copy.deepcopy(start)
+                expected.setdefault("hooks", {}).update({"Notification": [], "PreCompact": []})
+                self.assertEqual(sm.dumps(back), sm.dumps(expected))
+
     def test_two_installs_unwind_in_reverse(self):
         # A second install after a Python upgrade, then both journal entries reversed newest
         # first, gives back the starting file.
@@ -347,6 +385,8 @@ class UnmergeTests(unittest.TestCase):
             back = sm.unmerge(new, undo)
             self.assertEqual(sm.owned_entries(back), [])
             self.assertEqual(back["model"], "x")
+            # No usable created_events: only the lists that held nothing but owned entries go.
+            self.assertEqual(back["hooks"], {})
 
     def test_prior_absent_ultracode_is_removed(self):
         new, undo = sm.merge({"model": "x"}, PY, CDIR)
@@ -410,6 +450,17 @@ class LoadStrictTests(unittest.TestCase):
         for data in (b'{"a": NaN}', b'{"a": Infinity}', b'{"a": -Infinity}', b'{"a": 1, "a": 2}'):
             with self.subTest(data=data):
                 self.assert_rejected(data)
+
+    def test_a_number_that_overflows_to_infinity_is_refused(self):
+        # json reads 1e400 as inf, which dumps would write back as Infinity: not JSON.
+        for data in (b'{"x": 1e400}', b'{"x": -1e400}', b'{"a": {"b": [1E+999]}}'):
+            with self.subTest(data=data):
+                msg = self.assert_rejected(data)
+                self.assertIn("is not strict JSON", msg)
+                self.assertIn("out of range", msg)
+        loaded = self.load_bytes(b'{"x": 1.5, "y": -1e308, "z": 1e-400, "n": 1' + b"0" * 400 + b"}")
+        self.assertEqual((loaded["x"], loaded["y"], loaded["z"]), (1.5, -1e308, 0.0))
+        self.assertEqual(json.loads(sm.dumps(loaded)), loaded)
 
     def test_shapes(self):
         for data in (b"[]", b'"x"', b'{"hooks": []}', b'{"hooks": {"SessionStart": {}}}'):

@@ -112,6 +112,22 @@ class PosixTests(unittest.TestCase):
         self.assertEqual(paths.posix(p), p.as_posix())
         self.assertEqual(paths.posix(str(p)), p.as_posix())
 
+    def test_quotable_passes_a_plain_path_through_as_posix(self):
+        self.assertEqual(paths.UNQUOTABLE, ('"', "$", "`"))
+        p = PureWindowsPath(r"C:\Users\Carl Selby\.claude")
+        self.assertEqual(paths.quotable(p), "C:/Users/Carl Selby/.claude")
+        self.assertEqual(paths.quotable("/home/o'neil/.claude"), "/home/o'neil/.claude")
+
+    def test_quotable_names_the_path_and_the_first_bad_character(self):
+        for path, ch in (('/home/a"b', '"'), ("/home/$USER/x", "$"), ("/home/a`id`", "`"),
+                         ("/home/a`b$c", "`"), (PureWindowsPath(r"C:\Users\$carl"), "$")):
+            with self.subTest(path=str(path)):
+                with self.assertRaises(ValueError) as ctx:
+                    paths.quotable(path)
+                msg = str(ctx.exception)
+                self.assertIn(paths.posix(path), msg)
+                self.assertIn("contains %s," % ch, msg)
+
 
 class ClockTests(unittest.TestCase):
     def test_stamp_and_iso_formats(self):

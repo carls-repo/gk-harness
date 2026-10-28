@@ -88,7 +88,9 @@ def marker_spans(text: str, begin: Callable[[str], bool], end: Callable[[str], b
 
 def _cut(text: str, spans: list) -> str:
     """text without the spans. A block that ran to the end of the text takes with it the blank
-    line apply_block put before it."""
+    line apply_block put before it: the one empty line ("\\r\\n" or "\\n") right after a line
+    end. apply_block writes that line in the file's newline, which in a file with mixed
+    newlines need not match the line end before it ("a\\r\\nb\\n" gets "\\r\\n")."""
     out, pos = [], 0
     for start, stop in spans:
         out.append(text[pos:start])
@@ -96,10 +98,10 @@ def _cut(text: str, spans: list) -> str:
     tail = text[pos:]
     if spans and tail == "":
         before = "".join(out)
-        if before.endswith("\r\n\r\n"):
-            out = [before[:-2]]
-        elif before.endswith("\n\n"):
-            out = [before[:-1]]
+        for blank in ("\r\n", "\n"):
+            if before.endswith("\n" + blank):
+                out = [before[:-len(blank)]]
+                break
     return "".join(out) + tail
 
 
