@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import unittest
@@ -26,7 +27,10 @@ class EntryTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX only")
     def test_install_sh_rejects_old_python(self):
-        env = dict(os.environ, PYTHON="/bin/false")
+        false = shutil.which("false")
+        if false is None:
+            self.skipTest("no 'false' executable on PATH")
+        env = dict(os.environ, PYTHON=false)
         proc = subprocess.run(
             [os.path.join(ROOT, "install.sh"), "status"],
             cwd=ROOT, env=env, capture_output=True, text=True,
@@ -34,9 +38,30 @@ class EntryTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("Python 3.9 or newer is required", proc.stderr)
 
+    @unittest.skipIf(os.name == "nt", "POSIX only")
+    def test_install_sh_execs_install_py_with_args(self):
+        env = dict(os.environ, PYTHON=sys.executable)
+        proc = subprocess.run(
+            [os.path.join(ROOT, "install.sh"), "status"],
+            cwd=ROOT, env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("status: not implemented", proc.stdout)
+
+    @unittest.skipIf(os.name == "nt", "POSIX only")
+    def test_install_sh_survives_exported_cdpath(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, PYTHON=sys.executable, CDPATH=tmp + os.pathsep + ROOT)
+            proc = subprocess.run(
+                ["sh", os.path.join(ROOT, "install.sh"), "status"],
+                cwd=tmp, env=env, capture_output=True, text=True,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("status: not implemented", proc.stdout)
+
     @unittest.skipUnless(os.name == "nt", "Windows only")
     def test_install_ps1_status(self):
-        import shutil
         shells = [s for s in ("powershell", "pwsh") if shutil.which(s)]
         self.assertTrue(shells, "no PowerShell found")
         for shell in shells:

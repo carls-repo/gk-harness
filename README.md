@@ -13,7 +13,7 @@ git clone git@github.com:carls-repo/gk-harness.git ~/.gk-harness && ~/.gk-harnes
 Windows PowerShell:
 
 ```powershell
-git clone git@github.com:carls-repo/gk-harness.git $HOME\.gk-harness; & $HOME\.gk-harness\install.ps1
+git clone git@github.com:carls-repo/gk-harness.git $HOME\.gk-harness; powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.gk-harness\install.ps1"
 ```
 
 ## What the installer changes
@@ -35,6 +35,10 @@ Hook registrations are merged into `settings.json` for SessionStart, PostModelSw
 ~/.gk-harness/install.sh uninstall
 ```
 
-Windows: `install.ps1 uninstall`.
+Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.gk-harness\install.ps1" uninstall
+```
 
 Other commands: `install` (the default), `update` and `status`.
