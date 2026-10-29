@@ -581,9 +581,33 @@ test('diagnose uses injected scratchpad: with args.scratchpad every prompt that 
       assert.ok(c.prompt.includes(`If you need instrumentation, put it ONLY in /tmp/s/gk-diagnose-${id} (mkdir -p it; other test agents share the scratchpad)`), c.label)
     }
   }
-  // The hook passes the session's scratchpad as the OS spells it; on Windows a drive path.
+  // The hook passes the session's scratchpad as the OS spells it; on Windows a drive path,
+  // which the prompts give with forward slashes, so the paths built on it use one separator.
   const win = await runWorkflow(neutral('gk-diagnose.js'), diagnoseArgs({ scratchpad: 'C:\\Users\\Carl Selby\\AppData\\Local\\Temp\\s', project: { root: 'C:/work/repo' } }), diagnoseResponders())
-  for (const c of win.calls) assert.ok(c.prompt.includes('C:\\Users\\Carl Selby\\AppData\\Local\\Temp\\s'), c.label)
+  for (const c of win.calls) assert.ok(c.prompt.includes('C:/Users/Carl Selby/AppData/Local/Temp/s'), c.label)
+})
+
+test('diagnose Windows scratchpad: the instrumentation path has forward slashes only', async () => {
+  const { calls } = await runWorkflow(neutral('gk-diagnose.js'), diagnoseArgs({ scratchpad: 'C:\\Users\\x\\scratch', reproduce: 'make test', project: { root: '/r' } }), diagnoseResponders())
+  const t = calls.find((c) => c.label === 'test:H1')
+  assert.ok(t, 'the test stage ran')
+  assert.ok(t.prompt.includes('C:/Users/x/scratch/gk-diagnose-H1'), t.prompt)
+  assert.ok(!t.prompt.includes('\\'), t.prompt)
+  // A POSIX scratchpad, trailing slash and all, is used exactly as given.
+  const posix = await runWorkflow(neutral('gk-diagnose.js'), diagnoseArgs({ scratchpad: '/tmp/s/', reproduce: 'make test', project: { root: '/r' } }), diagnoseResponders())
+  assert.ok(posix.calls.find((c) => c.label === 'test:H1').prompt.includes('put it ONLY in /tmp/s//gk-diagnose-H1 '))
+})
+
+test('diagnose core rules: every prompt forbids changing the checkout, with no project rules too', async () => {
+  const LINE = "Never change the repository's working tree, index, HEAD or branches: no git checkout, switch, stash, reset, restore, clean, merge, rebase or bisect, not even `checkout --detach`."
+  for (const project of [{}, { root: '/r' }]) {
+    const { calls } = await runWorkflow(neutral('gk-diagnose.js'), diagnoseArgs({ reproduce: 'make test', project }), diagnoseResponders())
+    assert.deepEqual([...new Set(calls.map((c) => c.phase))], ['Hypothesise', 'Test', 'Adjudicate'], JSON.stringify(project))
+    for (const c of calls) {
+      assert.ok(c.prompt.includes(LINE), `${JSON.stringify(project)} ${c.label}`)
+      assert.ok(!c.prompt.includes('Project rules:'), `${c.label}: no guards, no project rules`)
+    }
+  }
 })
 
 test('diagnose without scratchpad says mktemp: every prompt makes its own temporary folder outside the repository', async () => {

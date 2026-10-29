@@ -170,7 +170,9 @@ if (ARGS.scratchpad !== undefined && ROOT) {
   const r = slashes(ROOT)
   if (s === r || s.startsWith(`${r}/`)) throw new Error(SCRATCHPAD_ERROR)
 }
-const SCRATCHPAD = ARGS.scratchpad === undefined ? null : ARGS.scratchpad
+// Backslashes become slashes (a Windows scratchpad), so the paths built on it below have one
+// kind of separator; a trailing slash is kept, so a POSIX path is used exactly as given.
+const SCRATCHPAD = ARGS.scratchpad === undefined ? null : String(ARGS.scratchpad).replace(/\\/g, '/')
 const MKTEMP = 'make a temporary folder outside the repository with `mktemp -d` and delete it when done'
 const SCRATCH_RULE = SCRATCHPAD
   ? `Your scratchpad is ${SCRATCHPAD}, outside the repository: any temporary file or tree goes there, never in the repo.`
