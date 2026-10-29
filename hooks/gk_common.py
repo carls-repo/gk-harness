@@ -30,6 +30,7 @@ LOCK_TIMEOUT = 2.0
 LOCK_POLL = 0.025
 GIT_TIMEOUT = 5
 PROJECT_FILE = (".claude", "gk-project.json")
+PROJECT_MAX = 262144  # bytes: a project file is a few KB; more is refused, not read
 SHARED_BRANCH_MAX = 200
 # The folders under <claude_dir>/state that hold one <session_id>.json per session. A session's
 # file in each is removed when it ends (gk-claims-end) or is found dead (gk-peers).
@@ -306,15 +307,30 @@ def load_project(toplevel: str | os.PathLike) -> tuple[dict | None, str | None]:
     """Read <toplevel>/.claude/gk-project.json.
 
     (data, None) when valid (a JSON object with version 1); (None, None) when absent;
-    (None, reason) when unreadable or invalid.
+    (None, reason) when unreadable or invalid. Only a regular file of at most 256 KB is
+    read, so a link to a device or a FIFO committed at that path can neither hang the hook
+    nor fill its memory.
     """
     path = Path(toplevel).joinpath(*PROJECT_FILE)
     try:
-        raw = path.read_bytes()
+        st = os.stat(path)
     except (FileNotFoundError, NotADirectoryError):
         return None, None
     except OSError as e:
         return None, "%s is unreadable: %s" % (path, e)
+    if not stat.S_ISREG(st.st_mode):
+        return None, "%s is not a regular file" % path
+    if st.st_size > PROJECT_MAX:
+        return None, "%s is larger than 256 KB" % path
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(PROJECT_MAX + 1)
+    except (FileNotFoundError, NotADirectoryError):
+        return None, None
+    except OSError as e:
+        return None, "%s is unreadable: %s" % (path, e)
+    if len(raw) > PROJECT_MAX:  # it grew after the stat
+        return None, "%s is larger than 256 KB" % path
     try:
         data = json.loads(raw.decode("utf-8-sig"))
     except (ValueError, RecursionError) as e:

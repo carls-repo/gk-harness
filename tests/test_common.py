@@ -349,6 +349,49 @@ class ProjectTests(unittest.TestCase):
             self.assertIsInstance(reason, str, bad[:40])
             self.assertTrue(reason, bad[:40])
 
+    def project_path(self):
+        d = os.path.join(self.top, ".claude")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "gk-project.json")
+
+    def assert_refused_promptly(self, ending):
+        t = time.monotonic()
+        data, reason = gk_common.load_project(self.top)
+        self.assertLess(time.monotonic() - t, 1.0)
+        self.assertIsNone(data)
+        self.assertIsInstance(reason, str)
+        self.assertTrue(reason.endswith(ending), reason)
+
+    @unittest.skipUnless(os.path.exists("/dev/zero"), "needs /dev/zero")
+    def test_load_project_link_to_dev_zero_refused(self):
+        try:
+            os.symlink("/dev/zero", self.project_path())
+        except (OSError, NotImplementedError) as e:
+            self.skipTest("cannot make a symlink here: %s" % e)
+        self.assert_refused_promptly("is not a regular file")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX only")
+    def test_load_project_fifo_refused_without_blocking(self):
+        os.mkfifo(self.project_path())
+        self.assert_refused_promptly("is not a regular file")
+
+    def test_load_project_folder_refused(self):
+        os.makedirs(self.project_path())
+        self.assert_refused_promptly("is not a regular file")
+
+    def test_load_project_over_256_kb_refused(self):
+        body = json.dumps({"version": 1, "pad": "x" * (300 * 1024)})
+        self.put(body)
+        self.assert_refused_promptly("is larger than 256 KB")
+        # exactly at the cap is still read
+        self.put(json.dumps({"version": 1, "pad": ""}))
+        pad = gk_common.PROJECT_MAX - len(json.dumps({"version": 1, "pad": ""}).encode())
+        self.put(json.dumps({"version": 1, "pad": "x" * pad}))
+        self.assertEqual(os.path.getsize(self.project_path()), gk_common.PROJECT_MAX)
+        data, reason = gk_common.load_project(self.top)
+        self.assertIsNone(reason)
+        self.assertEqual(data["version"], 1)
+
 
 @unittest.skipIf(shutil.which("git") is None, "git not on PATH")
 class GitTests(unittest.TestCase):
