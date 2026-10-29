@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -627,6 +628,79 @@ class DocsMatcherTests(RemoteBase):
         self.assertEqual(lines[0], HEADER)
         self.assertTrue(lines[1].startswith("docs/reports/r.md\t%s\t20" % URL1))
         self.assertNotIn(b"\r", self.ledger_path(bare).read_bytes())
+
+
+class LedgerGuardTests(RemoteBase):
+    """A ledger, or a folder above it, that a repo commits as a symlink is neither written
+    through nor read through; the gate itself still clears."""
+
+    def symlink(self, path, target):
+        try:
+            os.symlink(str(target), str(path))
+        except (OSError, NotImplementedError, AttributeError) as e:
+            self.skipTest("cannot make a symlink here: %s" % e)
+
+    def publish(self):
+        self.clear("Artifact", {"file_path": "/x.html"}, {"url": URL1})
+
+    def test_ledger_symlink_to_an_outside_file_is_not_written(self):
+        outside = self.tmp / "outside.txt"
+        outside.write_bytes(b"# my shell profile\n")
+        self.symlink(self.ledger_path(), outside)
+        msg = self.ctx(self.edit(self.R / "docs/plans/x.md"))
+        self.assertIn("No reading copy yet.", msg)
+        self.assertEqual(self.paths(), ["docs/plans/x.md"])
+        self.publish()
+        self.assertEqual(outside.read_bytes(), b"# my shell profile\n")
+        self.assertIn("is not a regular file inside the repo; not written", self.last_err)
+        self.assertEqual(self.pend()["pending"], [])  # the gate still clears
+
+    def test_ledger_folder_symlink_to_an_outside_folder_is_not_written(self):
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        shutil.rmtree(str(self.R / "docs" / "superpowers"))
+        self.symlink(self.R / "docs" / "superpowers", elsewhere)
+        self.edit(self.R / "docs/plans/x.md")
+        self.publish()
+        self.assertEqual(os.listdir(str(elsewhere)), [])
+        self.assertEqual(self.pend()["pending"], [])
+
+    def test_ledger_symlink_inside_the_repo_is_not_followed(self):
+        inner = self.R / "src" / "notes.txt"
+        inner.write_bytes(b"keep\n")
+        self.symlink(self.ledger_path(), inner)
+        self.edit(self.R / "docs/plans/x.md")
+        self.publish()
+        self.assertEqual(inner.read_bytes(), b"keep\n")
+
+    @unittest.skipUnless(os.path.exists("/dev/zero"), "needs /dev/zero")
+    def test_ledger_symlink_to_dev_zero_reads_nothing(self):
+        self.symlink(self.ledger_path(), "/dev/zero")
+        t = time.monotonic()
+        msg = self.ctx(self.edit(self.R / "docs/plans/x.md"))
+        self.assertLess(time.monotonic() - t, 2.0)
+        self.assertIn("No reading copy yet.", msg)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX only")
+    def test_ledger_fifo_is_neither_read_nor_written(self):
+        os.mkfifo(str(self.ledger_path()))
+        t = time.monotonic()
+        msg = self.ctx(self.edit(self.R / "docs/plans/x.md"))
+        self.assertIn("No reading copy yet.", msg)
+        self.publish()
+        self.assertLess(time.monotonic() - t, 5.0)
+        self.assertEqual(self.pend()["pending"], [])
+
+    def test_ledger_path_helper(self):
+        gk_common = load_common()
+        root = str(self.R)
+        self.assertEqual(gk_common.ledger_path(root),
+                         os.path.join(root, "docs", "superpowers", "REMOTE-LINKS.tsv"))
+        self.ledger_path().write_text(HEADER + "\n", encoding="utf-8")
+        self.assertIsNotNone(gk_common.ledger_path(root))
+        self.ledger_path().unlink()
+        self.ledger_path().mkdir()
+        self.assertIsNone(gk_common.ledger_path(root))
 
 
 if __name__ == "__main__":

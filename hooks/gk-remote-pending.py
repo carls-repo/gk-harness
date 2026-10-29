@@ -16,6 +16,7 @@ from typing import Any
 import gk_common
 
 SPEC_RE = re.compile(r"docs/(superpowers|reports|plans)/.*\.(md|html)")
+LEDGER_READ_MAX = 4 * 1024 * 1024
 
 
 def toplevel(file_abs: str) -> str | None:
@@ -37,10 +38,15 @@ def ledger_last(root: str, rel: str) -> tuple[str, str, str] | None:
     kind "lost": no link line, but a doc was published (doc:unknown-url); url is "".
     A trailing doc:unknown-url (an update whose response carried no link) does not hide an
     earlier link: an update revises the same doc.
+    A ledger that is not a regular file inside the repo (gk_common.ledger_path) reads as
+    none, and at most the first 4 MiB are read.
     """
+    tsv = gk_common.ledger_path(root)
+    if tsv is None:
+        return None
     try:
-        with open(os.path.join(root, *gk_common.REMOTE_LEDGER), encoding="utf-8") as f:
-            lines = f.read().splitlines()
+        with open(tsv, encoding="utf-8") as f:
+            lines = f.read(LEDGER_READ_MAX).splitlines()
     except Exception:
         return None
     lost = None

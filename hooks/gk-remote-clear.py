@@ -57,14 +57,26 @@ def clean(s: Any) -> str:
     return re.sub(r"[\t\r\n]+", " ", str(s))
 
 
+def refuse(root: str) -> None:
+    sys.stderr.write("gk-remote-clear: ledger %s is not a regular file inside the repo; "
+                     "not written\n" % os.path.join(root, *gk_common.REMOTE_LEDGER))
+
+
 def append_ledger(root: str, rows: list[tuple[str, str, str]]) -> None:
     """Append rows to the repo's ledger, writing the header first when the file is new.
 
     Callers hold the gk-remote-pending folder lock, which every gate hook (old and new)
-    takes before touching a ledger, so appends never interleave.
+    takes before touching a ledger, so appends never interleave. A ledger that is not a
+    regular file inside the repo (gk_common.ledger_path) is left alone: nothing is written.
     """
-    tsv = os.path.join(root, *gk_common.REMOTE_LEDGER)
+    tsv = gk_common.ledger_path(root)
+    if tsv is None:
+        refuse(root)
+        return
     os.makedirs(os.path.dirname(tsv), exist_ok=True)
+    if gk_common.ledger_path(root) is None:  # a folder made just now could be a link
+        refuse(root)
+        return
     need_header = (not os.path.exists(tsv)) or os.path.getsize(tsv) == 0
     need_nl = False
     if not need_header:

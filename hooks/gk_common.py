@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -353,6 +354,26 @@ def shared_branch_phrase(toplevel: str | os.PathLike | None) -> str:
 
 REMOTE_LEDGER = ("docs", "superpowers", "REMOTE-LINKS.tsv")
 """The publish gate's ledger, relative to a repo's top level, as path parts."""
+
+
+def ledger_path(root: str | os.PathLike) -> str | None:
+    """<root>/docs/superpowers/REMOTE-LINKS.tsv, or None when the gate must not use it.
+
+    None when the path, its links resolved, lies outside root (a repo can commit the ledger
+    or one of its folders as a symlink), or when something that is not a regular file is
+    there (a symlink, a FIFO, a device, a folder). An absent ledger is fine.
+    """
+    try:
+        tsv = os.path.join(os.fspath(root), *REMOTE_LEDGER)
+        real_root = os.path.normcase(os.path.realpath(os.fspath(root)))
+        real_tsv = os.path.normcase(os.path.realpath(tsv))
+        if rel_posix(real_tsv, real_root) is None:
+            return None
+        if os.path.lexists(tsv) and not stat.S_ISREG(os.lstat(tsv).st_mode):
+            return None
+    except (OSError, ValueError):
+        return None
+    return tsv
 
 
 def canon_path(p: str, base: str) -> str:
