@@ -412,8 +412,8 @@ def _report(done: list, record: dict, cdir: Path, root: Path) -> None:
             print("  " + step.note)
     moves = [m for m in done if isinstance(m, dict)]
     if moves:
-        print("  %s retired into %s/legacy" % (_plural(len(moves), "old file or folder", "old files or folders"),
-                                               record["backup"]))
+        retired = _plural(len(moves), "old file or folder", "old files or folders")
+        print("  %s retired into %s/legacy" % (retired, record["backup"]))
     if record["backup"]:
         print("backups: %s" % record["backup"])
     print("undo with: %s" % _command_line(root, "uninstall"))
@@ -757,6 +757,7 @@ def _drop_update_stamp() -> None:
         os.remove(str(_update_stamp()))
     except OSError:  # FileNotFoundError included
         pass
+
 
 def update(options: list) -> int:
     root = paths.harness_root()
