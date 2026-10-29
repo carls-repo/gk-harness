@@ -80,8 +80,11 @@ reads. A "seat synthesis stage" inside a workflow is redundant and is not author
 A repo's own rules for the workflows live in **`.claude/gk-project.json`** (`version: 1`):
 `name`; `sharedBranch`, the branch sessions merge into; `guards`, one rule line each, added to
 every stage brief; `reviewFinders`, extra gk-review finders (`{key, replaces?, brief}`; one with
-`replaces` takes that core finder's place); and `signOff`, the checks gk-build hands back
-(`{key, seat, sharedFile?, trigger?, uiJudge?, implementer?, reviewer?}`). A guard may instead be
+`replaces` takes that core finder's place); `check`, gk-build's default check command, and
+`packages`, the folders it runs that check from (without them it runs once from the top
+level); and `signOff`, the checks gk-build hands back
+(`{key, seat, sharedFile?, trigger?, paths?, uiJudge?, implementer?, reviewer?}`; `paths` are
+regular expressions over a piece's files that meet the trigger without an agent's report). A guard may instead be
 `{text, workflows?, stages?}`, which reaches only the workflows named in `workflows` and, in
 them, the phases whose titles are in `stages` (a list left out does not restrict). `root` is never in the file. A repo without
 the file gets the generic workflows.

@@ -2,6 +2,8 @@
   "version": 1,
   "name": "Goodricke",
   "sharedBranch": "develop",
+  "check": "npm run typecheck",
+  "packages": ["backend", "frontend"],
   "guards": [
     {
       "text": "Ignore the repo's many untracked scratch scripts (backend/scripts/_*, scripts/demo/_*, root-level scratch files) unless the diff itself adds them as part of the change.",
@@ -49,6 +51,16 @@
       "text": "Flag PostgREST list reads without a .range() paging loop.",
       "workflows": ["gk-build"],
       "stages": ["Review"]
+    },
+    {
+      "text": "Run from the owning package (backend/ or frontend/), e.g. `set -o pipefail; npx vitest run <file> 2>&1 | tail -40`, in the FOREGROUND.",
+      "workflows": ["gk-build"],
+      "stages": ["Implement"]
+    },
+    {
+      "text": "If the command is \"npm run typecheck\" and that package has no typecheck script, run `set -o pipefail; npx tsc --noEmit 2>&1 | tail -40; echo \"EXIT=$?\"` instead and say so.",
+      "workflows": ["gk-build"],
+      "stages": ["Check"]
     }
   ],
   "reviewFinders": [
@@ -74,6 +86,7 @@
     {
       "key": "scroll-audit",
       "trigger": "any change to a page root (a frontend/src/app page or layout, or a component that becomes a page root)",
+      "paths": ["^frontend/src/app/(.*/)?(page|layout)\\.[jt]sx?$"],
       "uiJudge": true,
       "implementer": "If you change a page root (a frontend/src/app page/layout, or a component that becomes a page root), say so in notes and list scroll-audit in triggered so the seat runs the scroll audit; page roots use h-full + overflow-y-auto.",
       "reviewer": "page roots without h-full + overflow-y-auto",

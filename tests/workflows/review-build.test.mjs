@@ -439,7 +439,8 @@ test('normFile, gk-review: findings that differ only by the root prefix, a leadi
 
 // Malformed projects that every workflow rejects (the shared gk-project block), each with the
 // field its error names. Sign-off checks follow ruling R52: key and seat are required single
-// lines, the other texts optional strings, uiJudge a boolean, anything else malformed.
+// lines, the other texts optional strings, uiJudge a boolean, anything else malformed; fix
+// round 1 adds paths (regular expressions, only with a trigger), check and packages.
 const PROJECT_MALFORMED = [
   [null, 'not an object'],
   ['Goodricke', 'not an object'],
@@ -486,6 +487,21 @@ const PROJECT_MALFORMED = [
   [{ signOff: [{ key: 'k', seat: 's', reviewer: ['a'] }] }, 'signOff[0].reviewer'],
   [{ signOff: [{ key: 'k', seat: 's', judge: 'x' }] }, 'signOff[0].judge'],
   [{ signOff: [{ key: 'k', seat: 's' }, { key: 'k2', seat: 's', uiJudge: true, pieces: [] }] }, 'signOff[1].pieces'],
+  // paths: a non-empty list of regular expressions that compile, given only with a trigger.
+  [{ signOff: [{ key: 'k', seat: 's', trigger: 't', paths: '^a/' }] }, 'signOff[0].paths'],
+  [{ signOff: [{ key: 'k', seat: 's', trigger: 't', paths: [] }] }, 'signOff[0].paths'],
+  [{ signOff: [{ key: 'k', seat: 's', trigger: 't', paths: ['^a/', 3] }] }, 'signOff[0].paths'],
+  [{ signOff: [{ key: 'k', seat: 's', trigger: 't', paths: ['^(a/'] }] }, 'signOff[0].paths'],
+  [{ signOff: [{ key: 'k', seat: 's', trigger: 't', paths: ['^a/\n|^b/'] }] }, 'signOff[0].paths'],
+  [{ signOff: [{ key: 'k', seat: 's', paths: ['^a/'] }] }, 'signOff[0].paths'],
+  // check: one printable line; packages: a non-empty list of printable lines.
+  [{ check: '' }, 'check'],
+  [{ check: 7 }, 'check'],
+  [{ check: 'npm test\nrm -rf build' }, 'check'],
+  [{ packages: 'backend' }, 'packages'],
+  [{ packages: [] }, 'packages'],
+  [{ packages: ['backend', 3] }, 'packages[1]'],
+  [{ packages: ['back\nend'] }, 'packages[0]'],
 ]
 // gk-review's own checks: a replaces names a core finder not yet replaced, and finder keys
 // (core and project) are unique. Other workflows ignore reviewFinders beyond their shape.
@@ -515,8 +531,9 @@ test('project malformed throws, gk-review: before any agent runs, naming the fie
     await assertMalformed('gk-review.js', { target: 'main..HEAD' }, project, field)
   }
   // The full Goodricke fixture, a root-only project and {} (the generic rules) are well formed,
-  // and so is every sign-off field (ruling R52), which gk-review checks but does not use.
-  const allFields = { root: '/tmp/repo', signOff: [{ key: 'k', seat: 's', sharedFile: 'NOTICE', trigger: 't', uiJudge: false, implementer: 'i', reviewer: 'r' }] }
+  // and so is every sign-off field (ruling R52, plus paths), check and packages, which gk-review
+  // checks but does not use.
+  const allFields = { root: '/tmp/repo', check: 'make check', packages: ['web'], signOff: [{ key: 'k', seat: 's', sharedFile: 'NOTICE', trigger: 't', paths: ['^web/'], uiJudge: false, implementer: 'i', reviewer: 'r' }] }
   for (const project of [goodricke(), { root: '/tmp/repo' }, {}, allFields]) {
     await runWorkflow(neutral('gk-review.js'), { target: 'main..HEAD', project }, reviewResponders())
   }
@@ -526,8 +543,8 @@ test('project malformed throws, gk-review: before any agent runs, naming the fie
 
 const PLAN = 'docs/plan.md'
 // Three pieces in two waves (c shares a.ts with a, so it waits), b is hard, a names a test file.
-// No file is a page root by the golden's path heuristic, so the golden's page-root route comes
-// only from what the plan check or an implementer reports (see "routing exception, gk-build").
+// No file is a page root by the golden's path heuristic, so here the page-root route comes only
+// from what the plan check or an implementer reports; PAGE_PIECES has page-root paths.
 const BUILD_PIECES = [
   { name: 'a', files: ['backend/src/a.ts'], brief: 'Add the a helper.', tests: 'backend/src/a.test.ts' },
   { name: 'b', files: ['frontend/src/components/B.tsx'], brief: 'Add the B panel.', hard: true },
@@ -539,6 +556,15 @@ const DOCS_PIECES = [
   { name: 'a', files: ['docs/a.md'], brief: 'Document a.' },
   { name: 'b', files: ['scripts/b.sh'], brief: 'Script b.' },
 ]
+// p owns a page and r a layout in a route group, so both are page roots by the golden's path
+// heuristic (and the fixture's scroll-audit paths); q owns neither (a component under app/, and a
+// page.tsx outside app/).
+const PAGE_PIECES = [
+  { name: 'p', files: ['frontend/src/app/matters/page.tsx'], brief: 'Restyle the matters page.' },
+  { name: 'q', files: ['frontend/src/app/matters/Panel.tsx', 'frontend/src/components/page.tsx'], brief: 'Add the matters panel.' },
+  { name: 'r', files: ['frontend/src/app/(pages)/settings/layout.jsx'], brief: 'Restyle the settings layout.' },
+]
+const PAGE_ORDER = [['p', 'q', 'r']]
 const changelogLineOf = (name) => `- **Added — piece ${name}.** Detail`
 const [CHANGELOG_CHECK, SCROLL_CHECK] = fixture.signOff || []
 
@@ -589,7 +615,13 @@ const BUILD_REPORTED = [
   ['the check agent dies', {}, { dead: /^check$/ }],
   ['the judge dies', {}, { dead: /^judge$/ }],
   ['no file under backend/ or frontend/: the check is skipped', { pieces: DOCS_PIECES }, { pieces: DOCS_PIECES, order: [['a', 'b']] }],
+  // pathTrig: the golden's page-root heuristic (the fixture's scroll-audit paths) meets the trigger.
+  ['page-root files that no agent reports', { pieces: PAGE_PIECES }, { pieces: PAGE_PIECES, order: PAGE_ORDER, pathTrig: true }],
+  ['page-root files, one also named by the plan check', { pieces: PAGE_PIECES }, { pieces: PAGE_PIECES, order: PAGE_ORDER, planTrig: ['r'], pathTrig: true }],
+  ['page-root files, the judge dies', { pieces: PAGE_PIECES, escalate: true }, { pieces: PAGE_PIECES, order: PAGE_ORDER, pathTrig: true, dead: /^judge$/ }],
 ]
+// The scroll-audit pieces of a neutral [{key, pieces}] list, sorted.
+const scrollOf = (list) => { const t = (list || []).find((x) => x.key === 'scroll-audit'); return t ? [...t.pieces].sort() : [] }
 
 test('routing equivalence, gk-build: golden and neutral+Goodricke make the same calls on the same (model, effort)', async () => {
   const cases = []
@@ -605,14 +637,22 @@ test('routing equivalence, gk-build: golden and neutral+Goodricke make the same 
     assert.ok(old.calls.some((c) => c.label === 'judge'), `${name}: the golden run reaches the judge`)
     assert.deepEqual(route(now.calls), route(old.calls), name)
     assert.deepEqual(judgeOnLog(now.logs), judgeOnLog(old.logs), `${name}: the judge route log`)
-    // A project changes words, never routing: without Goodricke's sign-off trigger the generic
-    // run makes the same calls (a trigger the project does not have routes nothing).
-    if (!opts.implTrig && !opts.planTrig) {
+    // The same page-root pieces: the golden's pageRootPieces (plan check, path heuristic and
+    // implementers) are the scroll-audit trigger's pieces, in the plan check's result and in
+    // what the seat gets back; a dead judge's stand-in lists them in both.
+    const roots = [...old.result.planCheck.pageRootPieces].sort()
+    assert.deepEqual(scrollOf(now.result.planCheck.triggered), roots, `${name}: the page-root pieces`)
+    assert.deepEqual(scrollOf(now.result.signOff), roots, `${name}: the scroll-audit sign-off`)
+    assert.deepEqual(scrollOf(now.result.judge.signOffRequired), [...old.result.judge.scrollAuditRequired].sort(), `${name}: the judge's list`)
+    // Without Goodricke's sign-off trigger and package layout, the generic run makes the same
+    // calls, except that its check runs (once, from the top level) only when args.check gives it
+    // a command: the generic project names no check and no packages.
+    if (!opts.implTrig && !opts.planTrig && !opts.pathTrig) {
       const generic = await runWorkflow(neutral('gk-build.js'), { ...buildArgs(flags), project: { root: '/tmp/repo' } }, buildResponders('neutral', opts))
-      assert.deepEqual(route(generic.calls), route(old.calls), `${name} (generic)`)
+      assert.deepEqual(route(generic.calls), route(old.calls).filter((c) => c[0] !== 'check' || flags.check), `${name} (generic)`)
       assert.deepEqual(judgeOnLog(generic.logs), judgeOnLog(old.logs), `${name} (generic): the judge route log`)
     }
-    judges.add(`${judgeModel(old.calls)} ${opts.implTrig || opts.planTrig ? 'triggered' : 'plain'}`)
+    judges.add(`${judgeModel(old.calls)} ${opts.implTrig || opts.planTrig || opts.pathTrig ? 'triggered' : 'plain'}`)
     for (const c of old.calls.filter((x) => x.label.startsWith('impl:'))) implTiers.add(`${c.model} ${c.effort}`)
   }
   // The grid reaches the judge on both models, fable through the trigger as well as through ui.
@@ -620,27 +660,56 @@ test('routing equivalence, gk-build: golden and neutral+Goodricke make the same 
   assert.deepEqual([...implTiers].sort(), ['opus high', 'opus xhigh', 'sonnet high', 'sonnet medium'])
 })
 
-test('routing exception, gk-build: the golden\'s page-root path heuristic is gone; the plan check reads the trigger instead', async () => {
-  // A piece that owns a Next.js page and that neither the plan check nor its implementer
-  // reports: the golden still routes the judge to fable from the file path alone. Schema v1
-  // gives a sign-off check no path pattern (ruling R52), so the neutral script cannot; its
-  // plan check gets the page-root definition in the trigger text and names the piece.
-  const pieces = [{ name: 'p', files: ['frontend/src/app/matters/page.tsx'], brief: 'Restyle the matters page.' }]
-  const base = { pieces, order: [['p']] }
-  const args = { plan: PLAN, pieces }
-  const oldSilent = await runWorkflow(golden('gk-build.js'), structuredClone(args), buildResponders('golden', base))
-  const nowSilent = await runWorkflow(neutral('gk-build.js'), { ...structuredClone(args), project: goodricke() }, buildResponders('neutral', base))
-  assert.equal(judgeModel(oldSilent.calls), 'fable')
-  assert.equal(judgeModel(nowSilent.calls), 'opus')
-  const planPrompt = nowSilent.calls.find((c) => c.label === 'plan-check').prompt
-  assert.ok(planPrompt.includes(`\n- scroll-audit: ${SCROLL_CHECK.trigger}\n`), planPrompt)
-  assert.ok(SCROLL_CHECK.trigger.includes('(a frontend/src/app page or layout, or a component that becomes a page root)'))
-  // When the plan check names it, both go to fable.
-  const named = { ...base, planTrig: ['p'] }
-  const oldNamed = await runWorkflow(golden('gk-build.js'), structuredClone(args), buildResponders('golden', named))
-  const nowNamed = await runWorkflow(neutral('gk-build.js'), { ...structuredClone(args), project: goodricke() }, buildResponders('neutral', named))
-  assert.deepEqual(route(nowNamed.calls), route(oldNamed.calls))
-  assert.equal(judgeModel(nowNamed.calls), 'fable')
+test('page-root paths, gk-build: a piece owning a page or layout meets the scroll-audit trigger by its path alone, as the golden\'s heuristic did', async () => {
+  // The fixture's scroll-audit paths are the golden's PAGE_ROOT_RE.
+  const goldenRe = /^const PAGE_ROOT_RE = \/(.*)\/$/m.exec(readFileSync(golden('gk-build.js'), 'utf8'))[1]
+  assert.deepEqual(SCROLL_CHECK.paths.map((s) => new RegExp(s).source), [goldenRe])
+  const args = () => ({ plan: PLAN, pieces: structuredClone(PAGE_PIECES) })
+  const base = { pieces: PAGE_PIECES, order: PAGE_ORDER }
+  // No agent reports a page root: the paths alone route the judge to fable, under every profile.
+  for (const profile of PROFILES) {
+    const old = await runWorkflow(golden('gk-build.js'), { ...args(), profile }, buildResponders('golden', base))
+    const now = await runWorkflow(neutral('gk-build.js'), { ...args(), profile, project: goodricke() }, buildResponders('neutral', base))
+    assert.deepEqual(route(now.calls), route(old.calls), profile)
+    assert.equal(judgeModel(now.calls), 'fable', profile)
+    assert.deepEqual(old.result.planCheck.pageRootPieces, ['p', 'r'])
+    assert.ok(old.logs.includes('Page-root heuristic added: p, r'), old.logs.join('\n'))
+    assert.ok(now.logs.includes('Sign-off path rules added: scroll-audit: p, scroll-audit: r'), now.logs.join('\n'))
+    assert.ok(now.logs.includes('Judge on fable (sign-off scroll-audit sets uiJudge)'), now.logs.join('\n'))
+    assert.deepEqual(now.result.planCheck.triggered, [{ key: 'scroll-audit', pieces: ['p', 'r'] }])
+    assert.deepEqual(now.result.signOff.map((e) => [e.key, e.pieces]), [['changelog', ['p', 'q', 'r']], ['scroll-audit', ['p', 'r']]])
+    // The judge sees them as met, from the path rules among the rest.
+    const judgePrompt = now.calls.find((c) => c.label === 'judge').prompt
+    assert.ok(judgePrompt.includes('\nSign-off triggers met (from the plan check, the path rules and the implementers): [{"key":"scroll-audit","pieces":["p","r"]}]\n'), judgePrompt)
+  }
+  // A piece the plan check names is not added again; the path rule adds the other.
+  const named = await runWorkflow(neutral('gk-build.js'), { ...args(), project: goodricke() }, buildResponders('neutral', { ...base, planTrig: ['r'] }))
+  assert.ok(named.logs.includes('Sign-off path rules added: scroll-audit: p'), named.logs.join('\n'))
+  assert.deepEqual(named.result.planCheck.triggered, [{ key: 'scroll-audit', pieces: ['p', 'r'] }])
+  // The judge dies: its stand-in lists the path-matched pieces, as the golden's did.
+  const deadOld = await runWorkflow(golden('gk-build.js'), args(), buildResponders('golden', { ...base, dead: /^judge$/ }))
+  const deadNow = await runWorkflow(neutral('gk-build.js'), { ...args(), project: goodricke() }, buildResponders('neutral', { ...base, dead: /^judge$/ }))
+  assert.deepEqual(deadOld.result.judge.scrollAuditRequired, ['p', 'r'])
+  assert.deepEqual(deadNow.result.judge.signOffRequired, [{ key: 'scroll-audit', pieces: ['p', 'r'] }])
+  // A project without path rules has no heuristic: the same pieces get an opus judge.
+  const generic = await runWorkflow(neutral('gk-build.js'), { ...args(), project: { root: '/tmp/repo' } }, buildResponders('neutral', base))
+  assert.equal(judgeModel(generic.calls), 'opus')
+  assert.deepEqual(generic.result.signOff, [])
+  // Any project's paths: each is a regular expression over the top-level-relative path, with
+  // forward slashes, so a piece given under the root or with backslashes is matched too. The
+  // files a piece owns count, a test file named by tests among them (the golden matched owned).
+  const signOff = [{ key: 'visual', trigger: 'any change to a screen', paths: ['^web/screens/', '\\.css$'], uiJudge: true, seat: 'Look at each screen.' }]
+  const pieces = [
+    { name: 'a', files: ['/tmp/repo/web/screens/Home.tsx'], brief: 'Restyle home.' },
+    { name: 'b', files: ['web\\theme\\main.css'], brief: 'Restyle the theme.' },
+    { name: 'c', files: ['web/lib/screens.ts', 'docs/web/screens/x.md'], brief: 'Add c.' },
+    { name: 'd', files: ['web/lib/d.ts'], tests: 'web/screens/d.test.tsx', brief: 'Add d.' },
+  ]
+  const any = await runWorkflow(neutral('gk-build.js'), { plan: PLAN, pieces, project: { root: '/tmp/repo', signOff } }, [
+    { match: /^plan-check$/, reply: () => ({ ok: true, problems: [], order: [['a', 'b', 'c', 'd']], triggered: [] }) },
+  ])
+  assert.deepEqual(any.result.signOff, [{ key: 'visual', seat: 'Look at each screen.', pieces: ['a', 'b', 'd'] }])
+  assert.equal(judgeModel(any.calls), 'fable')
 })
 
 // Goodricke sentences of the golden that the marker misses, one reason each; checked verbatim.
@@ -656,6 +725,14 @@ const BUILD_UNMARKED = [
   {
     sentence: 'Pure refactors/tests/docs need no line (return "").',
     reason: 'Goodricke\'s CHANGELOG exemption; part of the changelog implementer text ("" is the line of its sharedFileLines entry)',
+  },
+  {
+    sentence: 'Run from the owning package (backend/ or frontend/), e.g. `set -o pipefail; npx vitest run <file> 2>&1 | tail -40`, in the FOREGROUND.',
+    reason: 'Goodricke\'s package layout and test runner; a gk-build guard on the Implement stage (the core says to run the tests in the foreground from the folder their runner expects)',
+  },
+  {
+    sentence: 'If the command is "npm run typecheck" and that package has no typecheck script, run `set -o pipefail; npx tsc --noEmit 2>&1 | tail -40; echo "EXIT=$?"` instead and say so.',
+    reason: 'Goodricke\'s default check command (the fixture\'s check) and its TypeScript fallback; a gk-build guard on the Check stage',
   },
 ]
 
@@ -723,11 +800,11 @@ const BUILD_EXCEPTIONS = [
   },
   {
     golden: /^Page-root pieces: /,
-    reason: 'the judge sees the sign-off triggers met, by key, in place of the page-root pieces',
+    reason: 'the judge sees the sign-off triggers met, by key, in place of the page-root pieces (the path rules are the golden\'s page-root heuristic)',
     replacedBy: (s) => {
       const m = /^Page-root pieces: (\[.*?\])( \(this is UI work\))?$/.exec(s)
       const pieces = JSON.parse(m[1])
-      return [`Sign-off triggers met (from the plan check and the implementers): ${JSON.stringify(pieces.length ? [{ key: 'scroll-audit', pieces }] : [])}${m[2] || ''}`]
+      return [`Sign-off triggers met (from the plan check, the path rules and the implementers): ${JSON.stringify(pieces.length ? [{ key: 'scroll-audit', pieces }] : [])}${m[2] || ''}`]
     },
   },
   {
@@ -748,8 +825,9 @@ test('goodricke sentences preserved, gk-build: every marked or listed golden sen
   const used = new Set()
   const seenUnmarked = new Set()
   let checked = 0
-  // With and without a page-root report and ui, so both forms of the page-root line are seen.
-  for (const [flags, opts] of [[{ ui: true }, { implTrig: ['a'] }], [{}, {}]]) {
+  // With and without a page-root report and ui, so both forms of the page-root line are seen,
+  // and with page-root files that only the path rules (the golden's heuristic) find.
+  for (const [flags, opts] of [[{ ui: true }, { implTrig: ['a'] }], [{}, {}], [{ pieces: PAGE_PIECES }, { pieces: PAGE_PIECES, order: PAGE_ORDER }]]) {
     const old = await runWorkflow(golden('gk-build.js'), buildArgs(flags), buildResponders('golden', opts))
     const now = await runWorkflow(neutral('gk-build.js'), { ...buildArgs(flags), project: goodricke() }, buildResponders('neutral', opts))
     const byLabel = new Map(now.calls.map((c) => [c.label, ws(c.prompt)]))
@@ -845,7 +923,7 @@ test('goodricke guards, gk-build: each scoped guard reaches exactly the stages w
     assert.deepEqual(got, want, `the stages this guard reaches:\n  ${text}`)
     if (g.workflows && g.workflows.includes('gk-build')) { own++; assert.ok(want.length, `a gk-build guard with no golden sentence: ${text}`) }
   }
-  assert.equal(own, 4, 'four gk-build guards')
+  assert.equal(own, 6, 'six gk-build guards')
 })
 
 test('goodricke guards, every guard: each has a golden sentence behind it in gk-review or gk-build', async () => {
@@ -868,15 +946,24 @@ test('goodricke guards, every guard: each has a golden sentence behind it in gk-
 // and CHANGELOG vocabulary and the sign-off machinery, which a project without sign-off checks
 // never sees.
 const BUILD_WORDS = new RegExp(`${GOODRICKE_WORDS.source}|page.root|scroll.audit|Unreleased|h-full|npm run dev|\\.next\\b|sign-off|signOff|triggered|sharedFile`, 'i')
+// The golden's stack: its test runner, its typecheck and its package folders. No generic prompt
+// names the first two; a run whose pieces live elsewhere names no backend or frontend either.
+const STACK_WORDS = /vitest|typecheck|\btsc\b|\bnpx\b/i
+const LAYOUT_WORDS = /backend|frontend/i
+const PY_PIECES = [
+  { name: 'a', files: ['src/app/a.py'], brief: 'Add the a helper.', tests: 'tests/test_a.py' },
+  { name: 'b', files: ['src/app/b.py', 'docs/b.md'], brief: 'Add b.' },
+]
 
-test('generic run is clean, gk-build: no prompt names Goodricke or a sign-off check, and every prompt names the root', async () => {
-  for (const [pieces, order] of [[BUILD_PIECES, BUILD_ORDER], [DOCS_PIECES, [['a', 'b']]]]) {
-    const args = { plan: PLAN, pieces: structuredClone(pieces), ui: true, project: { root: '/tmp/repo' } }
+test('generic run is clean, gk-build: no prompt names Goodricke, its stack or a sign-off check, and every prompt names the root', async () => {
+  for (const [pieces, order, extra] of [[BUILD_PIECES, BUILD_ORDER, {}], [DOCS_PIECES, [['a', 'b']], {}], [PY_PIECES, [['a', 'b']], { check: 'python -m pytest -q' }]]) {
+    const args = { plan: PLAN, pieces: structuredClone(pieces), ui: true, ...extra, project: { root: '/tmp/repo' } }
     const { calls, logs, result } = await runWorkflow(neutral('gk-build.js'), args, buildResponders('generic', { pieces, order }))
     assert.ok(calls.some((c) => c.label === 'judge'), 'the run reaches the judge')
+    const layout = pieces === PY_PIECES
     for (const c of calls) {
-      const hit = BUILD_WORDS.exec(c.prompt)
-      assert.equal(hit, null, `${c.label}: generic prompt names ${hit && hit[0]}`)
+      const hit = BUILD_WORDS.exec(c.prompt) || STACK_WORDS.exec(c.prompt) || (layout && LAYOUT_WORDS.exec(c.prompt))
+      assert.ok(!hit, `${c.label}: generic prompt names ${hit && hit[0]}`)
       assert.ok(c.prompt.includes('Work in the git repository at /tmp/repo (no worktree).'), `${c.label}: names the root`)
       assert.ok(!c.prompt.includes('Project rules:'), `${c.label}: no project rules without guards`)
       assert.ok(c.prompt.includes('Do NOT commit, stash, reset or checkout.'), `${c.label}: the seat commits, never an agent`)
@@ -884,7 +971,18 @@ test('generic run is clean, gk-build: no prompt names Goodricke or a sign-off ch
     const impl = calls.find((c) => c.label === 'impl:a').prompt
     // No shared file: the owned list ends the sentence.
     assert.match(impl, /You may edit ONLY these files \(create them if missing\): \["[^\]]*"\]\. Other pieces/)
+    assert.ok(impl.includes('. Run them in the FOREGROUND, from the folder their test runner expects.\n'), impl)
     assert.ok(calls.find((c) => c.label === 'plan-check').prompt.includes('Plan/spec file: /tmp/repo/docs/plan.md — read it in full.'))
+    // The project names no check and no packages: the check runs once, from the top level,
+    // whenever args.check gives a command (whatever the pieces' folders), and is skipped without.
+    const check = calls.find((c) => c.label === 'check')
+    if (extra.check) {
+      assert.ok(check.prompt.startsWith(`Run the project check and report. From /tmp/repo, run \`set -o pipefail; ${extra.check} 2>&1 | tail -40; echo "EXIT=$?"\` in the FOREGROUND (without pipefail, tail hides the failure). Do not fix anything; edit nothing. passed = it printed EXIT=0 and showed no errors. output = the command run and its tailed output.\nRules:`), check.prompt)
+      assert.deepEqual([check.model, check.effort], ['haiku', 'low'])
+    } else {
+      assert.equal(check, undefined)
+      assert.deepEqual(result.check, { passed: true, output: 'skipped: no check command (args.check is not given and the project names none)' })
+    }
     assert.deepEqual(result.signOff, [])
     assert.ok(!('signOffRequired' in result.judge) && !('triggered' in result.planCheck), JSON.stringify(result))
     assert.ok(logs.includes('Project: none (generic rules)'), logs.join('\n'))
@@ -893,7 +991,7 @@ test('generic run is clean, gk-build: no prompt names Goodricke or a sign-off ch
 
 test('generic run without a root, gk-build: prompts point at the working directory\'s repository and its relative paths', async () => {
   for (const project of [undefined, {}]) {
-    const args = buildArgs()
+    const args = buildArgs({ check: 'npm test' })
     if (project !== undefined) args.project = project
     const { calls, logs } = await runWorkflow(neutral('gk-build.js'), args, buildResponders('neutral'))
     assert.equal(calls.length, 9)
@@ -902,9 +1000,65 @@ test('generic run without a root, gk-build: prompts point at the working directo
       assert.ok(!c.prompt.includes('the git repository at'), `${JSON.stringify(project)} ${c.label}`)
     }
     assert.ok(calls.find((c) => c.label === 'plan-check').prompt.includes('Plan/spec file: docs/plan.md — read it in full.'))
-    assert.ok(calls.find((c) => c.label === 'check').prompt.includes(': cd <package> and run'))
+    assert.ok(calls.find((c) => c.label === 'check').prompt.includes('Run the project check and report. From the repository\'s top level, run `set -o pipefail; npm test 2>&1'))
     assert.ok(calls.find((c) => c.label === 'review:a').prompt.includes('Read the plan, then the change: in the repository\'s top level run `git diff --'))
     assert.ok(logs.includes('Project: none (generic rules)'), logs.join('\n'))
+  }
+})
+
+test('check stage, gk-build: the check runs from each affected project package, once from the top level without packages, and not at all without a command', async () => {
+  const checkOf = (r) => r.calls.find((c) => c.label === 'check')
+  const logOf = (r, prefix) => r.logs.filter((l) => l.startsWith(prefix))
+  const head = (p) => p.slice(0, p.indexOf('\nRules:'))
+  // Goodricke (check "npm run typecheck", packages backend and frontend): the golden's check
+  // stage, its prompt word for word but for the TypeScript fallback, which is a Check-stage guard.
+  const fallback = ' If the command is "npm run typecheck" and that package has no typecheck script, run `set -o pipefail; npx tsc --noEmit 2>&1 | tail -40; echo "EXIT=$?"` instead and say so.'
+  for (const [pieces, order, extra] of [[BUILD_PIECES, BUILD_ORDER, {}], [BUILD_PIECES, BUILD_ORDER, { check: 'npm test' }], [PAGE_PIECES, PAGE_ORDER, {}], [DOCS_PIECES, [['a', 'b']], { check: 'npm test' }]]) {
+    const name = `${pieces.map((p) => p.name).join('')} ${JSON.stringify(extra)}`
+    const old = await runWorkflow(golden('gk-build.js'), { plan: PLAN, pieces: structuredClone(pieces), ...extra }, buildResponders('golden', { pieces, order }))
+    const now = await runWorkflow(neutral('gk-build.js'), { plan: PLAN, pieces: structuredClone(pieces), ...extra, project: goodricke() }, buildResponders('neutral', { pieces, order }))
+    assert.deepEqual(now.result.check, old.result.check, name)
+    assert.deepEqual(logOf(now, 'Check: '), logOf(old, 'Check: '), name)
+    assert.deepEqual(logOf(now, 'Plan check over '), logOf(old, 'Plan check over '), name)
+    assert.equal(Boolean(checkOf(now)), Boolean(checkOf(old)), name)
+    if (checkOf(old)) {
+      assert.ok(head(checkOf(old).prompt).includes(fallback), name)
+      assert.equal(head(checkOf(now).prompt), head(checkOf(old).prompt).replace(fallback, ''), name)
+    }
+  }
+  // Any project's check and packages: three pieces, one in each package folder and one in docs.
+  const pieces = [
+    { name: 'a', files: ['web/src/a.ts'], brief: 'Add a.' },
+    { name: 'b', files: ['svc/api/b.go'], brief: 'Add b.' },
+    { name: 'c', files: ['docs/c.md'], brief: 'Add c.' },
+  ]
+  const run = (project, extra = {}, ps = pieces) => runWorkflow(neutral('gk-build.js'), { plan: PLAN, pieces: structuredClone(ps), ...extra, project }, buildResponders('generic', { pieces: ps, order: [ps.map((p) => p.name)] }))
+  // The project's check is the default command. Packages given under the root, with a trailing
+  // slash or with backslashes are folders relative to the top level; the affected ones keep the
+  // project's order.
+  const pk = await run({ root: '/tmp/repo', check: 'make check', packages: ['tools', '/tmp/repo/web/', 'svc\\api'] })
+  assert.ok(checkOf(pk).prompt.startsWith('Run the project check and report. For each package in ["web","svc/api"]: cd /tmp/repo/<package> and run `set -o pipefail; make check 2>&1 | tail -40; echo "EXIT=$?"` in the FOREGROUND'), checkOf(pk).prompt)
+  assert.ok(pk.logs.includes('Plan check over 3 pieces; affected packages: web, svc/api'), pk.logs.join('\n'))
+  // args.check wins over the project's check.
+  const over = await run({ root: '/tmp/repo', check: 'make check', packages: ['web'] }, { check: 'make lint' })
+  assert.ok(checkOf(over).prompt.includes('For each package in ["web"]: cd /tmp/repo/<package> and run `set -o pipefail; make lint 2>&1'), checkOf(over).prompt)
+  // No piece owns a file in a package: skipped, naming the packages.
+  const outside = await run({ root: '/tmp/repo', check: 'make check', packages: ['tools', 'web', 'svc/api'] }, {}, [pieces[2]])
+  assert.equal(checkOf(outside), undefined)
+  assert.deepEqual(outside.result.check, { passed: true, output: 'skipped: no files under tools/, web/ or svc/api/' })
+  // No packages: once from the top level, whatever folders the pieces own.
+  const top = await run({ root: '/tmp/repo', check: 'make check' }, {}, [pieces[2]])
+  assert.ok(checkOf(top).prompt.startsWith('Run the project check and report. From /tmp/repo, run `set -o pipefail; make check 2>&1'), checkOf(top).prompt)
+  assert.ok(top.logs.includes('Check: "make check" from the top level; Review: 1 piece(s)'), top.logs.join('\n'))
+  assert.ok(top.logs.includes('Plan check over 1 pieces; check: from the top level'), top.logs.join('\n'))
+  // No command, with packages or without: skipped, and the judge is told so.
+  for (const project of [{ root: '/tmp/repo' }, { root: '/tmp/repo', packages: ['web'] }]) {
+    const r = await run(project)
+    assert.equal(checkOf(r), undefined, JSON.stringify(project))
+    const skipped = { passed: true, output: 'skipped: no check command (args.check is not given and the project names none)' }
+    assert.deepEqual(r.result.check, skipped)
+    assert.ok(r.calls.find((c) => c.label === 'judge').prompt.includes(`\nProject check: ${JSON.stringify(skipped)}\n`))
+    assert.ok(r.logs.includes('Check: no command — skipped; Review: 3 piece(s)'), r.logs.join('\n'))
   }
 })
 
@@ -1029,8 +1183,15 @@ test('paths, gk-build: a path under the root, with backslashes or a leading ./ i
 })
 
 test('project malformed throws, gk-build: before any agent runs, naming the field', async () => {
-  // gk-build's own checks: a sharedFile is a path inside the repository; sign-off keys are unique.
+  // gk-build's own checks: a sharedFile is a path inside the repository and a package a folder
+  // inside it; sign-off keys are unique.
   const BUILD_MALFORMED = [
+    [{ packages: ['../x'] }, 'packages[0]'],
+    [{ packages: ['/srv/app'] }, 'packages[0]'],
+    [{ root: '/tmp/repo', packages: ['web', '/tmp/repository/web'] }, 'packages[1]'],
+    [{ packages: ['web', '.'] }, 'packages[1]'],
+    [{ packages: ['./'] }, 'packages[0]'],
+    [{ packages: ['it\'s'] }, 'packages[0]'],
     [{ signOff: [{ key: 'k', seat: 's', sharedFile: '../CHANGELOG.md' }] }, 'signOff[0].sharedFile'],
     [{ signOff: [{ key: 'k', seat: 's', sharedFile: '/etc/motd' }] }, 'signOff[0].sharedFile'],
     [{ root: '/tmp/repo', signOff: [{ key: 'k', seat: 's', sharedFile: '/tmp/repository/NOTICE' }] }, 'signOff[0].sharedFile'],

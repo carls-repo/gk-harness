@@ -67,9 +67,12 @@ log(`Profile: ${PROFILE} (apex ${APEX}${ESCALATE ? ', escalated to fable on Carl
 // a guard that names this workflow, a stage that is not one of its PHASES — logs one warning
 // line per name, and the guard is kept as written.
 //
-// A sign-off check is {key, seat, sharedFile?, trigger?, uiJudge?, implementer?, reviewer?}:
-// key and seat are printable lines, the other texts non-empty strings, uiJudge a boolean, and
-// any other key is malformed. gk-build hands the checks back for the seat to run; the other
+// A sign-off check is {key, seat, sharedFile?, trigger?, paths?, uiJudge?, implementer?,
+// reviewer?}: key and seat are printable lines, the other texts non-empty strings, uiJudge a
+// boolean, and paths a non-empty list of regular expressions (printable lines that compile),
+// given only with a trigger; any other key is malformed. check is one printable line and
+// packages a non-empty list of printable lines. gk-build uses the sign-off checks, check (its
+// default check command) and packages (the folders it runs that check from); the other
 // workflows only check their shape.
 const WF = 'gk-review'
 const PHASES = ['Scope', 'Find', 'Verify', 'Judge']
@@ -82,6 +85,7 @@ const PROJECT = (() => {
   const isText = (v) => typeof v === 'string' && v.trim() !== ''
   // One printable line: no C0 or C1 control character, no DEL, no Unicode line or paragraph separator.
   const isLine = (v) => isText(v) && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(v)
+  const compiles = (v) => { try { return new RegExp(v) instanceof RegExp } catch (e) { return false } }
   const list = (field, check) => {
     if (p[field] === undefined) return []
     if (!Array.isArray(p[field])) projectMalformed(field)
@@ -91,6 +95,9 @@ const PROJECT = (() => {
   if (!isObject(p)) projectMalformed('not an object')
   if (p.root !== undefined && !isLine(p.root)) projectMalformed('root')
   if (p.name !== undefined && !isText(p.name)) projectMalformed('name')
+  if (p.check !== undefined && !isLine(p.check)) projectMalformed('check')
+  if (Array.isArray(p.packages) && !p.packages.length) projectMalformed('packages')
+  const packages = list('packages', (k, at) => { if (!isLine(k)) projectMalformed(at) })
   const guards = list('guards', (g, at) => {
     if (typeof g === 'string') { if (!isLine(g)) projectMalformed(at); return }
     if (!isObject(g)) projectMalformed(at)
@@ -110,12 +117,22 @@ const PROJECT = (() => {
   })
   const signOff = list('signOff', (c, at) => {
     if (!isObject(c)) projectMalformed(at)
-    for (const k of Object.keys(c)) if (!['key', 'seat', 'sharedFile', 'trigger', 'uiJudge', 'implementer', 'reviewer'].includes(k)) projectMalformed(`${at}.${k}`)
+    for (const k of Object.keys(c)) if (!['key', 'seat', 'sharedFile', 'trigger', 'paths', 'uiJudge', 'implementer', 'reviewer'].includes(k)) projectMalformed(`${at}.${k}`)
     for (const k of ['key', 'seat']) if (!isLine(c[k])) projectMalformed(`${at}.${k}`)
     for (const k of ['sharedFile', 'trigger', 'implementer', 'reviewer']) if (c[k] !== undefined && !isText(c[k])) projectMalformed(`${at}.${k}`)
+    // A path rule is one more way to meet a trigger, so it needs one.
+    if (c.paths !== undefined && (c.trigger === undefined || !Array.isArray(c.paths) || !c.paths.length || !c.paths.every(s => isLine(s) && compiles(s)))) projectMalformed(`${at}.paths`)
     if (c.uiJudge !== undefined && typeof c.uiJudge !== 'boolean') projectMalformed(`${at}.uiJudge`)
   })
-  return { root: p.root === undefined ? null : p.root, name: p.name === undefined ? null : p.name, guards, reviewFinders, signOff }
+  return {
+    root: p.root === undefined ? null : p.root,
+    name: p.name === undefined ? null : p.name,
+    guards,
+    reviewFinders,
+    signOff,
+    check: p.check === undefined ? null : p.check,
+    packages: p.packages === undefined ? null : packages,
+  }
 })()
 const ROOT = PROJECT ? PROJECT.root : null
 const GUARDS = PROJECT ? PROJECT.guards : []
