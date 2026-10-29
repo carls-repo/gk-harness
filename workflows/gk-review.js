@@ -2,7 +2,7 @@ export const meta = {
   name: 'gk-review',
   description: 'Review a diff, branch range or the working tree before it is believed: scope, four-dimension find, adversarial refute, one judge',
   whenToUse:
-    'Run before believing a change (pre-merge to the shared branch, after a build workflow, before sign-off). Requires args {target: string — a git revision range such as "main..HEAD" or "main..feat/x" (branches are shared across worktrees, so a worktree branch is reviewed by naming it), or the literal "working-tree" for the uncommitted tree of the repository (REQUIRED); focus?: string[] — optional extra review dimensions, one finder each; ui?: boolean; security?: boolean; clientFacing?: boolean — any true (or the Scope pass detecting ui/security/client wording) routes the judge to fable under the fable profile; under the opus/sonnet profiles only ui/client-facing work routes to fable and security-only work is judged by opus xhigh; votes?: number — refuters per finding, default 3, integer 1..5; profile?: "fable" | "opus" | "sonnet" — the seat\'s tier profile, default "fable"; escalate?: boolean — route the judge to fable under a non-fable profile on Carl\'s word; project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief) and reviewFinders ([{key, brief, replaces?}] — a finder that replaces a core one takes its place, others run after the core four); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. Returns {scope, confirmed, rejected, killedByRefuters: [titles], dedupDropped: number, unjudged: [survivors the judge died on or gave no verdict for]} as JSON; the calling session writes the synthesis.',
+    'Run before believing a change (pre-merge to the shared branch, after a build workflow, before sign-off). Requires args {target: string — a git revision range such as "main..HEAD" or "main..feat/x" (branches are shared across worktrees, so a worktree branch is reviewed by naming it), or the literal "working-tree" for the uncommitted tree of the repository (REQUIRED); focus?: string[] — optional extra review dimensions, one finder each; ui?: boolean; security?: boolean; clientFacing?: boolean — any true (or the Scope pass detecting ui/security/client wording) routes the judge to fable under the fable profile; under the opus/sonnet profiles only ui/client-facing work routes to fable and security-only work is judged by opus xhigh; votes?: number — refuters per finding, default 3, integer 1..5; profile?: "fable" | "opus" | "sonnet" — the seat\'s tier profile, default "fable"; escalate?: boolean — route the judge to fable under a non-fable profile on Carl\'s word; project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases) and reviewFinders ([{key, brief, replaces?}] — a finder that replaces a core one takes its place, others run after the core four); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. Returns {scope, confirmed, rejected, killedByRefuters: [titles], dedupDropped: number, unjudged: [survivors the judge died on or gave no verdict for]} as JSON; the calling session writes the synthesis.',
   phases: [
     { title: 'Scope', detail: 'one haiku reader classifies the changed files and flags ui/security/client-wording', model: 'haiku' },
     { title: 'Find', detail: 'four sonnet finders (correctness, security, regressions-and-tests, efficiency-and-simplification; a project finder may take one\'s place or run after them) plus one per focus entry; then dedup', model: 'sonnet' },
@@ -47,12 +47,22 @@ const ESCALATE = ARGS.escalate === true  // Carl's word: route the apex judge to
 const APEX = PROFILE === 'fable' ? 'fable' : 'opus'   // the top of the ladder for this profile
 log(`Profile: ${PROFILE} (apex ${APEX}${ESCALATE ? ', escalated to fable on Carl\'s word' : ''})`)
 
-// ---------------- Project (gk-project.json schema v1, plus the root the hook adds) ----------------
-// Every gk-* workflow carries this same block (scripts cannot import); only WF differs.
+// ================= gk-project block: BEGIN (copy verbatim; only WF differs) =================
+// Every gk-* workflow carries this same block (scripts cannot import): the args.project
+// validator (gk-project.json schema v1, plus the root the hook adds) and the guard selection
+// that builds each stage's "Project rules:" block.
+//
 // The project is absent, or an object whose known fields have the v1 shapes; anything else,
-// null included, stops the run before any agent starts. Unknown fields are ignored. To run the
-// generic rules inside a project repository, pass project: {} (the hook adds one only when
-// args has no project key).
+// null included, stops the run before any agent starts. Unknown top-level fields are ignored.
+// To run the generic rules inside a project repository, pass project: {} (the hook adds one
+// only when args has no project key).
+//
+// A guard is one printable line, which reaches every stage of every workflow, or an object
+// {text, workflows?, stages?}: text is that line; workflows lists workflow names and stages
+// lists phase titles, both matched exactly, and the guard reaches only the stages whose
+// workflow and phase both match (a list that is absent does not restrict). A guard object with
+// any other key, or with an empty list, is malformed: either would silently widen or empty
+// the guard's reach.
 const WF = 'gk-review'
 const projectMalformed = (field) => { throw new Error(`${WF}: args.project is malformed (${field})`) }
 const PROJECT = (() => {
@@ -60,7 +70,8 @@ const PROJECT = (() => {
   if (p === undefined) return null
   const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
   const isText = (v) => typeof v === 'string' && v.trim() !== ''
-  const isLine = (v) => isText(v) && !/[\u0000-\u001f\u007f]/.test(v)   // one line: no control characters
+  // One printable line: no C0 or C1 control character, no DEL, no Unicode line or paragraph separator.
+  const isLine = (v) => isText(v) && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(v)
   const list = (field, check) => {
     if (p[field] === undefined) return []
     if (!Array.isArray(p[field])) projectMalformed(field)
@@ -70,10 +81,20 @@ const PROJECT = (() => {
   if (!isObject(p)) projectMalformed('not an object')
   if (p.root !== undefined && !isLine(p.root)) projectMalformed('root')
   if (p.name !== undefined && !isText(p.name)) projectMalformed('name')
-  const guards = list('guards', (g, at) => { if (!isLine(g)) projectMalformed(at) })
+  const guards = list('guards', (g, at) => {
+    if (typeof g === 'string') { if (!isLine(g)) projectMalformed(at); return }
+    if (!isObject(g)) projectMalformed(at)
+    for (const k of Object.keys(g)) if (!['text', 'workflows', 'stages'].includes(k)) projectMalformed(`${at}.${k}`)
+    if (!isLine(g.text)) projectMalformed(`${at}.text`)
+    for (const k of ['workflows', 'stages']) {
+      if (g[k] !== undefined && (!Array.isArray(g[k]) || !g[k].length || !g[k].every(isLine))) projectMalformed(`${at}.${k}`)
+    }
+  }).map(g => (typeof g === 'string'
+    ? { text: g, workflows: null, stages: null }
+    : { text: g.text, workflows: g.workflows || null, stages: g.stages || null }))
   const reviewFinders = list('reviewFinders', (f, at) => {
     if (!isObject(f)) projectMalformed(at)
-    if (!isText(f.key)) projectMalformed(`${at}.key`)
+    if (!isLine(f.key)) projectMalformed(`${at}.key`)   // the key becomes the finder's agent label
     if (!isText(f.brief)) projectMalformed(`${at}.brief`)
     if (f.replaces !== undefined && !isText(f.replaces)) projectMalformed(`${at}.replaces`)
   })
@@ -93,8 +114,16 @@ log(PROJECT && (PROJECT.name || PROJECT.guards.length || PROJECT.reviewFinders.l
 const REPO_TEXT = ROOT
   ? `the git repository at ${ROOT}`
   : 'the git repository containing your working directory (run `git rev-parse --show-toplevel` first)'
-// The project's guards close every stage brief.
-const PROJECT_RULES = GUARDS.length ? `\nProject rules:\n${GUARDS.map(g => `- ${g}`).join('\n')}` : ''
+// Guard selection: the guard lines that reach one stage of this workflow (stage = the phase
+// title), and the "Project rules:" block that closes that stage's brief ('' when none reach it).
+const stageGuards = (stage) => GUARDS
+  .filter(g => (!g.workflows || g.workflows.includes(WF)) && (!g.stages || g.stages.includes(stage)))
+  .map(g => g.text)
+const projectRules = (stage) => {
+  const lines = stageGuards(stage)
+  return lines.length ? `\nProject rules:\n${lines.map(t => `- ${t}`).join('\n')}` : ''
+}
+// ================= gk-project block: END =================
 
 const WT = target === 'working-tree'
 const DIFF_CMDS = WT
@@ -110,7 +139,8 @@ const READ_AT_TIP = !TIP
   : `The files on disk may not be the reviewed version (the working tree can be on another branch). Read the new version of a file with \`git show ${TIP}:<path>\`, search it with \`git grep <pattern> ${TIP}\`, and list files with \`git ls-tree -r --name-only ${TIP}\`. If you truly need a tree on disk (e.g. to run a test), use \`git worktree add --detach <a fresh temporary folder outside the repository> ${TIP}\` and remove it when done.`
 const COMMON = `
 Repository: ${REPO_TEXT}; run every command there. Review target: ${WT ? 'the uncommitted working tree' : `the git range ${target}`}; read it with ${DIFF_CMDS}. ${READ_AT_TIP}
-READ-ONLY: do not edit, create or delete any file; do not commit, stash, checkout or reset. Never change the repository's working tree, index, HEAD or branches: no git checkout, switch, stash, reset, restore, clean, merge, rebase or bisect, not even \`checkout --detach\`. If you run a test, run it in the FOREGROUND and pipe output through \`tail -40\`. Stay inside the diff and the code it touches — no scope expansion. Your final output is consumed by a script, not a human: return only the structured result.${PROJECT_RULES}`
+READ-ONLY: do not edit, create or delete any file in the repository's working tree; do not commit, stash, checkout or reset. Never change the repository's working tree, index, HEAD or branches: no git checkout, switch, stash, reset, restore, clean, merge, rebase or bisect, not even \`checkout --detach\`. If you run a test, run it in the FOREGROUND and pipe output through \`tail -40\`. Stay inside the diff and the code it touches — no scope expansion. Your final output is consumed by a script, not a human: return only the structured result.`
+// Every stage brief ends with COMMON and then the project rules that reach that stage.
 
 const SCOPE_SCHEMA = {
   type: 'object',
@@ -152,7 +182,7 @@ const CORE_FINDERS = [
   { key: 'regressions-and-tests', brief: 'behaviour the change breaks for existing callers, removed or weakened tests, new behaviour with no test, tests that assert rule text rather than measured outcomes.' },
   { key: 'efficiency-and-simplification', brief: 'needless work in hot paths, N+1 queries, repeated LLM calls, duplicated logic that an existing helper already covers, dead code, over-complicated control flow.' },
 ]
-const DIMENSIONS = (() => {
+const PROJECT_DIMENSIONS = (() => {
   const dims = CORE_FINDERS.map(d => ({ ...d }))
   const added = []
   ;(PROJECT ? PROJECT.reviewFinders : []).forEach((f, i) => {
@@ -168,19 +198,32 @@ const DIMENSIONS = (() => {
     if (first) projectMalformed(`reviewFinders[${d.from !== undefined ? d.from : first.from}].key`)   // two finders, one label
     byKey.set(d.key, d)
   }
-  return [
-    ...[...dims, ...added].map(({ key, brief }) => ({ key, brief })),
-    ...focus.map(f => ({ key: f.trim(), brief: `the caller's extra focus: ${f.trim()}.` })),
-  ]
+  return [...dims, ...added].map(({ key, brief }) => ({ key, brief }))
 })()
+// A focus entry whose key a finder already has (or an earlier focus entry) is dropped and
+// logged: two finders with one key would make two agent calls with one label.
+const FOCUS_DIMENSIONS = (() => {
+  const keys = new Set(PROJECT_DIMENSIONS.map(d => d.key))
+  const kept = []
+  const repeated = []
+  for (const f of focus) {
+    const key = f.trim()
+    if (keys.has(key)) { repeated.push(key); continue }
+    keys.add(key)
+    kept.push({ key, brief: `the caller's extra focus: ${key}.` })
+  }
+  if (repeated.length) log(`Focus: dropped ${repeated.length} entr${repeated.length === 1 ? 'y' : 'ies'} whose key a finder already has: ${repeated.join(', ')}`)
+  return kept
+})()
+const DIMENSIONS = [...PROJECT_DIMENSIONS, ...FOCUS_DIMENSIONS]
 
 phase('Scope')
-log(`gk-review: ${WT ? 'working tree' : target}; ${votes} refuter(s) per finding; ${focus.length} extra focus dimension(s)`)
+log(`gk-review: ${WT ? 'working tree' : target}; ${votes} refuter(s) per finding; ${FOCUS_DIMENSIONS.length} extra focus dimension(s)`)
 const scopeRaw = await agent(
   `Scope a code change for review. Run ${DIFF_CMDS}.
 Return every changed file (excluding untracked scratch) with a kind judged from its path: user-interface code (pages, components, views, styles) = ui; database migrations = migration; *.test.* / *.spec.* / test dirs = test; docs/, *.md = docs; other application or library source = backend; anything else = other.
-touchesUi: any ui file changed. touchesSecurity: any change to authentication, authorisation or access control, permissions, middleware, session or secret handling, PII handling or audit logging. touchesClientWording: any change to code or text that renders client-visible wording — reports, letters and other generated documents, LLM prompts or rubrics, document templates.${GUARDS.length ? ' Where the project rules below give this repository\'s own file kinds, or its own touchesUi, touchesSecurity or touchesClientWording rule, use those instead of the matching definitions above (they replace them; they do not add to them).' : ''}
-summary: two or three sentences on what the change does.${COMMON}`,
+touchesUi: any ui file changed. touchesSecurity: any change to authentication, authorisation or access control, permissions, middleware, session or secret handling, PII handling or audit logging. touchesClientWording: any change to code or text that renders client-visible wording — reports, letters and other generated documents, LLM prompts or rubrics, document templates.${stageGuards('Scope').length ? ' Where the project rules below give this repository\'s own file kinds, or its own touchesUi, touchesSecurity or touchesClientWording rule, use those instead of the matching definitions above (they replace them; they do not add to them).' : ''}
+summary: two or three sentences on what the change does.${COMMON}${projectRules('Scope')}`,
   { label: 'scope', phase: 'Scope', model: 'haiku', effort: 'high', schema: SCOPE_SCHEMA },
 )
 // A dead Scope agent must not sink the review: the finders read the diff themselves.
@@ -205,7 +248,7 @@ const finderRuns = await pipeline(DIMENSIONS, (d, _o, i) =>
   agent(
     `You are finder #${i + 1} on a code review, dimension "${d.key}". Look only for: ${d.brief}
 Change summary: ${scope.summary}${FILES}
-Read the full diff yourself, then the surrounding code as needed. Report only defects introduced or exposed by this change, each with file, line (in the new version), a short title, the claim, a concrete failure scenario and a severity. An empty list is a valid answer; do not pad.${COMMON}`,
+Read the full diff yourself, then the surrounding code as needed. Report only defects introduced or exposed by this change, each with file, line (in the new version), a short title, the claim, a concrete failure scenario and a severity. An empty list is a valid answer; do not pad.${COMMON}${projectRules('Find')}`,
     { label: `find:${d.key}`, phase: 'Find', model: 'sonnet', effort: 'medium', schema: FINDINGS_SCHEMA },
   ).then(r => (r ? r.findings.map(f => ({ ...f, dimension: d.key })) : null)),
 )
@@ -214,9 +257,12 @@ if (deadFinders.length) log(`Find: ${deadFinders.length} finder(s) returned noth
 const found = finderRuns.filter(Boolean).flat()
 
 const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
-const ROOT_PREFIX = ROOT ? ROOT.replace(/\/+$/, '') + '/' : null
+// A finder on Windows may report C:\r\src\a.ts: backslashes become slashes before the root
+// prefix (root plus "/", so /tmp/repository is not under /tmp/repo) and a leading ./ go.
+const slashes = s => String(s).replace(/\\/g, '/')
+const ROOT_PREFIX = ROOT ? slashes(ROOT).replace(/\/+$/, '') + '/' : null
 const normFile = s => {
-  const f = String(s)
+  const f = slashes(s)
   return (ROOT_PREFIX && f.startsWith(ROOT_PREFIX) ? f.slice(ROOT_PREFIX.length) : f).replace(/^\.\//, '')
 }
 const seen = new Set()
@@ -240,7 +286,7 @@ Finding (${f.dimension}, ${f.severity}): ${f.title}
 File: ${f.file}:${f.line}
 Claim: ${f.claim}
 Failure scenario: ${f.failureScenario}
-Read the diff and the code at that location. Set refuted=false only if you confirmed the defect is real and introduced or exposed by this change; give the reason in one or two sentences.${COMMON}`,
+Read the diff and the code at that location. Set refuted=false only if you confirmed the defect is real and introduced or exposed by this change; give the reason in one or two sentences.${COMMON}${projectRules('Verify')}`,
       { label: `refute:${i + 1}.${v + 1}`, phase: 'Verify', model: 'sonnet', effort: 'medium', schema: VOTE_SCHEMA },
     ),
   )).then(vs => {
@@ -274,7 +320,7 @@ const judged = await agent(
 The findings below each survived ${votes} adversarial refuter(s). For each one, read the diff and the code yourself and decide: confirmed (real, caused or exposed by this change) or rejected. For confirmed findings keep every field, set the severity you judge correct, and give a concrete minimal fix (what to change, where). For rejected ones give the title and the reason. Return exactly one verdict per finding and keep each title verbatim. Weigh client-visible wording and security invariants heavily.
 
 Findings (JSON):
-${JSON.stringify(survivors, null, 2)}${COMMON}`,
+${JSON.stringify(survivors, null, 2)}${COMMON}${projectRules('Judge')}`,
   { label: 'judge', phase: 'Judge', model: judgeModel, effort: 'xhigh', schema: JUDGE_SCHEMA },
 )
 // A dead judge must not discard the verified survivors: hand them back unjudged.

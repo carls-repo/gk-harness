@@ -52,9 +52,16 @@ const WT = target === 'working-tree'
 const DIFF_CMDS = WT
   ? '`git diff --stat HEAD`, `git diff HEAD` (staged and unstaged together) and `git status --short`'
   : `\`git diff --stat ${target}\` and \`git diff ${target}\``
+// For a range, the files on disk are the shared checkout's branch, not the reviewed tip — agents
+// that read them see the wrong version and have reached for `git checkout` to fix it.
+const TIP = WT ? null : (target.split(/\.{2,3}/).pop() || 'HEAD')
+const READ_AT_TIP = WT
+  ? 'The files on disk are the version under review.'
+  : `The files on disk are NOT the reviewed version (${REPO} is a shared checkout on another branch). Read the new version of a file with \`git show ${TIP}:<path>\`, search it with \`git grep <pattern> ${TIP}\`, and list files with \`git ls-tree -r --name-only ${TIP}\`. If you truly need a tree on disk (e.g. to run a test), use \`git worktree add --detach <a fresh dir under /tmp> ${TIP}\` and remove it when done.`
 const COMMON = `
-Repository: ${REPO} (run every command there). Review target: ${WT ? 'the uncommitted working tree' : `the git range ${target}`}; read it with ${DIFF_CMDS}.
-READ-ONLY: do not edit, create or delete any file; do not commit, stash, checkout or reset. Ignore the repo's many untracked scratch scripts (backend/scripts/_*, scripts/demo/_*, root-level scratch files) unless the diff itself adds them as part of the change. If you run a test, run it in the FOREGROUND and pipe output through \`tail -40\`. Any database check is dev only; never prod (never source a prod .env). Stay inside the diff and the code it touches — no scope expansion. Your final output is consumed by a script, not a human: return only the structured result.`
+Repository: ${REPO} (run every command there). Review target: ${WT ? 'the uncommitted working tree' : `the git range ${target}`}; read it with ${DIFF_CMDS}. ${READ_AT_TIP}
+NEVER change the checkout of ${REPO}: no git checkout, switch, stash, reset, restore, clean, merge, rebase or bisect, not even \`checkout --detach\`. Other sessions and the running dev stack use that working tree; changing it breaks them.
+READ-ONLY: do not edit, create or delete any file; do not commit. Ignore the repo's many untracked scratch scripts (backend/scripts/_*, scripts/demo/_*, root-level scratch files) unless the diff itself adds them as part of the change. If you run a test, run it in the FOREGROUND and pipe output through \`tail -40\`. Any database check is dev only; never prod (never source a prod .env). Stay inside the diff and the code it touches — no scope expansion. Your final output is consumed by a script, not a human: return only the structured result.`
 
 const SCOPE_SCHEMA = {
   type: 'object',

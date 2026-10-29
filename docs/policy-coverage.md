@@ -60,7 +60,7 @@ Status words: **kept** = same text; **reworded** = same rule, wording changed as
 | 68 | `gk-research` row | Saved workflows — table | kept |
 | 69 | `gk-design` row | Saved workflows — table | kept |
 | 71–72 | Workflows return structured results; the seat writes the synthesis; no seat-synthesis stage | Saved workflows | kept |
-| — | (new) `.claude/gk-project.json`: fields, the hook injects it as `args.project`, `Project: none` recovery, gk-build's `signOff` result | Project extension file | added (brief Task 7; schema from plan Task 10) |
+| — | (new) `.claude/gk-project.json`: fields, a guard scoped by `{text, workflows?, stages?}`, the hook injects it as `args.project`, `Project: none` recovery, gk-build's `signOff` result | Project extension file | added (brief Task 7; schema from plan Task 10; scoped guards by ruling R49) |
 
 ## Hard rules for every workflow stage (source lines 74–90)
 

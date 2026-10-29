@@ -66,7 +66,7 @@ REPRODUCE COMMAND: ${reproduce || '(none supplied)'}`
 const RULES = `RULES:
 - Do NOT fix anything. Do NOT edit, create or delete any file in the repo. Do NOT commit.
 - Dev only; never prod. Any database read goes through the supabase-dev MCP; never source a prod .env, never touch :8080 or the prod worktree (${PROD_WORKTREE}).
-- Never change the checkout: no git checkout/switch/stash/reset/restore/clean/merge/rebase/bisect. The dev stack and the shared de-id sidecar run from this working tree; use git log/show/diff/blame for history.
+- NEVER change the checkout: no git checkout/switch/stash/reset/restore/clean/merge/rebase/bisect, not even \`checkout --detach\`. Other sessions, the dev stack and the shared de-id sidecar run from this working tree. To read another revision use \`git show <rev>:<path>\` or \`git grep <pattern> <rev>\`; to trial a merge use \`git merge-tree --write-tree <a> <b>\`; if you truly need a tree on disk, \`git worktree add --detach <a fresh dir under your scratchpad> <rev>\` and remove it when done.
 - Never run \`npm run dev\` or restart services; systemd owns the stacks.
 - No paid LLM API calls (Anthropic/OpenAI/Gemini) from anything you write or run, other than the supplied reproduce command; standing rule: API spend needs Carl's prior approval.
 - Never quote secret values (keys, tokens, passwords) in your evidence; name the env var instead.
