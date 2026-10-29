@@ -61,6 +61,50 @@
       "text": "If the command is \"npm run typecheck\" and that package has no typecheck script, run `set -o pipefail; npx tsc --noEmit 2>&1 | tail -40; echo \"EXIT=$?\"` instead and say so.",
       "workflows": ["gk-build"],
       "stages": ["Check"]
+    },
+    {
+      "text": "You are READ-ONLY: do not create, modify or delete any file, do not commit, and ignore the many untracked scratch scripts (backend/scripts/_*.ts and similar).",
+      "workflows": ["gk-design"]
+    },
+    {
+      "text": "Any database inspection is dev only; never prod (use only the supabase-dev MCP, never a prod .env or the hosted plugin).",
+      "workflows": ["gk-design"]
+    },
+    {
+      "text": "The project design language lives in docs/design-system.md and frontend/src/app/globals.css (CorpOS tokens with the liquid-glass look; nested backdrop-filter does not render).",
+      "workflows": ["gk-design"]
+    },
+    {
+      "text": "New page roots must use h-full + overflow-y-auto because the app shell <main> is md:overflow-hidden.",
+      "workflows": ["gk-design"]
+    },
+    {
+      "text": "Ignore the repository's many untracked scratch scripts (e.g. backend/scripts/_*.ts, scripts/demo/_*.mjs): they are not the product.",
+      "workflows": ["gk-research"]
+    },
+    {
+      "text": "You should not need a database. If you query one at all: dev only; never prod (no prod .env, no hosted prod MCP).",
+      "workflows": ["gk-research"]
+    },
+    {
+      "text": "Dev only; never prod. Any database read goes through the supabase-dev MCP; never source a prod .env, never touch :8080 or the prod worktree (/home/carls/apps/mike).",
+      "workflows": ["gk-diagnose"]
+    },
+    {
+      "text": "NEVER change the checkout: no git checkout/switch/stash/reset/restore/clean/merge/rebase/bisect, not even `checkout --detach`. Other sessions, the dev stack and the shared de-id sidecar run from this working tree.",
+      "workflows": ["gk-diagnose"]
+    },
+    {
+      "text": "Never run `npm run dev` or restart services; systemd owns the stacks.",
+      "workflows": ["gk-diagnose"]
+    },
+    {
+      "text": "No paid LLM API calls (Anthropic/OpenAI/Gemini) from anything you write or run, other than the supplied reproduce command; standing rule: API spend needs Carl's prior approval.",
+      "workflows": ["gk-diagnose"]
+    },
+    {
+      "text": "Ignore the repo's many untracked scratch scripts (backend/scripts/_*.ts and similar); they are not the app.",
+      "workflows": ["gk-diagnose"]
     }
   ],
   "reviewFinders": [

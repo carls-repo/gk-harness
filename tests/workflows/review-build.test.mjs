@@ -247,6 +247,9 @@ const reach = (guards, workflow, stage) => guards
   .filter((g) => typeof g === 'string' || ((!g.workflows || g.workflows.includes(workflow)) && (!g.stages || g.stages.includes(stage))))
   .map((g) => (typeof g === 'string' ? g : g.text))
 const rulesBlock = (lines) => (lines.length ? `\nProject rules:\n${lines.map((t) => `- ${t}`).join('\n')}` : '')
+// A guard that reaches some stage of gk-review or gk-build: a string, or an object whose
+// workflows list (if any) names one of them.
+const reachesReviewOrBuild = (g) => typeof g === 'string' || !g.workflows || g.workflows.some((w) => w === 'gk-review' || w === 'gk-build')
 
 test('goodricke project, gk-review: each stage brief ends with the guards that reach it, and the log names the project', async () => {
   for (const target of ['develop..HEAD', 'working-tree']) {
@@ -283,14 +286,15 @@ test('goodricke guards, gk-review: each guard reaches exactly the stages where t
       }
     }
   }
-  // Every guard has a golden sentence behind it in gk-review or gk-build: see "goodricke guards,
-  // every guard". Outside gk-review and gk-build (whose own guards are tested below), only the
-  // rules that bind every step in the Goodricke repo reach a stage: the review-worded guards are
-  // scoped to gk-review (ruling R49).
+  // Every guard has a golden sentence behind it: see "goodricke guards, every guard" for the
+  // guards that reach gk-review or gk-build, and design-research-diagnose.test.mjs for the
+  // others. Of the guards that reach gk-review or gk-build, only the rules that bind every step
+  // in the Goodricke repo reach the other workflows' stages: the review- and build-worded guards
+  // are scoped to their own workflow (ruling R49).
   const universal = ['Any database check is dev only;', 'NEVER change the checkout of /home/carls/apps/mike-dev:']
   for (const wf of ['gk-design', 'gk-research', 'gk-diagnose']) {
-    for (const stage of ['Scope', 'Find', 'Verify', 'Judge', 'Implement']) {
-      const lines = reach(fixture.guards, wf, stage)
+    for (const stage of scriptPhases(`${wf}.js`).phases) {
+      const lines = reach(fixture.guards.filter(reachesReviewOrBuild), wf, stage)
       assert.deepEqual(lines.map((l) => universal.find((u) => l.startsWith(u)) || l), universal, `${wf} ${stage}`)
     }
   }
@@ -970,7 +974,7 @@ test('goodricke guards, gk-build: each scoped guard reaches exactly the stages w
   assert.equal(own, 6, 'six gk-build guards')
 })
 
-test('goodricke guards, every guard: each has a golden sentence behind it in gk-review or gk-build', async () => {
+test('goodricke guards, every guard that reaches gk-review or gk-build: each has a golden sentence behind it in one of them', async () => {
   const prompts = []
   for (const target of ['develop..HEAD', 'working-tree']) prompts.push(...(await runWorkflow(golden('gk-review.js'), { target }, reviewResponders())).calls.map((c) => ws(c.prompt)))
   prompts.push(...(await runWorkflow(golden('gk-build.js'), buildArgs(), buildResponders('golden'))).calls.map((c) => ws(c.prompt)))
@@ -979,7 +983,11 @@ test('goodricke guards, every guard: each has a golden sentence behind it in gk-
     ...PROMPT_EXCEPTIONS.map((e) => [e.replacedBy, e.sentence]),
     ['Flag PostgREST list reads without a .range() paging loop.', 'PostgREST list reads without a .range() paging loop'],
   ])
-  for (const g of fixture.guards) {
+  // The guards scoped to gk-design, gk-research or gk-diagnose are checked against their own
+  // goldens in design-research-diagnose.test.mjs.
+  const guards = fixture.guards.filter(reachesReviewOrBuild)
+  assert.equal(guards.length, 14, 'two string guards, six gk-review guards and six gk-build guards')
+  for (const g of guards) {
     const text = typeof g === 'string' ? g : g.text
     const original = ws(originals.get(text) || text)
     assert.ok(prompts.some((p) => p.includes(original)), `a guard with no golden sentence behind it: ${text}`)
@@ -1426,10 +1434,19 @@ function projectBlock(file) {
   return src.slice(begin, end).split('\n').filter((l) => !/^const (WF|PHASES) = /.test(l)).join('\n')
 }
 
-test('gk-project block, both scripts: one block, verbatim, whose PHASES are the script\'s meta.phases titles', () => {
-  assert.equal(projectBlock('gk-build.js'), projectBlock('gk-review.js'))
-  assert.deepEqual(scriptPhases('gk-review.js'), { titles: ['Scope', 'Find', 'Verify', 'Judge'], phases: ['Scope', 'Find', 'Verify', 'Judge'] })
-  assert.deepEqual(scriptPhases('gk-build.js'), { titles: ['Plan check', 'Implement', 'Check', 'Review', 'Judge'], phases: ['Plan check', 'Implement', 'Check', 'Review', 'Judge'] })
+test('gk-project block, every script: one block, verbatim, whose PHASES are the script\'s meta.phases titles', () => {
+  const phases = {
+    'gk-review.js': ['Scope', 'Find', 'Verify', 'Judge'],
+    'gk-build.js': ['Plan check', 'Implement', 'Check', 'Review', 'Judge'],
+    'gk-design.js': ['Propose', 'Judge', 'Sign-off'],
+    'gk-research.js': ['Sweep', 'Merge', 'Deep-read', 'Critic'],
+    'gk-diagnose.js': ['Hypothesise', 'Test', 'Adjudicate'],
+  }
+  for (const [file, titles] of Object.entries(phases)) {
+    assert.equal(projectBlock(file), projectBlock('gk-build.js'), `${file}: the block is gk-build's, verbatim`)
+    assert.deepEqual(scriptPhases(file), { titles, phases: titles }, file)
+    assert.ok(readFileSync(neutral(file), 'utf8').includes(`\nconst WF = '${file.replace(/\.js$/, '')}'\n`), `${file}: WF is its own name`)
+  }
 })
 
 const nameWarnings = (logs) => logs.filter((l) => / names unknown (workflow|stage) /.test(l))
@@ -1571,7 +1588,7 @@ test('static guard: catches new Date without parentheses, Date() without new and
 
 test('static guard: no workflow script names a Node API, the clock or randomness (rulings R46, R50)', () => {
   const files = readdirSync(workflowsDir).filter((f) => f.endsWith('.js')).sort()
-  assert.ok(files.includes('gk-review.js') && files.includes('gk-selftest.js'), files.join(', '))
+  assert.deepEqual(files, ['gk-build.js', 'gk-design.js', 'gk-diagnose.js', 'gk-research.js', 'gk-review.js', 'gk-selftest.js'])
   for (const f of files) {
     const code = codeOnly(readFileSync(join(workflowsDir, f), 'utf8'))
     for (const [name, re] of FORBIDDEN) assert.doesNotMatch(code, re, `${f} names ${name}`)
