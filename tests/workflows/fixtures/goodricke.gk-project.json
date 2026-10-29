@@ -1,5 +1,26 @@
 {
   "version": 1,
   "name": "Goodricke",
-  "sharedBranch": "develop"
+  "sharedBranch": "develop",
+  "guards": [
+    "Ignore the repo's many untracked scratch scripts (backend/scripts/_*, scripts/demo/_*, root-level scratch files) unless the diff itself adds them as part of the change.",
+    "Any database check is dev only; never prod (never source a prod .env).",
+    "NEVER change the checkout of /home/carls/apps/mike-dev: no git checkout, switch, stash, reset, restore, clean, merge, rebase or bisect, not even `checkout --detach`. Other sessions and the running dev stack use that working tree; changing it breaks them.",
+    "Weigh client-visible wording, ethical walls, de-id and audit invariants heavily.",
+    "File kinds in this repository: frontend/src/app and frontend/src/components = ui; backend/migrations = migration; other backend/src = backend.",
+    "Security-sensitive code in this repository: any change under backend/src/lib/docreview*, auth / mcpAuth / middleware, deid / deident, permissions / accessControl / access.ts, ethicalWalls, audit.",
+    "Client-visible wording in this repository: reports (docreviewReport*, report stores), engagement letters/packs (engagement*), LLM prompts or rubrics, document templates."
+  ],
+  "reviewFinders": [
+    {
+      "key": "security-and-invariants",
+      "replaces": "security",
+      "brief": "the Goodricke invariants: ethical walls enforced on every document/matter read; Principal / canAct checks on every mutating route; audit rows written exactly once per action (never zero, never twice on retry); PII and client identities never logged or sent unmasked past the de-id gateway; PostgREST silently caps .select() at 1000 rows, so any list read that can grow needs a .range() paging loop; supabase-js stays pinned at exact 2.102.1."
+    },
+    {
+      "key": "regressions-and-tests",
+      "replaces": "regressions-and-tests",
+      "brief": "behaviour the change breaks for existing callers, removed or weakened tests, new behaviour with no test, tests that assert rule text rather than measured outcomes, a page root that lost h-full + overflow-y-auto, a behavioural change with no CHANGELOG.md [Unreleased] entry."
+    }
+  ]
 }
