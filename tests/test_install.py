@@ -577,6 +577,27 @@ class UninstallTests(InstallBase):
         self.assertIn("nothing to uninstall", out)
         self.assertEqual(os.listdir(str(self.cdir)), [])
 
+    def test_uninstall_removes_the_update_stamp_and_an_empty_seat_folder(self):
+        self.ok("install")
+        state = self.cdir / "state"
+        stamp = state / "gk-harness-update.json"
+        write(stamp, json.dumps({"checked": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                 "available": True}))
+        (state / "gk-seat").mkdir()
+        write(state / "gk-peers" / "s1.json", "{}")
+        self.ok("uninstall")
+        self.assertFalse(os.path.lexists(str(stamp)))
+        self.assertFalse(os.path.lexists(str(state / "gk-seat")))
+        # state/ itself and the other hooks' folders stay
+        self.assertTrue((state / "gk-peers" / "s1.json").is_file())
+
+    def test_uninstall_keeps_a_seat_folder_that_still_holds_sessions(self):
+        self.ok("install")
+        seat = self.cdir / "state" / "gk-seat" / "s1.json"
+        write(seat, "{}")
+        self.ok("uninstall")
+        self.assertTrue(seat.is_file())
+
     def test_files_put_back_by_hand_before_uninstall(self):
         # A file that already equals its backup is as it was before the install: uninstall leaves
         # it, adding no legacy entry twice and printing no changed-since notice.
@@ -1269,8 +1290,14 @@ class UpdateTests(unittest.TestCase):
 
     def test_update_pulls_then_installs(self):
         self.push_policy_line("Update probe line.")
+        stamp = self.cdir / "state" / "gk-harness-update.json"
+        stamp.parent.mkdir(parents=True)
+        stamp.write_text(json.dumps({"checked": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                              time.gmtime()),
+                                     "available": True}), encoding="utf-8")
         proc = self.update()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(os.path.lexists(str(stamp)))  # the next check starts afresh
         self.assertEqual(self.git(self.clone, "rev-parse", "HEAD"),
                          self.git(self.seed, "rev-parse", "HEAD"))
         md = (self.cdir / "CLAUDE.md").read_text(encoding="utf-8")

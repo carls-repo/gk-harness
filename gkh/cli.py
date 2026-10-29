@@ -726,6 +726,12 @@ def uninstall() -> int:
         _warn("%s; uninstall stopped part-way. Run uninstall again to finish." % e)
         _report_kept(keep)
         return 1
+    # The hooks' own state: the cached update check, and the seat folder once it is empty.
+    _drop_update_stamp()
+    try:
+        os.rmdir(str(paths.claude_dir() / "state" / "gk-seat"))
+    except OSError:
+        pass
     print("gk-harness uninstalled from %s; the backups stay in %s"
           % (paths.posix(paths.claude_dir()), paths.posix(paths.backup_root())))
     _report_kept(keep)
@@ -739,6 +745,18 @@ def _report_kept(keep: _Keep) -> None:
 
 
 # --- update ---------------------------------------------------------------------------------
+
+def _update_stamp() -> Path:
+    """The SessionStart hook's cached once-a-day update check."""
+    return paths.claude_dir() / "state" / "gk-harness-update.json"
+
+
+def _drop_update_stamp() -> None:
+    """Remove the cached update check (best effort), so the next check starts afresh."""
+    try:
+        os.remove(str(_update_stamp()))
+    except OSError:  # FileNotFoundError included
+        pass
 
 def update(options: list) -> int:
     root = paths.harness_root()
@@ -757,6 +775,8 @@ def update(options: list) -> int:
     if pulled.returncode != 0:
         return _stopped("git pull --ff-only in %s failed (exit %d)"
                         % (paths.posix(root), pulled.returncode))
+    # The cached check would go on reporting the update just pulled for up to a day.
+    _drop_update_stamp()
     # The pull may have changed the installer itself, so the new code runs the install.
     return subprocess.run([python, str(root / "install.py"), "install"] + options).returncode
 
