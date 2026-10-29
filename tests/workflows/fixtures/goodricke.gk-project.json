@@ -32,6 +32,23 @@
       "text": "touchesClientWording: any change to code or text that renders client-visible wording — reports (docreviewReport*, report stores), engagement letters/packs (engagement*), LLM prompts or rubrics, document templates.",
       "workflows": ["gk-review"],
       "stages": ["Scope"]
+    },
+    {
+      "text": "Ignore the repo's many untracked scratch scripts (backend/scripts/_*.ts etc.).",
+      "workflows": ["gk-build"]
+    },
+    {
+      "text": "The dev stack serves this checkout live: never run npm run dev, restart services or delete .next.",
+      "workflows": ["gk-build"]
+    },
+    {
+      "text": "Database work is dev only; never prod.",
+      "workflows": ["gk-build"]
+    },
+    {
+      "text": "Flag PostgREST list reads without a .range() paging loop.",
+      "workflows": ["gk-build"],
+      "stages": ["Review"]
     }
   ],
   "reviewFinders": [
@@ -44,6 +61,23 @@
       "key": "regressions-and-tests",
       "replaces": "regressions-and-tests",
       "brief": "behaviour the change breaks for existing callers, removed or weakened tests, new behaviour with no test, tests that assert rule text rather than measured outcomes, a page root that lost h-full + overflow-y-auto, a behavioural change with no CHANGELOG.md [Unreleased] entry."
+    }
+  ],
+  "signOff": [
+    {
+      "key": "changelog",
+      "sharedFile": "CHANGELOG.md",
+      "implementer": "CHANGELOG: if app behaviour changed, the CHANGELOG.md [Unreleased] entry is part of the deliverable — add exactly ONE bullet line in the house form `- **Added|Changed|Fixed|Removed — <summary>.** <detail>` (the Keep a Changelog group is the bullet's prefix; read a few existing entries first), British English, no exclamation marks, describing the change itself (never test counts). Put it under this work's `### <Area — topic>` heading if one already exists near the top of [Unreleased], else directly below `## [Unreleased]`; never add headings. It is the one shared file: re-read it immediately before editing, insert only your line, never rewrite other lines; if the edit fails because the file changed, re-read and retry. Pure refactors/tests/docs need no line (return \"\").",
+      "reviewer": "a missing or wrong CHANGELOG line for a behaviour change",
+      "seat": "Before committing, check CHANGELOG.md [Unreleased] has the line of each listed piece that changed app behaviour, and commit each line in the same commit as its piece's code."
+    },
+    {
+      "key": "scroll-audit",
+      "trigger": "any change to a page root (a frontend/src/app page or layout, or a component that becomes a page root)",
+      "uiJudge": true,
+      "implementer": "If you change a page root (a frontend/src/app page/layout, or a component that becomes a page root), say so in notes and list scroll-audit in triggered so the seat runs the scroll audit; page roots use h-full + overflow-y-auto.",
+      "reviewer": "page roots without h-full + overflow-y-auto",
+      "seat": "Before sign-off, run the scroll audit against the running dev stack on the pages the listed pieces touch, with enough data to overflow, and put its verdict in the sign-off: `cd scripts/demo && LD_LIBRARY_PATH=$HOME/.local/chrome-libs/extract/usr/lib/x86_64-linux-gnu node _scroll-audit.mjs [/your/new/page ...]` (a FITS verdict only means the seeded data was short)."
     }
   ]
 }

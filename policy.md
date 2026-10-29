@@ -81,7 +81,7 @@ A repo's own rules for the workflows live in **`.claude/gk-project.json`** (`ver
 `name`; `sharedBranch`, the branch sessions merge into; `guards`, one rule line each, added to
 every stage brief; `reviewFinders`, extra gk-review finders (`{key, replaces?, brief}`; one with
 `replaces` takes that core finder's place); and `signOff`, the checks gk-build hands back
-(`{key, sharedFile?, trigger?, uiJudge?, implementer, reviewer, seat}`). A guard may instead be
+(`{key, seat, sharedFile?, trigger?, uiJudge?, implementer?, reviewer?}`). A guard may instead be
 `{text, workflows?, stages?}`, which reaches only the workflows named in `workflows` and, in
 them, the phases whose titles are in `stages` (a list left out does not restrict). `root` is never in the file. A repo without
 the file gets the generic workflows.

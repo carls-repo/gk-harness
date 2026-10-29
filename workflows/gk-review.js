@@ -47,10 +47,11 @@ const ESCALATE = ARGS.escalate === true  // Carl's word: route the apex judge to
 const APEX = PROFILE === 'fable' ? 'fable' : 'opus'   // the top of the ladder for this profile
 log(`Profile: ${PROFILE} (apex ${APEX}${ESCALATE ? ', escalated to fable on Carl\'s word' : ''})`)
 
-// ================= gk-project block: BEGIN (copy verbatim; only WF differs) =================
+// ================= gk-project block: BEGIN (copy verbatim; only WF and PHASES differ) =================
 // Every gk-* workflow carries this same block (scripts cannot import): the args.project
 // validator (gk-project.json schema v1, plus the root the hook adds) and the guard selection
-// that builds each stage's "Project rules:" block.
+// that builds each stage's "Project rules:" block. WF is this workflow's name and PHASES its
+// meta.phases titles, in order.
 //
 // The project is absent, or an object whose known fields have the v1 shapes; anything else,
 // null included, stops the run before any agent starts. Unknown top-level fields are ignored.
@@ -62,8 +63,17 @@ log(`Profile: ${PROFILE} (apex ${APEX}${ESCALATE ? ', escalated to fable on Carl
 // lists phase titles, both matched exactly, and the guard reaches only the stages whose
 // workflow and phase both match (a list that is absent does not restrict). A guard object with
 // any other key, or with an empty list, is malformed: either would silently widen or empty
-// the guard's reach.
+// the guard's reach. A name that can match nothing — a workflow not in KNOWN_WORKFLOWS, or, in
+// a guard that names this workflow, a stage that is not one of its PHASES — logs one warning
+// line per name, and the guard is kept as written.
+//
+// A sign-off check is {key, seat, sharedFile?, trigger?, uiJudge?, implementer?, reviewer?}:
+// key and seat are printable lines, the other texts non-empty strings, uiJudge a boolean, and
+// any other key is malformed. gk-build hands the checks back for the seat to run; the other
+// workflows only check their shape.
 const WF = 'gk-review'
+const PHASES = ['Scope', 'Find', 'Verify', 'Judge']
+const KNOWN_WORKFLOWS = ['gk-review', 'gk-build', 'gk-design', 'gk-research', 'gk-diagnose']
 const projectMalformed = (field) => { throw new Error(`${WF}: args.project is malformed (${field})`) }
 const PROJECT = (() => {
   const p = ARGS.project
@@ -100,8 +110,9 @@ const PROJECT = (() => {
   })
   const signOff = list('signOff', (c, at) => {
     if (!isObject(c)) projectMalformed(at)
-    if (!isText(c.key)) projectMalformed(`${at}.key`)
-    for (const k of ['sharedFile', 'trigger', 'implementer', 'reviewer', 'seat']) if (c[k] !== undefined && !isText(c[k])) projectMalformed(`${at}.${k}`)
+    for (const k of Object.keys(c)) if (!['key', 'seat', 'sharedFile', 'trigger', 'uiJudge', 'implementer', 'reviewer'].includes(k)) projectMalformed(`${at}.${k}`)
+    for (const k of ['key', 'seat']) if (!isLine(c[k])) projectMalformed(`${at}.${k}`)
+    for (const k of ['sharedFile', 'trigger', 'implementer', 'reviewer']) if (c[k] !== undefined && !isText(c[k])) projectMalformed(`${at}.${k}`)
     if (c.uiJudge !== undefined && typeof c.uiJudge !== 'boolean') projectMalformed(`${at}.uiJudge`)
   })
   return { root: p.root === undefined ? null : p.root, name: p.name === undefined ? null : p.name, guards, reviewFinders, signOff }
@@ -111,6 +122,10 @@ const GUARDS = PROJECT ? PROJECT.guards : []
 log(PROJECT && (PROJECT.name || PROJECT.guards.length || PROJECT.reviewFinders.length || PROJECT.signOff.length)
   ? `Project: ${PROJECT.name || '(unnamed)'} (${PROJECT.guards.length} guards, ${PROJECT.reviewFinders.length} finders, ${PROJECT.signOff.length} sign-off checks)`
   : 'Project: none (generic rules)')
+GUARDS.forEach((g, i) => {
+  for (const w of g.workflows || []) if (!KNOWN_WORKFLOWS.includes(w)) log(`Project: guard ${i} names unknown workflow '${w}'`)
+  if (g.workflows && g.workflows.includes(WF)) for (const s of g.stages || []) if (!PHASES.includes(s)) log(`Project: guard ${i} names unknown stage '${s}'`)
+})
 const REPO_TEXT = ROOT
   ? `the git repository at ${ROOT}`
   : 'the git repository containing your working directory (run `git rev-parse --show-toplevel` first)'
