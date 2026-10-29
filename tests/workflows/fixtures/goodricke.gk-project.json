@@ -134,7 +134,7 @@
       "uiJudge": true,
       "implementer": "If you change a page root (a frontend/src/app page/layout, or a component that becomes a page root), say so in notes and list scroll-audit in triggered so the seat runs the scroll audit; page roots use h-full + overflow-y-auto.",
       "reviewer": "page roots without h-full + overflow-y-auto",
-      "seat": "Before sign-off, run the scroll audit against the running dev stack on the pages the listed pieces touch, with enough data to overflow, and put its verdict in the sign-off: `cd scripts/demo && LD_LIBRARY_PATH=$HOME/.local/chrome-libs/extract/usr/lib/x86_64-linux-gnu node _scroll-audit.mjs [/your/new/page ...]` (a FITS verdict only means the seeded data was short)."
+      "seat": "Before sign-off, run the scroll audit against the running dev stack on the pages the listed pieces touch, with enough data to overflow, and put its verdict in the sign-off: `cd scripts/demo && LD_LIBRARY_PATH=$HOME/.local/chrome-libs/extract/usr/lib/x86_64-linux-gnu node _scroll-audit.mjs [/your/new/page ...]` (a FITS verdict only means the seeded data was short). The dev stack serves /home/carls/apps/mike-dev: when the pieces were built in another worktree, the audit measures them only once the change reaches that checkout, so run it after the merge and before signing off the merge; an audit before then measures develop, not this change."
     }
   ]
 }
