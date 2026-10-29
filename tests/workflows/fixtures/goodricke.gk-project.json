@@ -6,10 +6,11 @@
     "Ignore the repo's many untracked scratch scripts (backend/scripts/_*, scripts/demo/_*, root-level scratch files) unless the diff itself adds them as part of the change.",
     "Any database check is dev only; never prod (never source a prod .env).",
     "NEVER change the checkout of /home/carls/apps/mike-dev: no git checkout, switch, stash, reset, restore, clean, merge, rebase or bisect, not even `checkout --detach`. Other sessions and the running dev stack use that working tree; changing it breaks them.",
+    "For a git range, the files on disk are NOT the reviewed version (/home/carls/apps/mike-dev is a shared checkout on another branch).",
     "Weigh client-visible wording, ethical walls, de-id and audit invariants heavily.",
-    "File kinds in this repository: frontend/src/app and frontend/src/components = ui; backend/migrations = migration; other backend/src = backend.",
-    "Security-sensitive code in this repository: any change under backend/src/lib/docreview*, auth / mcpAuth / middleware, deid / deident, permissions / accessControl / access.ts, ethicalWalls, audit.",
-    "Client-visible wording in this repository: reports (docreviewReport*, report stores), engagement letters/packs (engagement*), LLM prompts or rubrics, document templates."
+    "Return every changed file (excluding untracked scratch) with a kind judged from its path: frontend/src/app and frontend/src/components = ui; backend/migrations = migration; *.test.ts / *.spec.* / test dirs = test; docs/, *.md = docs; other backend/src = backend; anything else = other.",
+    "touchesSecurity: any change under backend/src/lib/docreview*, auth / mcpAuth / middleware, deid / deident, permissions / accessControl / access.ts, ethicalWalls, audit.",
+    "touchesClientWording: any change to code or text that renders client-visible wording — reports (docreviewReport*, report stores), engagement letters/packs (engagement*), LLM prompts or rubrics, document templates."
   ],
   "reviewFinders": [
     {

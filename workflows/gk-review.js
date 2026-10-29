@@ -2,7 +2,7 @@ export const meta = {
   name: 'gk-review',
   description: 'Review a diff, branch range or the working tree before it is believed: scope, four-dimension find, adversarial refute, one judge',
   whenToUse:
-    'Run before believing a change (pre-merge to the shared branch, after a build workflow, before sign-off). Requires args {target: string — a git revision range such as "main..HEAD" or "main..feat/x" (branches are shared across worktrees, so a worktree branch is reviewed by naming it), or the literal "working-tree" for the uncommitted tree of the repository (REQUIRED); focus?: string[] — optional extra review dimensions, one finder each; ui?: boolean; security?: boolean; clientFacing?: boolean — any true (or the Scope pass detecting ui/security/client wording) routes the judge to fable under the fable profile; under the opus/sonnet profiles only ui/client-facing work routes to fable and security-only work is judged by opus xhigh; votes?: number — refuters per finding, default 3, integer 1..5; profile?: "fable" | "opus" | "sonnet" — the seat\'s tier profile, default "fable"; escalate?: boolean — route the judge to fable under a non-fable profile on Carl\'s word; project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief) and reviewFinders ([{key, brief, replaces?}] — a finder that replaces a core one takes its place, others run after the core four); without a root the agents work in the git repository containing their working directory}. Returns {scope, confirmed, rejected, killedByRefuters: [titles], dedupDropped: number, unjudged: [survivors the judge died on or gave no verdict for]} as JSON; the calling session writes the synthesis.',
+    'Run before believing a change (pre-merge to the shared branch, after a build workflow, before sign-off). Requires args {target: string — a git revision range such as "main..HEAD" or "main..feat/x" (branches are shared across worktrees, so a worktree branch is reviewed by naming it), or the literal "working-tree" for the uncommitted tree of the repository (REQUIRED); focus?: string[] — optional extra review dimensions, one finder each; ui?: boolean; security?: boolean; clientFacing?: boolean — any true (or the Scope pass detecting ui/security/client wording) routes the judge to fable under the fable profile; under the opus/sonnet profiles only ui/client-facing work routes to fable and security-only work is judged by opus xhigh; votes?: number — refuters per finding, default 3, integer 1..5; profile?: "fable" | "opus" | "sonnet" — the seat\'s tier profile, default "fable"; escalate?: boolean — route the judge to fable under a non-fable profile on Carl\'s word; project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief) and reviewFinders ([{key, brief, replaces?}] — a finder that replaces a core one takes its place, others run after the core four); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. Returns {scope, confirmed, rejected, killedByRefuters: [titles], dedupDropped: number, unjudged: [survivors the judge died on or gave no verdict for]} as JSON; the calling session writes the synthesis.',
   phases: [
     { title: 'Scope', detail: 'one haiku reader classifies the changed files and flags ui/security/client-wording', model: 'haiku' },
     { title: 'Find', detail: 'four sonnet finders (correctness, security, regressions-and-tests, efficiency-and-simplification; a project finder may take one\'s place or run after them) plus one per focus entry; then dedup', model: 'sonnet' },
@@ -49,13 +49,15 @@ log(`Profile: ${PROFILE} (apex ${APEX}${ESCALATE ? ', escalated to fable on Carl
 
 // ---------------- Project (gk-project.json schema v1, plus the root the hook adds) ----------------
 // Every gk-* workflow carries this same block (scripts cannot import); only WF differs.
-// The project is absent (or null), or an object whose known fields have the v1 shapes;
-// anything else stops the run before any agent starts. Unknown fields are ignored.
+// The project is absent, or an object whose known fields have the v1 shapes; anything else,
+// null included, stops the run before any agent starts. Unknown fields are ignored. To run the
+// generic rules inside a project repository, pass project: {} (the hook adds one only when
+// args has no project key).
 const WF = 'gk-review'
 const projectMalformed = (field) => { throw new Error(`${WF}: args.project is malformed (${field})`) }
 const PROJECT = (() => {
   const p = ARGS.project
-  if (p === undefined || p === null) return null
+  if (p === undefined) return null
   const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
   const isText = (v) => typeof v === 'string' && v.trim() !== ''
   const isLine = (v) => isText(v) && !/[\u0000-\u001f\u007f]/.test(v)   // one line: no control characters
@@ -100,7 +102,8 @@ const DIFF_CMDS = WT
   : `\`git diff --stat ${target}\` and \`git diff ${target}\``
 // For a range, the files on disk are whatever the working tree has checked out, which need not
 // be the reviewed tip; agents that read them see the wrong version. A single revision is
-// diffed against the working tree, so its new version is the one on disk.
+// diffed against the working tree, so its new version is the one on disk. A project whose
+// checkout is known to be on another branch says so in a guard (Goodricke does).
 const TIP = WT || !target.includes('..') ? null : (target.split(/\.{2,3}/).pop() || 'HEAD')
 const READ_AT_TIP = !TIP
   ? 'The files on disk are the version under review.'
@@ -176,7 +179,7 @@ log(`gk-review: ${WT ? 'working tree' : target}; ${votes} refuter(s) per finding
 const scopeRaw = await agent(
   `Scope a code change for review. Run ${DIFF_CMDS}.
 Return every changed file (excluding untracked scratch) with a kind judged from its path: user-interface code (pages, components, views, styles) = ui; database migrations = migration; *.test.* / *.spec.* / test dirs = test; docs/, *.md = docs; other application or library source = backend; anything else = other.
-touchesUi: any ui file changed. touchesSecurity: any change to authentication, authorisation or access control, permissions, middleware, session or secret handling, PII handling or audit logging. touchesClientWording: any change to code or text that renders client-visible wording — reports, letters and other generated documents, LLM prompts or rubrics, document templates.${GUARDS.length ? ' Where the project rules below name file kinds, security-sensitive code or client-visible wording for this repository, those count too.' : ''}
+touchesUi: any ui file changed. touchesSecurity: any change to authentication, authorisation or access control, permissions, middleware, session or secret handling, PII handling or audit logging. touchesClientWording: any change to code or text that renders client-visible wording — reports, letters and other generated documents, LLM prompts or rubrics, document templates.${GUARDS.length ? ' Where the project rules below give this repository\'s own file kinds, or its own touchesUi, touchesSecurity or touchesClientWording rule, use those instead of the matching definitions above (they replace them; they do not add to them).' : ''}
 summary: two or three sentences on what the change does.${COMMON}`,
   { label: 'scope', phase: 'Scope', model: 'haiku', effort: 'high', schema: SCOPE_SCHEMA },
 )

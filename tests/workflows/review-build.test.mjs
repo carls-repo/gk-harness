@@ -79,6 +79,23 @@ test('routing equivalence, gk-review: golden and neutral+Goodricke make the same
 const MARK = /mike-dev|supabase|prod|:8080|CHANGELOG|scratch scripts|Goodricke|Principal|canAct|ethical wall|page root|de-id|checkout/i
 const sentences = (prompt) => prompt.split(/\n+|(?<=[.!?])\s+/).map(ws).filter(Boolean)
 
+// Golden Goodricke sentences the marker misses, one reason each. They are checked like the
+// marked ones: verbatim in the matching neutral prompt (they reach it as guards).
+const REVIEW_UNMARKED = [
+  {
+    sentence: 'Return every changed file (excluding untracked scratch) with a kind judged from its path: frontend/src/app and frontend/src/components = ui; backend/migrations = migration; *.test.ts / *.spec.* / test dirs = test; docs/, *.md = docs; other backend/src = backend; anything else = other.',
+    reason: 'Goodricke\'s directory layout; it decides touchesUi, and so the judge route (a frontend/src/components/*.test.tsx file is ui, not test)',
+  },
+  {
+    sentence: 'touchesSecurity: any change under backend/src/lib/docreview*, auth / mcpAuth / middleware, deid / deident, permissions / accessControl / access.ts, ethicalWalls, audit.',
+    reason: 'Goodricke\'s security-sensitive modules; it decides touchesSecurity, and so the judge route',
+  },
+  {
+    sentence: 'touchesClientWording: any change to code or text that renders client-visible wording — reports (docreviewReport*, report stores), engagement letters/packs (engagement*), LLM prompts or rubrics, document templates.',
+    reason: 'Goodricke\'s client-facing modules; it decides touchesClientWording, and so the judge route',
+  },
+]
+
 // Golden sentences that do not survive verbatim, one reason each, and the text that replaces them.
 const REVIEW_EXCEPTIONS = [
   {
@@ -88,8 +105,9 @@ const REVIEW_EXCEPTIONS = [
   },
 ]
 
-test('goodricke sentences preserved, gk-review: every marked golden sentence is in the matching neutral prompt', async () => {
+test('goodricke sentences preserved, gk-review: every marked or listed golden sentence is in the matching neutral prompt', async () => {
   const used = new Set()
+  const seenUnmarked = new Set()
   let checked = 0
   for (const target of ['develop..HEAD', 'working-tree']) {
     const old = await runWorkflow(golden('gk-review.js'), { target }, reviewResponders())
@@ -98,7 +116,9 @@ test('goodricke sentences preserved, gk-review: every marked golden sentence is 
     assert.deepEqual([...byLabel.keys()].sort(), old.calls.map((c) => c.label).sort(), `${target}: the same stages run`)
     for (const c of old.calls) {
       const prompt = byLabel.get(c.label)
-      for (const s of sentences(c.prompt).filter((x) => MARK.test(x))) {
+      const listed = (x) => REVIEW_UNMARKED.some((u) => u.sentence === x)
+      for (const s of sentences(c.prompt).filter((x) => MARK.test(x) || listed(x))) {
+        if (listed(s)) seenUnmarked.add(s)
         const exception = REVIEW_EXCEPTIONS.find((e) => e.sentence === s)
         if (exception) {
           used.add(exception.sentence)
@@ -112,21 +132,54 @@ test('goodricke sentences preserved, gk-review: every marked golden sentence is 
   }
   assert.ok(checked > 0, 'some marked sentences were checked')
   for (const e of REVIEW_EXCEPTIONS) assert.ok(used.has(e.sentence), `stale exception (no golden prompt has it): ${e.sentence}`)
+  for (const u of REVIEW_UNMARKED) assert.ok(seenUnmarked.has(u.sentence), `stale listed sentence (no golden prompt has it): ${u.sentence}`)
 })
 
-test('goodricke scope hints, gk-review: the golden scope classification for Goodricke paths reaches the neutral scope agent', async () => {
-  const fragments = [
-    'frontend/src/app and frontend/src/components = ui; backend/migrations = migration',
-    'other backend/src = backend',
-    'backend/src/lib/docreview*, auth / mcpAuth / middleware, deid / deident, permissions / accessControl / access.ts, ethicalWalls, audit',
-    'reports (docreviewReport*, report stores), engagement letters/packs (engagement*), LLM prompts or rubrics, document templates',
-  ]
-  const old = await runWorkflow(golden('gk-review.js'), { target: 'develop..HEAD' }, reviewResponders())
-  const now = await runWorkflow(neutral('gk-review.js'), { target: 'develop..HEAD', project: goodricke() }, reviewResponders())
-  const scopeOf = (r) => ws(r.calls.find((c) => c.label === 'scope').prompt)
-  for (const f of fragments) {
-    assert.ok(scopeOf(old).includes(f), `the golden scope prompt has: ${f}`)
-    assert.ok(scopeOf(now).includes(f), `the neutral Goodricke scope prompt has: ${f}`)
+// With project rules, the generic Scope definitions give way to the project's own: the golden
+// Goodricke rules decide each file's kind and each touches flag, exactly as today.
+const SCOPE_REPLACES = 'Where the project rules below give this repository\'s own file kinds, or its own touchesUi, touchesSecurity or touchesClientWording rule, use those instead of the matching definitions above (they replace them; they do not add to them).'
+
+test('goodricke scope rules, gk-review: the project\'s Scope rules replace the generic definitions, not add to them', async () => {
+  const scopeOf = async (project) => ws((await runWorkflow(neutral('gk-review.js'), { target: 'main..HEAD', project }, reviewResponders())).calls.find((c) => c.label === 'scope').prompt)
+  const scope = await scopeOf(goodricke())
+  assert.ok(scope.includes(SCOPE_REPLACES), scope)
+  assert.doesNotMatch(scope, /count too|as well as/i)
+  for (const u of REVIEW_UNMARKED) assert.ok(scope.includes(`- ${u.sentence}`), `the Goodricke Scope rule is a project rule:\n  ${u.sentence}`)
+  // Without project rules there is nothing to replace the defaults, and no sentence about it.
+  for (const project of [{ root: '/tmp/repo' }, undefined]) assert.ok(!(await scopeOf(project)).includes('Where the project rules below'))
+})
+
+// mike-dev 8302903ad (2026-10-28, "gk-review and gk-diagnose agents read other revisions without
+// touching the shared checkout") changed gk-review after the golden's commit 0ba966af0. Ruling
+// R47 sends its shared-checkout sentence to guards; the neutral script carries the rest of that
+// commit too. Its sentences, rendered for the given target, are checked like golden ones:
+// verbatim in every Goodricke prompt, or replaced, with the reason and the replacement text.
+const POST_GOLDEN_8302903AD = [
+  { targets: ['develop..HEAD', 'working-tree'], sentence: 'NEVER change the checkout of /home/carls/apps/mike-dev: no git checkout, switch, stash, reset, restore, clean, merge, rebase or bisect, not even `checkout --detach`.' },
+  { targets: ['develop..HEAD', 'working-tree'], sentence: 'Other sessions and the running dev stack use that working tree; changing it breaks them.' },
+  { targets: ['working-tree'], sentence: 'The files on disk are the version under review.' },
+  {
+    targets: ['develop..HEAD'],
+    sentence: 'The files on disk are NOT the reviewed version (/home/carls/apps/mike-dev is a shared checkout on another branch).',
+    reason: 'the core cannot know the checkout is on another branch, so it says "may not be"; Goodricke\'s stronger claim is a guard, and a guard reaches every target and stage, so it names the case it holds for',
+    replacedBy: 'For a git range, the files on disk are NOT the reviewed version (/home/carls/apps/mike-dev is a shared checkout on another branch).',
+  },
+  { targets: ['develop..HEAD'], sentence: 'Read the new version of a file with `git show HEAD:<path>`, search it with `git grep <pattern> HEAD`, and list files with `git ls-tree -r --name-only HEAD`.' },
+  {
+    targets: ['develop..HEAD'],
+    sentence: 'If you truly need a tree on disk (e.g. to run a test), use `git worktree add --detach <a fresh dir under /tmp> HEAD` and remove it when done.',
+    reason: '/tmp is not a temporary folder on Windows; the core names any temporary folder outside the repository',
+    replacedBy: 'If you truly need a tree on disk (e.g. to run a test), use `git worktree add --detach <a fresh temporary folder outside the repository> HEAD` and remove it when done.',
+  },
+]
+
+test('goodricke sentences after the golden, gk-review: mike-dev 8302903ad is carried into every Goodricke prompt', async () => {
+  for (const target of ['develop..HEAD', 'working-tree']) {
+    const { calls } = await runWorkflow(neutral('gk-review.js'), { target, project: goodricke() }, reviewResponders())
+    for (const e of POST_GOLDEN_8302903AD.filter((x) => x.targets.includes(target))) {
+      const want = e.replacedBy || e.sentence
+      for (const c of calls) assert.ok(ws(c.prompt).includes(want), `${target} ${c.label}: missing ${e.replacedBy ? 'the replacement' : 'the 8302903ad sentence'}:\n  ${want}`)
+    }
   }
 })
 
@@ -164,7 +217,7 @@ test('generic run is clean, gk-review: no prompt names Goodricke and every promp
 })
 
 test('generic run without a root, gk-review: prompts point at the working directory\'s repository', async () => {
-  for (const project of [undefined, null, {}]) {
+  for (const project of [undefined, {}]) {
     const args = { target: 'main..HEAD' }
     if (project !== undefined) args.project = project
     const { calls, logs } = await runWorkflow(neutral('gk-review.js'), args, reviewResponders())
@@ -225,6 +278,7 @@ test('normFile, gk-review: findings that differ only by the root prefix are dedu
 
 test('project malformed throws, gk-review: before any agent runs, naming the field', async () => {
   const bad = [
+    [null, 'not an object'],
     ['Goodricke', 'not an object'],
     [[], 'not an object'],
     [7, 'not an object'],
@@ -259,8 +313,8 @@ test('project malformed throws, gk-review: before any agent runs, naming the fie
     )
     assert.deepEqual(seen, [], `${JSON.stringify(project)}: no agent ran`)
   }
-  // The full Goodricke fixture and a root-only project are well formed.
-  for (const project of [goodricke(), { root: '/tmp/repo' }, {}, null]) {
+  // The full Goodricke fixture, a root-only project and {} (the generic rules) are well formed.
+  for (const project of [goodricke(), { root: '/tmp/repo' }, {}]) {
     await runWorkflow(neutral('gk-review.js'), { target: 'main..HEAD', project }, reviewResponders())
   }
 })
