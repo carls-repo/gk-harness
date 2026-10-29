@@ -260,7 +260,7 @@ ${UI ? `\nThis is UI/UX work. ${DESIGN_LANGUAGE}\n` : ''}
 METHOD:
 1. Read every context file named above, then read the surrounding code the brief touches so the proposal fits what exists (cite real file paths in architecture and components).
 2. Weigh at least two real alternatives through your angle, then COMMIT TO ONE recommendation. Do not hedge or present a menu.
-3. Describe it concretely: architecture, the components with their responsibility and interface (function signature, route, props or table shape), the data flow end to end, honest tradeoffs (gain vs cost), risks, and the open questions only Carl can answer.
+3. Describe it concretely: architecture, the components with their responsibility and interface (function signature, route, props or table shape), the data flow end to end, honest tradeoffs (gain vs cost), risks, and the open questions only the user can answer.
 Set angle to "${angle}".
 ${GROUND_RULES}${projectRules('Propose')}`,
     { label: `propose:${angle}`, phase: 'Propose', model: PROPOSE_MODEL, effort: 'xhigh', schema: PROPOSAL_SCHEMA },

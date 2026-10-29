@@ -525,8 +525,15 @@ test('generic run is clean, design/research/diagnose: no prompt names Goodricke 
         }
         assert.ok(c.prompt.includes('the git repository at /tmp/repo'), `${wf} ${c.label}: names the root`)
         assert.ok(!c.prompt.includes('Project rules:'), `${wf} ${c.label}: no project rules without guards`)
+        // The proposer asks for the open questions only the user can answer, not a named person.
+        if (c.phase === 'Propose') assert.ok(!c.prompt.includes('Carl can answer'), `${wf} ${c.label}`)
       }
       assert.ok(logs.includes('Project: none (generic rules)'), logs.join('\n'))
+      if (wf === 'gk-design') {
+        const proposers = calls.filter((c) => c.phase === 'Propose')
+        assert.ok(proposers.length >= 2, 'the proposers ran')
+        for (const c of proposers) assert.ok(c.prompt.includes('the open questions only the user can answer.'), c.label)
+      }
     }
     assert.deepEqual([...reached], phases, `${wf}: every phase ran`)
   }
