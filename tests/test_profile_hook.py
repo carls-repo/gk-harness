@@ -178,6 +178,68 @@ class ProfileHookTests(unittest.TestCase):
         out = self.call({"scriptPath": "C:\\Users\\u\\.claude\\workflows\\gk-build.js"})
         self.assertEqual(self.args_of(out), {"profile": "opus"})
 
+    def test_saved_run_scriptpath_detected(self):
+        # The runtime saves each run's script as <name>-wf_<id>.js; a re-run or resume by
+        # that scriptPath is the same gk workflow.
+        self.seat("opus")
+        repo = self.repo('{"version": 1, "name": "P"}')
+        project = {"version": 1, "name": "P", "root": self.root_of(repo)}
+        out = self.call({"scriptPath":
+                         "/x/projects/p/s/workflows/scripts/gk-review-wf_33244bcf-5bd.js"},
+                        cwd=repo)
+        self.assertEqual(self.args_of(out), {"profile": "opus", "project": project})
+        out = self.call({"scriptPath":
+                         "/x/projects/p/s/workflows/scripts/gk-diagnose-wf_1a2b3c4d-5e6.js",
+                         "args": {"symptom": "s"}}, cwd=repo, scratchpad_dir="/sp")
+        self.assertEqual(self.args_of(out), {"symptom": "s", "profile": "opus",
+                                             "project": project, "scratchpad": "/sp"})
+        out = self.call({"scriptPath": "/x/workflows/gk-review.js"}, cwd=repo)
+        self.assertEqual(self.args_of(out), {"profile": "opus", "project": project})
+        for path in ("/x/scripts/notgk-review-wf_1-2.js", "/x/scripts/gk-review-wf_.js"):
+            self.assertIsNone(self.call({"scriptPath": path}), path)
+
+    # -- the repo's own copy -------------------------------------------------------------
+
+    def project_copy_note(self, name):
+        return ("gk-harness: this repo's own .claude/workflows/%s.js runs (it predates "
+                "gk-harness), so nothing was injected; pass profile yourself only if that copy "
+                "accepts it, and merge the shared branch to pick up the user-level workflows."
+                % name)
+
+    def test_repo_copy_wins_nothing_injected(self):
+        self.seat("opus")
+        repo = self.repo('{"version": 1, "name": "P"}')
+        wf = repo / ".claude" / "workflows"
+        wf.mkdir()
+        golden = Path(ROOT) / "tests" / "workflows" / "golden" / "gk-research.js"
+        (wf / "gk-research.js").write_bytes(golden.read_bytes())
+        sub = repo / "a"
+        sub.mkdir()
+        expected = {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                           "additionalContext":
+                                               self.project_copy_note("gk-research")}}
+        for cwd in (repo, sub):
+            out = self.call({"name": "gk-research", "args": {"question": "q"}}, cwd=cwd)
+            self.assertEqual(out, expected)
+        self.assertNotIn("updatedInput", self.stdouts[-1])
+        self.assertNotIn("systemMessage", self.stdouts[-1])
+        # a workflow the repo has no copy of is injected as before
+        out = self.call({"name": "gk-selftest"}, cwd=repo)
+        self.assertEqual(self.args_of(out), {"profile": "opus", "project": {
+            "version": 1, "name": "P", "root": self.root_of(repo)}})
+
+    def test_cwd_copy_outside_a_repo_wins(self):
+        self.seat("opus")
+        wf = self.norepo / ".claude" / "workflows"
+        wf.mkdir(parents=True)
+        (wf / "gk-review.js").write_text("export default 1\n", encoding="utf-8")
+        out = self.call({"name": "gk-review", "args": {"target": "x"}})
+        self.assertEqual(out, {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": self.project_copy_note("gk-review")}})
+        out = self.call({"name": "gk-build"})
+        self.assertEqual(self.args_of(out), {"profile": "opus"})
+
     # -- args shapes ---------------------------------------------------------------------
 
     def test_args_string_parsed(self):

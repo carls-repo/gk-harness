@@ -5,27 +5,41 @@ Standard library only, Python 3.9+. For a gk-* call it fills in what the seat le
 top level, plus `root`), and for gk-diagnose the session scratchpad. An explicit value is
 always kept; a profile above the seat without `escalate: true` draws a warning. It never
 blocks: there is no permissionDecision, only updatedInput and warnings.
+
+A repo whose own `.claude/workflows/<name>.js` exists (at the git top level or in `cwd`) runs
+that copy, which may predate gk-harness and reject keys it does not know. For such a call
+the hook injects nothing and only adds a note to the context saying so.
+
+The name also comes from the script the runtime saves for each run
+(`gk-review-wf_<id>.js`), so a call that re-runs or resumes by `scriptPath` is a gk call too.
 """
 from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 import gk_common
 import gk_model
 
 _NAME_RE = re.compile(r"gk-[a-z0-9-]+")
-_SCRIPT_RE = re.compile(r"(gk-[a-z0-9-]+)\.js")
+_SCRIPT_RE = re.compile(r"(gk-[a-z0-9-]+?)(?:-wf_[0-9a-z]+(?:-[0-9a-z]+)*)?\.js")
 
 HIGHER = ("gk-harness: this Workflow call asks for profile '{p}' above the seat ('{seat}') "
           "without escalate: true. The policy allows that only on Carl's word.")
 UNREADABLE = ("gk-harness: .claude/gk-project.json at {root} is unreadable ({reason}); "
               "the workflow runs without the project rules.")
+PROJECT_COPY = ("gk-harness: this repo's own .claude/workflows/{name}.js runs (it predates "
+                "gk-harness), so nothing was injected; pass profile yourself only if that copy "
+                "accepts it, and merge the shared branch to pick up the user-level workflows.")
 
 
 def gk_name(tool_input: dict) -> str | None:
-    """The gk workflow this call runs, from `name` or the basename of `scriptPath`."""
+    """The gk workflow this call runs, from `name` or the basename of `scriptPath`.
+
+    A saved-run script (`gk-review-wf_33244bcf-5bd.js`) gives the bare name (`gk-review`).
+    """
     name = tool_input.get("name")
     if isinstance(name, str) and _NAME_RE.fullmatch(name):
         return name
@@ -56,6 +70,21 @@ def _absent(args: dict, key: str) -> bool:
     return args.get(key) is None or args.get(key) == ""
 
 
+def _project_copy(name: str, top: Path | None, cwd: Any) -> bool:
+    """True when the repo has its own .claude/workflows/<name>.js, which then runs instead."""
+    rel = (".claude", "workflows", name + ".js")
+    bases = [top] if top is not None else []
+    if isinstance(cwd, str) and cwd:
+        bases.append(Path(cwd))
+    for base in bases:
+        try:
+            if base.joinpath(*rel).is_file():
+                return True
+        except (OSError, ValueError):
+            pass
+    return False
+
+
 def handle(data: Any) -> None:
     if not isinstance(data, dict) or data.get("tool_name") != "Workflow":
         return
@@ -67,6 +96,14 @@ def handle(data: Any) -> None:
         return  # an inline script is never a gk call, whatever its name says
     name = gk_name(tool_input)
     if name is None:
+        return
+    cwd = data.get("cwd")
+    top = gk_common.git_toplevel(cwd) if isinstance(cwd, str) and cwd else None
+    if _project_copy(name, top, cwd):
+        # The repo's own (older) copy wins and may reject keys it does not know.
+        gk_common.emit({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                               "additionalContext": PROJECT_COPY.format(
+                                                   name=name)}})
         return
     args = parse_args(tool_input.get("args"))
     if args is None:
@@ -86,16 +123,13 @@ def handle(data: Any) -> None:
                 and gk_model.RANK[p] > gk_model.RANK[seat] and args.get("escalate") is not True):
             warnings.append(HIGHER.format(p=p, seat=seat))
 
-    cwd = data.get("cwd")
-    if "project" not in args and isinstance(cwd, str) and cwd:
-        top = gk_common.git_toplevel(cwd)
-        if top is not None:
-            root = top.as_posix()
-            project, reason = gk_common.load_project(top)
-            args["project"] = dict(project or {}, root=root)
-            changed = True
-            if reason is not None:
-                warnings.append(UNREADABLE.format(root=root, reason=reason))
+    if "project" not in args and top is not None:
+        root = top.as_posix()
+        project, reason = gk_common.load_project(top)
+        args["project"] = dict(project or {}, root=root)
+        changed = True
+        if reason is not None:
+            warnings.append(UNREADABLE.format(root=root, reason=reason))
 
     scratch = data.get("scratchpad_dir")
     if (name == "gk-diagnose" and _absent(args, "scratchpad") and isinstance(scratch, str)
