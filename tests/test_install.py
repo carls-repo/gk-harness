@@ -393,8 +393,12 @@ class RoundTripTests(InstallBase):
                          sorted(LEGACY_BOX_COMMANDS + OTHER_BOX_COMMANDS))
         start = snapshot(self.home)
 
-        self.ok("install")
+        out, _ = self.ok("install")
+        self.assertIn(", 3 old gk aliases removed\n", out)
         self.assertEqual((c / "CLAUDE.md").read_text(encoding="utf-8"), POLICY_BLOCK)
+        status, _ = self.ok("status")
+        self.assertIn("legacy: %d old files or folders still in place" % len(legacy.RETIRE_PATHS),
+                      status)
         after = self.settings()
         self.assertEqual([x for x in commands_of(after) if any(n in x for n in LEGACY_NAMES)], [])
         # The box's events come in its own order, so the entries are compared as a multiset.
@@ -428,6 +432,7 @@ class RoundTripTests(InstallBase):
             self.assertEqual(stat.S_IMODE(os.stat(str(backup / "settings.json")).st_mode), 0o600)
 
         out, _ = self.ok("install", "--retire-legacy")
+        self.assertIn("  %d old files or folders retired into " % len(legacy.RETIRE_PATHS), out)
         retired = self.journal()["installs"][-1]
         self.assertEqual({a["type"] for a in retired["actions"]}, {"legacy_move"})
         moved_to = Path(retired["backup"]) / "legacy"

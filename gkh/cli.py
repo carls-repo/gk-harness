@@ -58,8 +58,8 @@ def _warn(text: str) -> None:
     sys.stderr.write("gk-harness: %s\n" % text)
 
 
-def _plural(n: int, word: str) -> str:
-    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+def _plural(n: int, word: str, plural: str | None = None) -> str:
+    return "%d %s" % (n, word if n == 1 else (plural or word + "s"))
 
 
 def _windows() -> bool:
@@ -285,7 +285,7 @@ def _rc_step(root: Path, notices: list) -> _Step | None:
             note = "%s: gk shortcut block %s" % (paths.posix(rc), {
                 "unchanged": "already present", "updated": "updated"}.get(mode, "added"))
             if removed:
-                note += ", %s removed" % _plural(len(removed), "old gk alias")
+                note += ", %s removed" % _plural(len(removed), "old gk alias", "old gk aliases")
             # An existing profile that was empty gets the mark a created one gets; uninstall
             # returns it to empty.
             mark_added = (text is not None and not claude_md.bom_of(text)
@@ -412,7 +412,7 @@ def _report(done: list, record: dict, cdir: Path, root: Path) -> None:
             print("  " + step.note)
     moves = [m for m in done if isinstance(m, dict)]
     if moves:
-        print("  %s retired into %s/legacy" % (_plural(len(moves), "old file or folder"),
+        print("  %s retired into %s/legacy" % (_plural(len(moves), "old file or folder", "old files or folders"),
                                                record["backup"]))
     if record["backup"]:
         print("backups: %s" % record["backup"])
@@ -862,7 +862,7 @@ def status() -> int:
     retired = legacy.retire_plan(cdir, paths.backup_root())
     if retired:
         print("legacy: %s still in place (install %s moves them to the backups)"
-              % (_plural(len(retired), "old file or folder"), RETIRE))
+              % (_plural(len(retired), "old file or folder", "old files or folders"), RETIRE))
     drift.extend(_status_drift(root, cdir, settings, python))
     if drift:
         print("drift:\n%s" % "\n".join("  " + d for d in drift))
