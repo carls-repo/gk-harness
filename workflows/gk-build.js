@@ -162,14 +162,11 @@ const normPath = p => {
   return q.replace(/^\.\//, '')
 }
 const normPathSafe = f => { try { return normPath(f) } catch (e) { return f } }
-// A tests value names one file when it has no whitespace, its last segment has a word
-// character (so not a folder such as tests/, nor ./...), and it has a folder or an extension:
-// a.test.ts, tests/test_a.py, pkg/foo_test.go. A test command (npm test, pytest -q,
-// go test ./...) does not.
-const isTestFile = t => {
-  const q = slashes(t.trim())
-  return !/\s/.test(q) && /\w/.test(q.slice(q.lastIndexOf('/') + 1)) && (q.includes('/') || /\.\w+$/.test(q))
-}
+// The file a tests value names, or null when it names none. A file has no whitespace and its
+// last segment ends in a file extension: a.test.ts, tests/test_a.py, pkg/foo_test.go. A pytest
+// node id names its file (tests/test_a.py::test_x is tests/test_a.py). A folder (tests/unit,
+// tests/, ./...) or a test command (npm test, pytest -q, go test ./...) names none.
+const testFileOf = t => { const q = slashes(t.trim()).replace(/::.*$/, ''); return !/\s/.test(q) && /\w\.\w+$/.test(q.slice(q.lastIndexOf('/') + 1)) ? q : null }
 // Route groups such as frontend/src/app/(pages)/ are a bash syntax error unquoted.
 const shq = list => list.map(f => `'${f}'`).join(' ')
 
@@ -228,9 +225,10 @@ const PIECES = ARGS.pieces.map((p, i) => {
   if (p.tests !== undefined && typeof p.tests !== 'string') throw new Error(`gk-build: pieces[${i}] (${p.name}).tests must be a string`)
   if (p.hard !== undefined && typeof p.hard !== 'boolean') throw new Error(`gk-build: pieces[${i}] (${p.name}).hard, when given, must be a boolean`)
   const files = p.files.map(normPath)
-  // A tests value that is a file path, in any language, is owned by the piece like its files
-  // (and, like them, must lie inside the repository).
-  const owned = p.tests && isTestFile(p.tests) ? [...new Set([...files, normPath(p.tests)])] : files
+  // The file a tests value names (testFileOf), in any language, is owned by the piece like its
+  // files (and, like them, must lie inside the repository); a folder or a command is not.
+  const tf = p.tests ? testFileOf(p.tests) : null
+  const owned = tf ? [...new Set([...files, normPath(tf)])] : files
   return { name: p.name, files, owned, brief: p.brief, tests: p.tests || '', hard: p.hard === true }
 })
 const byName = Object.fromEntries(PIECES.map(p => [p.name, p]))

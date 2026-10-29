@@ -1349,6 +1349,11 @@ test('test files, gk-build: a tests value that is a file path is owned by the pi
     ['pytest', null],
     ['tests/', null],
     ['./...', null],
+    // A pytest node id names its file; a folder names none.
+    ['tests/test_f.py::test_x', 'tests/test_f.py'],
+    ['tests/test_g.py::TestG::test_y', 'tests/test_g.py'],
+    ['tests/unit', null],
+    ['src/tests', null],
   ]
   const pieces = values.map(([tests], i) => ({ name: `p${i}`, files: [`src/x${i}.py`], tests, brief: 'Add it.' }))
   const { calls } = await runWorkflow(neutral('gk-build.js'), { plan: PLAN, pieces, project: { root: '/tmp/repo' } }, buildResponders('generic', { pieces, order: [pieces.map((p) => p.name)] }))
@@ -1385,6 +1390,20 @@ test('test files, gk-build: a tests value that is a file path is owned by the pi
     assert.deepEqual(ownedIn(old.calls.find((c) => c.label === `impl:j${i}`).prompt), want, `golden ${tests}`)
     assert.deepEqual(ownedIn(now.calls.find((c) => c.label === `impl:j${i}`).prompt), want, tests)
   })
+})
+
+test('test files, gk-build: a file is owned, a pytest node id owns its file, a folder or a command owns nothing', async () => {
+  const ownedIn = (prompt) => JSON.parse(/\(create them if missing\): (\[[^\]]*\])/.exec(prompt)[1])
+  const values = [
+    ['a.test.ts', 'a.test.ts'], ['tests/test_a.py', 'tests/test_a.py'], ['pkg/foo_test.go', 'pkg/foo_test.go'],
+    ['tests/test_a.py::test_x', 'tests/test_a.py'],
+    ['tests/unit', null], ['npm test', null], ['go test ./...', null], ['pytest -q', null],
+  ]
+  for (const [tests, file] of values) {
+    const pieces = [{ name: 'p', files: ['src/p.py'], tests, brief: 'Add it.' }]
+    const { calls } = await runWorkflow(neutral('gk-build.js'), { plan: PLAN, pieces, project: { root: '/tmp/repo' } }, buildResponders('generic', { pieces, order: [['p']] }))
+    assert.deepEqual(ownedIn(calls.find((c) => c.label === 'impl:p').prompt), ['src/p.py', ...(file ? [file] : [])], tests)
+  }
 })
 
 test('check, gk-build: a check that ran and failed is a failure whatever its reply says about skipping', async () => {
