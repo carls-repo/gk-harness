@@ -816,7 +816,9 @@ class LinkTests(InstallBase):
         self.assertTrue(shell.has_block(target.read_text(encoding="utf-8")))
         self.ok("uninstall")
         self.assertTrue(os.path.islink(str(self.rc)))
-        self.assertEqual(os.readlink(str(self.rc)), str(target))
+        link = os.readlink(str(self.rc))
+        link = link[4:] if link.startswith("\\\\?\\") else link  # Windows: \\?\ prefix
+        self.assertEqual(os.path.normcase(link), os.path.normcase(str(target)))
         self.assertFalse(os.path.lexists(str(target.parent)))  # the folders it made, too
 
     @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),

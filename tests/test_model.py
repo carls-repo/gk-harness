@@ -107,7 +107,7 @@ class ModelTest(unittest.TestCase):
         p = Path(self.tmp) / "edge.jsonl"
         a = '{"type":"assistant","message":{"model":"claude-opus-5-5"}}\n'
         pad = '{"type":"user","message":{"content":"zz"}}\n'
-        p.write_text(pad + a, encoding="utf-8")
+        p.write_bytes((pad + a).encode("utf-8"))  # bytes: no \r\n on Windows
         self.assertEqual(gk_model.model_from_transcript(p, max_bytes=len(a)), "claude-opus-5-5")
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX only")
