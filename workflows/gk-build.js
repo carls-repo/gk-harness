@@ -207,8 +207,8 @@ const PATH_CHECKS = SIGN_OFF.filter(c => c.paths.length)
 // ---------------- Check command and packages ----------------
 // The check command is args.check, else the project's check; with neither, the check is
 // skipped. With packages (folders relative to the top level), the check runs from each package
-// that holds a file some piece owns, and is skipped when none does; without packages it runs
-// once from the top level.
+// that holds a file some piece owns, and passes without running (output says skipped) when none
+// does; without packages it runs once from the top level.
 const PACKAGES = PROJECT && PROJECT.packages
   ? [...new Set(PROJECT.packages.map((k, i) => {
     let q = ''
@@ -465,7 +465,7 @@ Judge the diff against the brief and the plan: correctness bugs, missed requirem
 const reviews = (reviewsRaw || []).filter(Boolean)
 const unreviewed = implemented.map(r => r.name).filter(n => !reviews.some(v => v.name === n))
 if (unreviewed.length) log(`No review returned for: ${unreviewed.join(', ')} — passed to the judge as unreviewed`)
-log(`Check ${!check ? 'returned nothing' : check.skipped ? 'skipped' : check.passed ? 'passed' : 'FAILED'}; reviews: ${reviews.filter(v => v.verdict === 'accept').length} accept, ${reviews.filter(v => v.verdict === 'rework').length} rework`)
+log(`Check ${!check ? 'returned nothing' : NO_COMMAND ? 'skipped' : check.passed ? 'passed' : 'FAILED'}; reviews: ${reviews.filter(v => v.verdict === 'accept').length} accept, ${reviews.filter(v => v.verdict === 'rework').length} rework`)
 
 // ---------------- Judge ----------------
 phase('Judge')
@@ -480,8 +480,9 @@ const SHIP_SHARED = !SHARED_FILES.length ? ', or any confirmed high-severity fin
 const TRIGGERS_JUDGE = TRIGGERS.length
   ? `\nSign-off triggers (key: the work that needs the seat's check):\n${TRIGGER_LIST}\nSign-off triggers met (from the plan check${PATH_CHECKS.length ? ', the path rules' : ''} and the implementers): ${JSON.stringify(MET)}${ARGS.ui ? ' (this is UI work)' : ''}`
   : ARGS.ui ? '\nThis is UI work.' : ''
-// A check that never ran is not a pass: the judge is told so in words.
-const CHECK_JUDGE = check && check.skipped
+// A check that never ran is not a pass: the judge is told so in words. Whether it ran is the
+// workflow's own decision (NO_COMMAND), never a field of the check agent's reply.
+const CHECK_JUDGE = NO_COMMAND
   ? `the project-wide check was skipped: ${NO_COMMAND}; judge on the diff and the per-piece tests.`
   : JSON.stringify(check || { passed: false, output: 'check agent returned nothing' })
 const judge = await agent(

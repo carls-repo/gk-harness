@@ -1387,6 +1387,18 @@ test('test files, gk-build: a tests value that is a file path is owned by the pi
   })
 })
 
+test('check, gk-build: a check that ran and failed is a failure whatever its reply says about skipping', async () => {
+  // Skipped is the workflow's own decision (no command), never a field of the agent's reply.
+  const pieces = PY_PIECES
+  const responders = [{ match: /^check$/, reply: () => ({ passed: false, skipped: true, output: 'boom' }) }, ...buildResponders('generic', { pieces, order: [['a', 'b']] })]
+  const { calls, logs } = await runWorkflow(neutral('gk-build.js'), { plan: PLAN, pieces: structuredClone(pieces), check: 'python -m pytest -q', project: { root: '/tmp/repo' } }, responders)
+  assert.ok(calls.some((c) => c.label === 'check'), 'the check ran')
+  const judge = calls.find((c) => c.label === 'judge').prompt
+  assert.ok(judge.includes('"passed":false'), judge)
+  assert.ok(!judge.includes('was skipped'), judge)
+  assert.ok(logs.some((l) => l.includes('Check FAILED')), logs.join('\n'))
+})
+
 test('project malformed throws, gk-build: before any agent runs, naming the field', async () => {
   // gk-build's own checks: a sharedFile is a path inside the repository and a package a folder
   // inside it; sign-off keys are unique.
