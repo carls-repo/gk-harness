@@ -10,6 +10,7 @@ export const meta = {
     { title: 'Judge', detail: 'one judge over all survivors: fable xhigh for ui/security/client-facing work, else opus xhigh (under the opus/sonnet profiles fable only for ui/client-facing work or escalate; security-only work is judged by opus xhigh)' },
   ],
 }
+// gk-harness:args-v1
 
 // `args` may arrive as a raw JSON string depending on the invoking runtime.
 const ARGS = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch (e) { return args } })() : args

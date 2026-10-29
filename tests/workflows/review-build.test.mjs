@@ -1625,3 +1625,31 @@ test('static guard: no workflow script names a Node API, the clock or randomness
     for (const [name, re] of FORBIDDEN) assert.doesNotMatch(code, re, `${f} names ${name}`)
   }
 })
+
+// Ruling R59: the profile hook injects only into a script that carries the gk-harness marker
+// within its first MARKER_SCAN bytes, so an older copy (which rejects keys it does not know)
+// is left alone. Each harness script carries it once, on its own line right after meta, which
+// stays a pure literal and the first statement.
+test('marker, every script: one gk-harness marker line, directly after meta, inside the hook\'s scan window', () => {
+  const hook = readFileSync(join(here, '..', '..', 'hooks', 'gk-profile.py'), 'utf8')
+  const marker = /^MARKER = b"([^"]+)"/m.exec(hook)[1]
+  const scan = Number(/^MARKER_SCAN = (\d+)/m.exec(hook)[1])
+  assert.equal(marker, 'gk-harness:args-v1')
+  const line = `// ${marker}\n`
+  const prefix = 'export const meta = '
+  const files = readdirSync(workflowsDir).filter((f) => f.endsWith('.js')).sort()
+  assert.equal(files.length, 6)
+  for (const f of files) {
+    const src = readFileSync(join(workflowsDir, f), 'utf8')
+    assert.equal(src.split(marker).length, 2, `${f}: the marker appears exactly once`)
+    const at = src.indexOf(line)
+    assert.ok(at > 0 && src[at - 1] === '\n', `${f}: the marker is a line of its own`)
+    assert.ok(Buffer.byteLength(src.slice(0, at + line.length)) <= scan, `${f}: the marker is inside the first ${scan} bytes`)
+    // Everything before the marker line is the meta statement and nothing else: a single
+    // object literal, closed on the line just above the marker.
+    const head = src.slice(0, at)
+    assert.ok(head.startsWith(prefix + '{') && head.endsWith('}\n'), `${f}: meta opens the file and closes right above the marker`)
+    const meta = new Function(`return (${head.slice(prefix.length)})`)() // a syntax error if more than one literal
+    assert.equal(meta.name, f.replace(/\.js$/, ''), `${f}: meta.name`)
+  }
+})

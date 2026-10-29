@@ -9,6 +9,7 @@ export const meta = {
     { title: 'Adjudicate', detail: 'one agent reconciles every verdict into a mechanism, contradictions and open questions', model: 'opus' },
   ],
 }
+// gk-harness:args-v1
 
 // `args` may arrive as a raw JSON string; normalise so both shapes work.
 const ARGS = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch (e) { return args } })() : args

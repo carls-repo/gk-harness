@@ -6,9 +6,13 @@ top level, plus `root`), and for gk-diagnose the session scratchpad. An explicit
 always kept; a profile above the seat without `escalate: true` draws a warning. It never
 blocks: there is no permissionDecision, only updatedInput and warnings.
 
-A repo whose own `.claude/workflows/<name>.js` exists (at the git top level or in `cwd`) runs
-that copy, which may predate gk-harness and reject keys it does not know. For such a call
-the hook injects nothing and only adds a note to the context saying so.
+The hook injects only into a script that carries the gk-harness marker (`gk-harness:args-v1`
+in its first 16 KB, on the line after `meta`), because an older copy may reject keys it does
+not know. The script is the one the call runs: for a `name`, the first regular file of
+`<git top level>/.claude/workflows/<name>.js`, `<cwd>/.claude/workflows/<name>.js` and
+`<claude dir>/workflows/<name>.js`; for a `scriptPath`, that path (against `cwd` when
+relative). A script found without the marker gets nothing injected, only a note in the
+context saying so; when no script is found, the hook injects as usual.
 
 The name also comes from the script the runtime saves for each run
 (`gk-review-wf_<id>.js`), so a call that re-runs or resumes by `scriptPath` is a gk call too.
@@ -16,7 +20,9 @@ The name also comes from the script the runtime saves for each run
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +31,8 @@ import gk_model
 
 _NAME_RE = re.compile(r"gk-[a-z0-9-]+")
 _SCRIPT_RE = re.compile(r"(gk-[a-z0-9-]+?)(?:-wf_[0-9a-z]+(?:-[0-9a-z]+)*)?\.js")
+MARKER = b"gk-harness:args-v1"  # the scripts that take profile, project and scratchpad
+MARKER_SCAN = 16384  # bytes read from the head of a script when looking for the marker
 
 HIGHER = ("gk-harness: this Workflow call asks for profile '{p}' above the seat ('{seat}') "
           "without escalate: true. The policy allows that only on Carl's word.")
@@ -70,19 +78,54 @@ def _absent(args: dict, key: str) -> bool:
     return args.get(key) is None or args.get(key) == ""
 
 
-def _project_copy(name: str, top: Path | None, cwd: Any) -> bool:
-    """True when the repo has its own .claude/workflows/<name>.js, which then runs instead."""
-    rel = (".claude", "workflows", name + ".js")
-    bases = [top] if top is not None else []
-    if isinstance(cwd, str) and cwd:
-        bases.append(Path(cwd))
-    for base in bases:
-        try:
-            if base.joinpath(*rel).is_file():
-                return True
-        except (OSError, ValueError):
-            pass
-    return False
+def _regular(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(os.stat(str(path)).st_mode)
+    except (OSError, ValueError):
+        return False
+
+
+def _script_file(tool_input: dict, top: Path | None, cwd: Any) -> Path | None:
+    """The script this call runs, or None when the hook finds no such regular file."""
+    usable_cwd = isinstance(cwd, str) and cwd
+    name = tool_input.get("name")
+    if isinstance(name, str) and _NAME_RE.fullmatch(name):
+        rel = (".claude", "workflows", name + ".js")
+        candidates = [top.joinpath(*rel)] if top is not None else []
+        if usable_cwd:
+            candidates.append(Path(cwd).joinpath(*rel))
+        candidates.append(gk_common.claude_dir() / "workflows" / (name + ".js"))
+    else:
+        path = Path(tool_input.get("scriptPath") or "")  # gk_name matched it, so a str
+        if not path.is_absolute():
+            if not usable_cwd:
+                return None
+            path = Path(cwd) / path
+        candidates = [path]
+    for c in candidates:
+        if _regular(c):
+            return c
+    return None
+
+
+def _marked(path: Path) -> bool:
+    """True when the script's first MARKER_SCAN bytes carry the gk-harness marker.
+
+    The file is opened without blocking and checked again once open, so a FIFO swapped in
+    after the stat is never read; anything unreadable counts as unmarked.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(str(path), flags)
+    except (OSError, ValueError):
+        return False
+    try:
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return False
+            return MARKER in f.read(MARKER_SCAN)
+    except (OSError, ValueError):
+        return False
 
 
 def handle(data: Any) -> None:
@@ -99,8 +142,9 @@ def handle(data: Any) -> None:
         return
     cwd = data.get("cwd")
     top = gk_common.git_toplevel(cwd) if isinstance(cwd, str) and cwd else None
-    if _project_copy(name, top, cwd):
-        # The repo's own (older) copy wins and may reject keys it does not know.
+    script_file = _script_file(tool_input, top, cwd)
+    if script_file is not None and not _marked(script_file):
+        # An older copy runs (the repo's own, as a rule) and may reject keys it does not know.
         gk_common.emit({"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                                "additionalContext": PROJECT_COPY.format(
                                                    name=name)}})

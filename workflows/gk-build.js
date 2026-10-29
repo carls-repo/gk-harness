@@ -10,6 +10,7 @@ export const meta = {
     { title: 'Judge', detail: 'one judge over reviews, check and sign-off triggers: Fable if ui or an applying sign-off check (no trigger, or a met one) sets uiJudge (every profile) or escalate, else Opus' },
   ],
 }
+// gk-harness:args-v1
 
 // args may arrive as a raw JSON string depending on the invoking runtime.
 const ARGS = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch (e) { return args } })() : args

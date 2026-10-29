@@ -9,6 +9,7 @@ export const meta = {
     { title: 'Sign-off', detail: 'UI sign-off over the winner under the opus/sonnet profiles', model: 'fable' },
   ],
 }
+// gk-harness:args-v1
 
 // `args` may arrive as a raw JSON string; normalise so both shapes work.
 const ARGS = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch (e) { return args } })() : args

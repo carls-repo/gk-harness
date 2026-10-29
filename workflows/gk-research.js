@@ -9,6 +9,7 @@ export const meta = {
     { title: 'Critic', detail: 'one completeness critic: angle not run, claim unverified, source unread', model: 'opus' },
   ],
 }
+// gk-harness:args-v1
 
 // `args` may arrive as a raw JSON string depending on the invoking runtime.
 const ARGS = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch (e) { return args } })() : args

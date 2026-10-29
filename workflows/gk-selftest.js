@@ -1,4 +1,5 @@
 export const meta = {name: 'gk-selftest', description: 'Echo the profile and project the harness injected; runs no agents'}
+// gk-harness:args-v1
 
 const A = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch (e) { return {} } })() : (args || {})
 const OK = A && typeof A === 'object'

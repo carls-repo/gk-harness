@@ -198,7 +198,7 @@ class ProfileHookTests(unittest.TestCase):
         for path in ("/x/scripts/notgk-review-wf_1-2.js", "/x/scripts/gk-review-wf_.js"):
             self.assertIsNone(self.call({"scriptPath": path}), path)
 
-    # -- the repo's own copy -------------------------------------------------------------
+    # -- the script that runs: only a marked one is injected (ruling R59) ----------------
 
     def project_copy_note(self, name):
         return ("gk-harness: this repo's own .claude/workflows/%s.js runs (it predates "
@@ -206,38 +206,147 @@ class ProfileHookTests(unittest.TestCase):
                 "accepts it, and merge the shared branch to pick up the user-level workflows."
                 % name)
 
-    def test_repo_copy_wins_nothing_injected(self):
+    def note_only(self, name):
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                       "additionalContext": self.project_copy_note(name)}}
+
+    def golden_bytes(self, name):
+        """An old (pre-harness) copy: the Goodricke golden, which has no marker."""
+        data = (Path(ROOT) / "tests" / "workflows" / "golden" / (name + ".js")).read_bytes()
+        self.assertNotIn(b"gk-harness:args-v1", data)
+        return data
+
+    def harness_bytes(self, name):
+        return (Path(ROOT) / "workflows" / (name + ".js")).read_bytes()
+
+    def test_repo_copy_without_marker_gets_nothing(self):
         self.seat("opus")
         repo = self.repo('{"version": 1, "name": "P"}')
         wf = repo / ".claude" / "workflows"
         wf.mkdir()
-        golden = Path(ROOT) / "tests" / "workflows" / "golden" / "gk-research.js"
-        (wf / "gk-research.js").write_bytes(golden.read_bytes())
+        (wf / "gk-research.js").write_bytes(self.golden_bytes("gk-research"))
         sub = repo / "a"
         sub.mkdir()
-        expected = {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                                           "additionalContext":
-                                               self.project_copy_note("gk-research")}}
         for cwd in (repo, sub):
             out = self.call({"name": "gk-research", "args": {"question": "q"}}, cwd=cwd)
-            self.assertEqual(out, expected)
+            self.assertEqual(out, self.note_only("gk-research"))
         self.assertNotIn("updatedInput", self.stdouts[-1])
         self.assertNotIn("systemMessage", self.stdouts[-1])
+        project = {"version": 1, "name": "P", "root": self.root_of(repo)}
         # a workflow the repo has no copy of is injected as before
         out = self.call({"name": "gk-selftest"}, cwd=repo)
-        self.assertEqual(self.args_of(out), {"profile": "opus", "project": {
-            "version": 1, "name": "P", "root": self.root_of(repo)}})
+        self.assertEqual(self.args_of(out), {"profile": "opus", "project": project})
+        # the same repo copy once it carries the marker (a merge of the harness's copy)
+        (wf / "gk-research.js").write_bytes(self.harness_bytes("gk-research"))
+        for cwd in (repo, sub):
+            out = self.call({"name": "gk-research", "args": {"question": "q"}}, cwd=cwd)
+            self.assertEqual(self.args_of(out), {"question": "q", "profile": "opus",
+                                                 "project": project})
 
-    def test_cwd_copy_outside_a_repo_wins(self):
+    def test_repo_copy_wins_over_a_marked_user_copy(self):
+        self.seat("opus")
+        user = self.cdir / "workflows"
+        user.mkdir()
+        (user / "gk-research.js").write_bytes(self.harness_bytes("gk-research"))
+        repo = self.repo()
+        wf = repo / ".claude" / "workflows"
+        wf.mkdir(parents=True)
+        (wf / "gk-research.js").write_bytes(self.golden_bytes("gk-research"))
+        out = self.call({"name": "gk-research", "args": {"question": "q"}}, cwd=repo)
+        self.assertEqual(out, self.note_only("gk-research"))
+
+    def test_cwd_copy_outside_a_repo_without_marker_gets_nothing(self):
         self.seat("opus")
         wf = self.norepo / ".claude" / "workflows"
         wf.mkdir(parents=True)
         (wf / "gk-review.js").write_text("export default 1\n", encoding="utf-8")
         out = self.call({"name": "gk-review", "args": {"target": "x"}})
-        self.assertEqual(out, {"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "additionalContext": self.project_copy_note("gk-review")}})
+        self.assertEqual(out, self.note_only("gk-review"))
         out = self.call({"name": "gk-build"})
+        self.assertEqual(self.args_of(out), {"profile": "opus"})
+        # the marker anywhere in the first 16 KB is enough; past them it is not seen
+        (wf / "gk-review.js").write_text("export default 1\n// gk-harness:args-v1\n",
+                                         encoding="utf-8")
+        out = self.call({"name": "gk-review", "args": {"target": "x"}})
+        self.assertEqual(self.args_of(out), {"target": "x", "profile": "opus"})
+        (wf / "gk-review.js").write_text("//" + "x" * 16384 + "\n// gk-harness:args-v1\n",
+                                         encoding="utf-8")
+        out = self.call({"name": "gk-review", "args": {"target": "x"}})
+        self.assertEqual(out, self.note_only("gk-review"))
+
+    def test_seat_in_the_home_folder_runs_the_marked_user_copy(self):
+        # Install puts the harness workflows in <home>/.claude/workflows. A seat started in the
+        # home folder (or in a home that is itself a git repo) runs those, and gets its profile.
+        home = self.tmp / "home"
+        self.cdir = home / ".claude"
+        user = self.cdir / "workflows"
+        user.mkdir(parents=True)
+        for name in ("gk-review", "gk-build"):
+            (user / (name + ".js")).write_bytes(self.harness_bytes(name))
+        self.seat("opus")
+        sub = home / "notes"
+        sub.mkdir()
+        for cwd in (home, sub):
+            out = self.call({"name": "gk-review", "args": {"target": "x"}}, cwd=cwd)
+            self.assertEqual(self.args_of(out), {"target": "x", "profile": "opus"}, cwd)
+        self.git(home, "init", "-q")
+        for cwd in (home, sub):
+            out = self.call({"name": "gk-review", "args": {"target": "x"}}, cwd=cwd)
+            self.assertEqual(self.args_of(out), {"target": "x", "profile": "opus",
+                                                 "project": {"root": self.root_of(home)}}, cwd)
+        out = self.call({"name": "gk-build"}, cwd=home)
+        self.assertEqual(self.args_of(out), {"profile": "opus",
+                                             "project": {"root": self.root_of(home)}})
+        # an old, unmarked user-level copy is left alone, wherever the seat starts
+        (user / "gk-review.js").write_bytes(self.golden_bytes("gk-review"))
+        for cwd in (home, self.norepo):
+            out = self.call({"name": "gk-review", "args": {"target": "x"}}, cwd=cwd)
+            self.assertEqual(out, self.note_only("gk-review"), cwd)
+
+    def test_no_script_found_injects_as_before(self):
+        # Nothing at the repo, cwd or user level: the runtime's own lookup decides, and the
+        # call is injected as it was before the marker rule.
+        self.seat("opus")
+        repo = self.repo()
+        (repo / ".claude" / "workflows" / "gk-review.js").mkdir(parents=True)  # not a file
+        out = self.call({"name": "gk-review"}, cwd=repo)
+        self.assertEqual(self.args_of(out),
+                         {"profile": "opus", "project": {"root": self.root_of(repo)}})
+
+    def test_saved_run_script_of_an_old_copy_gets_nothing(self):
+        self.seat("opus")
+        scripts = self.tmp / "projects" / "p" / "s" / "workflows" / "scripts"
+        scripts.mkdir(parents=True)
+        old = scripts / "gk-review-wf_33244bcf-5bd.js"
+        old.write_bytes(self.golden_bytes("gk-review"))
+        out = self.call({"scriptPath": str(old), "args": {"target": "x"}})
+        self.assertEqual(out, self.note_only("gk-review"))
+        # a relative scriptPath is read against cwd
+        rel = os.path.join("workflows", "scripts", old.name)
+        out = self.call({"scriptPath": rel, "args": {"target": "x"}},
+                        cwd=self.tmp / "projects" / "p" / "s")
+        self.assertEqual(out, self.note_only("gk-review"))
+
+    def test_marked_scriptpath_is_injected(self):
+        self.seat("opus")
+        scripts = self.tmp / "scripts"
+        scripts.mkdir()
+        saved = scripts / "gk-review-wf_33244bcf-5bd.js"
+        saved.write_bytes(self.harness_bytes("gk-review"))
+        out = self.call({"scriptPath": str(saved), "args": {"target": "x"}})
+        self.assertEqual(self.args_of(out), {"target": "x", "profile": "opus"})
+        # every harness workflow, run by its own path, is marked and so injected
+        for js in sorted((Path(ROOT) / "workflows").glob("gk-*.js")):
+            out = self.call({"scriptPath": str(js)})
+            self.assertEqual(self.args_of(out), {"profile": "opus"}, js.name)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs mkfifo")
+    def test_fifo_script_is_not_read(self):
+        self.seat("opus")
+        wf = self.norepo / ".claude" / "workflows"
+        wf.mkdir(parents=True)
+        os.mkfifo(str(wf / "gk-review.js"))
+        out = self.call({"name": "gk-review"})  # a hang would hit the 30 s timeout
         self.assertEqual(self.args_of(out), {"profile": "opus"})
 
     # -- args shapes ---------------------------------------------------------------------
