@@ -164,9 +164,10 @@ explicitly on **every** Workflow call. After a model switch, it re-reads its mod
 - Mapping: `claude-fable-*` → `fable`, `claude-opus-*` → `opus`, `claude-sonnet-*` →
   `sonnet`. Anything else maps to `sonnet` (Mode C rules, per the policy).
 
-Amended 2026-11-09 (L1): desktop/SDK sessions start the hooks without `model`. At startup the
-seat therefore reads `--model` and `--effort` from the nearest Claude Code process's command
-line (Linux and macOS), and the transcript fallback also reads the model attachment.
+Amended 2026-11-09 (L1): desktop/SDK sessions start the hooks without `model`. At startup or
+resume the seat therefore reads `--model` and `--effort` from the nearest Claude Code process's
+command line (Linux and macOS; `GK_NO_LAUNCH_ARGS=1` turns this off for tests), and the
+transcript fallback also reads the model attachment.
 
 **3. Profile hook (safety net).** A PreToolUse hook on the Workflow tool replaces
 `gk-profile-guard.sh`:

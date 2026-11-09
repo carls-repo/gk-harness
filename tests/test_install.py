@@ -1062,7 +1062,7 @@ class CommandTests(InstallBase):
         if bash is None:
             with self.subTest(shell="bash"):
                 self.skipTest(why)  # recorded, so the run shows the bash leg did not run
-        env = dict(os.environ)  # HOME, USERPROFILE and GK_CLAUDE_DIR point into the temp home
+        env = dict(os.environ, GK_NO_LAUNCH_ARGS="1")  # HOME, USERPROFILE and GK_CLAUDE_DIR point into the temp home
         for key in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX"):
             env.pop(key, None)  # Python caches the hooks' imports, as under Claude Code
         seen_card = 0

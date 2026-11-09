@@ -102,7 +102,8 @@ class CoordBase(unittest.TestCase):
 
     # ---- running a hook
     def run_hook(self, hook, payload=None, raw=None, gdir=None):
-        env = dict(os.environ, GK_CLAUDE_DIR=str(gdir if gdir is not None else self.g), **GIT_ENV)
+        env = dict(os.environ, GK_CLAUDE_DIR=str(gdir if gdir is not None else self.g),
+                   GK_NO_LAUNCH_ARGS="1", **GIT_ENV)
         if raw is None:
             raw = json.dumps(payload)
         data = raw.encode("utf-8") if isinstance(raw, str) else raw

@@ -21,6 +21,7 @@ MODE = {"fable": "A", "opus": "B", "sonnet": "C"}
 RANK = {"sonnet": 1, "opus": 2, "fable": 3}
 _LINEUP = ("fable", "opus", "sonnet")
 TAIL_BYTES = 262144
+_PROC_ROOT = "/proc"
 _EFFORTS = ("low", "medium", "high", "xhigh", "max")
 _FLAG_RE = re.compile(r"(?:^|\s)--(model|effort)(?:=|\s+)([^\s=-][^\s]*)")
 
@@ -109,18 +110,33 @@ def parse_launch_flags(argv: list[str]) -> tuple[str | None, str | None]:
     return model, (effort if effort in _EFFORTS else None)
 
 
-def _parse_ps_line(line: str) -> tuple[int | None, bool, str | None, str | None]:
-    """(ppid, is_claude_code, model, effort) from one `ps -o ppid=,args=` line (macOS)."""
+def _is_claude_argv(argv: list[str]) -> bool:
+    """Whether argv is a Claude Code process: argv[0] names claude, or a node process whose
+    script (argv[1]) does, as in an npm install running cli.js."""
+    if not argv:
+        return False
+    if "claude" in argv[0].lower():
+        return True
+    base = re.split(r"[\\/]", argv[0])[-1].lower()
+    return base.startswith("node") and len(argv) > 1 and "claude" in argv[1].lower()
+
+
+def _parse_ps_line(line: str) -> tuple[int, list[str]] | None:
+    """(ppid, argv) from one `ps -o ppid=,args=` line (macOS), or None. The argv is the program
+    (before the first ' -', split in two when it is a node process) followed by one
+    --flag=value item per --model/--effort found in the line."""
     parts = line.strip().split(None, 1)
     if len(parts) < 2 or not parts[0].isdigit():
-        return None, False, None, None
-    ppid, args = int(parts[0]), parts[1]
-    is_cc = "claude" in args.split(" -", 1)[0].lower()
-    argv = []
+        return None
+    args = parts[1]
+    program = args.split(" -", 1)[0].strip()
+    argv = [program]
+    first = program.split(None, 1)
+    if len(first) == 2 and re.split(r"[\\/]", first[0])[-1].lower().startswith("node"):
+        argv = first
     for m in _FLAG_RE.finditer(args):
         argv.append("--%s=%s" % (m.group(1), m.group(2)))
-    model, effort = parse_launch_flags(argv) if is_cc else (None, None)
-    return ppid, is_cc, model, effort
+    return int(parts[0]), argv
 
 
 def _proc_info(pid: int) -> tuple[int, list[str]] | None:
@@ -128,38 +144,35 @@ def _proc_info(pid: int) -> tuple[int, list[str]] | None:
     nothing; macOS runs one ps. On macOS argv is the program followed by --flag=value items."""
     try:
         if sys.platform.startswith("linux"):
-            with open("/proc/%d/stat" % pid, "rb") as f:
+            with open(os.path.join(_PROC_ROOT, str(pid), "stat"), "rb") as f:
                 stat_text = f.read().decode("utf-8", "replace")
             ppid = int(stat_text[stat_text.rindex(")") + 1:].split()[1])
-            with open("/proc/%d/cmdline" % pid, "rb") as f:
+            with open(os.path.join(_PROC_ROOT, str(pid), "cmdline"), "rb") as f:
                 raw = f.read().decode("utf-8", "replace")
             return ppid, [a for a in raw.split("\0") if a != ""]
         if sys.platform == "darwin":
             r = subprocess.run(["ps", "-ww", "-o", "ppid=,args=", "-p", str(pid)],
                                stdin=subprocess.DEVNULL, capture_output=True, timeout=1)
-            line = r.stdout.decode("utf-8", "replace").strip()
-            ppid, is_cc, model, effort = _parse_ps_line(line)
-            if ppid is None:
+            if r.returncode != 0:
                 return None
-            argv = [line.split(None, 1)[1].split(" -", 1)[0]] if is_cc else ["-"]
-            if model:
-                argv.append("--model=" + model)
-            if effort:
-                argv.append("--effort=" + effort)
-            return ppid, argv
+            return _parse_ps_line(r.stdout.decode("utf-8", "replace"))
     except Exception:
         return None
     return None
 
 
 def launch_args(max_depth: int = 8) -> tuple[str | None, str | None]:
-    """(model, effort) from the command line of the nearest Claude Code ancestor process."""
+    """(model, effort) from the command line of the nearest Claude Code ancestor process.
+    GK_NO_LAUNCH_ARGS=1 turns the lookup off (tests that run hooks as subprocesses)."""
     try:
+        if os.environ.get("GK_NO_LAUNCH_ARGS") == "1":
+            return None, None
         if not (sys.platform.startswith("linux") or sys.platform == "darwin"):
             return None, None
         pid = os.getppid()
         seen: set = set()
         for _ in range(max_depth):
+            # A pid seen twice covers a self-loop (ppid == pid) and longer cycles alike.
             if pid <= 1 or pid in seen:
                 return None, None
             seen.add(pid)
@@ -167,10 +180,8 @@ def launch_args(max_depth: int = 8) -> tuple[str | None, str | None]:
             if info is None:
                 return None, None
             ppid, argv = info
-            if argv and "claude" in argv[0].lower():
+            if _is_claude_argv(argv):
                 return parse_launch_flags(argv)
-            if ppid == pid:
-                return None, None
             pid = ppid
     except Exception:
         pass

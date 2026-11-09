@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -255,20 +256,121 @@ class LaunchFlagsTest(unittest.TestCase):
         rows = {300: (200, PY_ARGV)}
         self.assertEqual(self._launch(rows), (None, None))
 
-    def test_ppid_loop(self):
-        rows = {300: (200, PY_ARGV), 200: (300, BASH_ARGV)}
-        self.assertEqual(self._launch(rows), (None, None))
-        rows = {300: (300, PY_ARGV)}
+    def _reads(self, rows, ppid=300):
+        reads = []
+
+        def reader(pid):
+            reads.append(pid)
+            return rows.get(pid)
+        with mock.patch.object(gk_model.sys, "platform", "linux"), \
+                mock.patch.object(gk_model.os, "getppid", return_value=ppid), \
+                mock.patch.object(gk_model, "_proc_info", side_effect=reader):
+            result = gk_model.launch_args()
+        return result, reads
+
+    def test_self_loop_stops_after_one_read(self):
+        result, reads = self._reads({300: (300, PY_ARGV)})
+        self.assertEqual((result, reads), ((None, None), [300]))
+
+    def test_two_cycle_stops_after_two_reads(self):
+        result, reads = self._reads({300: (200, PY_ARGV), 200: (300, BASH_ARGV)})
+        self.assertEqual((result, reads), ((None, None), [300, 200]))
+
+    def test_pid_one_and_zero_are_never_read(self):
+        rows = {300: (1, PY_ARGV), 1: (0, DESKTOP_ARGV), 0: (0, DESKTOP_ARGV)}
+        self.assertEqual(self._reads(rows), ((None, None), [300]))
+        self.assertEqual(self._reads(rows, ppid=1), ((None, None), []))
+        self.assertEqual(self._reads(rows, ppid=0), ((None, None), []))
+
+    def test_node_cli_is_claude_code(self):
+        node = ["/usr/bin/node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+                "--model=claude-sonnet-5-5"]
+        rows = {300: (200, PY_ARGV), 200: (100, node), 100: (1, DESKTOP_ARGV)}
+        self.assertEqual(self._launch(rows), ("claude-sonnet-5-5", None))
+        other = ["node", "/srv/app/server.js", "--model=claude-sonnet-5-5"]
+        rows = {300: (200, PY_ARGV), 200: (1, other)}
         self.assertEqual(self._launch(rows), (None, None))
 
     def test_macos_line_parser(self):
-        ppid, is_cc, model, effort = gk_model._parse_ps_line(
+        ppid, argv = gk_model._parse_ps_line(
             " 1234 /Applications/Claude.app/Contents/Resources/claude --output-format "
             "stream-json --model=claude-sonnet-5-5")
-        self.assertEqual((ppid, is_cc, model, effort), (1234, True, "claude-sonnet-5-5", None))
-        ppid, is_cc, _m, _e = gk_model._parse_ps_line(
+        self.assertEqual(ppid, 1234)
+        self.assertTrue(gk_model._is_claude_argv(argv))
+        self.assertEqual(gk_model.parse_launch_flags(argv), ("claude-sonnet-5-5", None))
+        ppid, argv = gk_model._parse_ps_line(
             "  99 /bin/bash -c /usr/bin/python3 /Users/c/.claude/hooks/gk-harness/gk-seat.py")
-        self.assertEqual((ppid, is_cc), (99, False))
+        self.assertEqual(ppid, 99)
+        self.assertFalse(gk_model._is_claude_argv(argv))
+        ppid, argv = gk_model._parse_ps_line(
+            "  7 /usr/local/bin/node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js "
+            "--model claude-opus-5-5 --effort high")
+        self.assertTrue(gk_model._is_claude_argv(argv))
+        self.assertEqual(gk_model.parse_launch_flags(argv), ("claude-opus-5-5", "high"))
+        ppid, argv = gk_model._parse_ps_line(
+            "  8 node /srv/app/server.js --model claude-opus-5-5")
+        self.assertFalse(gk_model._is_claude_argv(argv))
+        self.assertIsNone(gk_model._parse_ps_line("garbage"))
+
+    def test_macos_node_launch_stops_there(self):
+        calls = []
+        lines = {"300": " 200 /bin/bash -c python3 gk-seat.py",
+                 "200": "  100 node /x/claude-code/cli.js --model=claude-sonnet-5-5",
+                 "100": "  1 /Applications/Claude.app/claude --model=claude-opus-5-5"}
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return mock.Mock(returncode=0, stdout=lines[argv[-1]].encode())
+        with mock.patch.object(gk_model.sys, "platform", "darwin"), \
+                mock.patch.object(gk_model.os, "getppid", return_value=300), \
+                mock.patch.object(gk_model.subprocess, "run", fake_run):
+            self.assertEqual(gk_model.launch_args(), ("claude-sonnet-5-5", None))
+        self.assertEqual(len(calls), 2)
+
+    def test_env_switch_reads_nothing(self):
+        with mock.patch.dict(os.environ, {"GK_NO_LAUNCH_ARGS": "1"}), \
+                mock.patch.object(gk_model.sys, "platform", "linux"), \
+                mock.patch.object(gk_model, "_proc_info",
+                                  side_effect=AssertionError("read")) as info:
+            self.assertEqual(gk_model.launch_args(), (None, None))
+        info.assert_not_called()
+
+
+class ProcReaderTest(unittest.TestCase):
+    def test_linux_reader(self):
+        with tempfile.TemporaryDirectory() as d:
+            proc = Path(d)
+            (proc / "123").mkdir()
+            (proc / "123" / "stat").write_bytes(b"123 (a) b) S 45 123 123 0 -1 4194560\n")
+            (proc / "123" / "cmdline").write_bytes(b"/usr/bin/claude\0--model=x y\0")
+            (proc / "124").mkdir()
+            (proc / "124" / "stat").write_bytes(b"124 (a) S 45 1\n")  # no cmdline file
+            with mock.patch.object(gk_model, "_PROC_ROOT", d), \
+                    mock.patch.object(gk_model.sys, "platform", "linux"):
+                self.assertEqual(gk_model._proc_info(123),
+                                 (45, ["/usr/bin/claude", "--model=x y"]))
+                self.assertIsNone(gk_model._proc_info(124))
+                self.assertIsNone(gk_model._proc_info(999))
+
+    def _mac(self, **kw):
+        with mock.patch.object(gk_model.sys, "platform", "darwin"), \
+                mock.patch.object(gk_model.subprocess, "run", **kw) as run:
+            return gk_model._proc_info(42), run
+
+    def test_macos_reader(self):
+        out = b" 7 /Applications/Claude.app/claude --model=claude-opus-5-5\n"
+        result, run = self._mac(return_value=mock.Mock(returncode=0, stdout=out))
+        self.assertEqual(result, (7, ["/Applications/Claude.app/claude",
+                                      "--model=claude-opus-5-5"]))
+        run.assert_called_once_with(["ps", "-ww", "-o", "ppid=,args=", "-p", "42"],
+                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=1)
+
+    def test_macos_reader_failures(self):
+        result, _ = self._mac(side_effect=subprocess.TimeoutExpired("ps", 1))
+        self.assertIsNone(result)
+        result, _ = self._mac(return_value=mock.Mock(returncode=1, stdout=b" 7 /x/claude\n"))
+        self.assertIsNone(result)
+
 
     def test_windows_spawns_nothing(self):
         with mock.patch.object(gk_model.sys, "platform", "win32"), \

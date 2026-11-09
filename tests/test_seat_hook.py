@@ -63,7 +63,8 @@ class SeatHookBase(unittest.TestCase):
         self.cdir.mkdir()
 
     def run_hook(self, payload, raw=None, extra_env=None, timeout=30):
-        env = dict(os.environ, GK_CLAUDE_DIR=str(self.cdir), **GIT_ENV)
+        env = dict(os.environ, GK_CLAUDE_DIR=str(self.cdir), GK_NO_LAUNCH_ARGS="1",
+                   **GIT_ENV)
         env.pop("GK_PROFILE", None)
         env.update(extra_env or {})
         data = raw if raw is not None else json.dumps(payload).encode("utf-8")
@@ -232,12 +233,53 @@ class LaunchFallbackTests(SeatHookBase):
         self.assertEqual((st["model"], st["profile"], st["effort"]),
                          ("claude-opus-5-5", "opus", "xhigh"))
 
-    def test_clear_never_reads_launch(self):
+    def _boom(self):
         def boom():
             raise AssertionError("launch_args called")
-        card = self.run_handle({"source": "clear"}, boom)
-        self.assertEqual(card, gk_model.seat_card(None, None, None))
-        self.assertIsNone(self.state())
+        return boom
+
+    def test_clear_and_compact_never_read_launch(self):
+        for source in ("clear", "compact"):
+            card = self.run_handle({"source": source}, self._boom())
+            self.assertEqual(card, gk_model.seat_card(None, None, None), source)
+            self.assertIsNone(self.state(), source)
+
+    def test_resume_reads_launch(self):
+        card = self.run_handle({"source": "resume"}, lambda: ("claude-opus-5-5", "xhigh"))
+        self.assertEqual(card, gk_model.seat_card("claude-opus-5-5", "opus", "xhigh"))
+
+    def test_input_model_beats_launch_model(self):
+        card = self.run_handle({"source": "startup", "model": "claude-sonnet-5-5"},
+                               lambda: ("claude-opus-5-5", "high"))
+        self.assertEqual(card, gk_model.seat_card("claude-sonnet-5-5", "sonnet", "high"))
+
+    def test_stored_model_beats_launch_model(self):
+        with mock.patch.dict(os.environ, {"GK_CLAUDE_DIR": str(self.cdir)}):
+            gk_model.save_seat("s1", "claude-sonnet-5-5", "sonnet", "high", "startup")
+        card = self.run_handle({"source": "startup"}, lambda: ("claude-opus-5-5", None))
+        self.assertEqual(card, gk_model.seat_card("claude-sonnet-5-5", "sonnet", "high"))
+
+    def _transcript(self, model):
+        path = self.cdir / "t.jsonl"
+        path.write_text(json.dumps({"type": "assistant", "message": {"model": model}}) + "\n")
+        return str(path)
+
+    def test_launch_model_beats_transcript_model(self):
+        card = self.run_handle({"source": "startup",
+                                "transcript_path": self._transcript("claude-sonnet-5-5")},
+                               lambda: ("claude-opus-5-5", "high"))
+        self.assertEqual(card, gk_model.seat_card("claude-opus-5-5", "opus", "high"))
+
+    def test_empty_launch_falls_back_to_transcript(self):
+        card = self.run_handle({"source": "startup",
+                                "transcript_path": self._transcript("claude-sonnet-5-5")},
+                               lambda: (None, None))
+        self.assertEqual(card, gk_model.seat_card("claude-sonnet-5-5", "sonnet", None))
+
+    def test_full_input_never_reads_launch(self):
+        card = self.run_handle({"source": "startup", "model": "claude-opus-5-5",
+                                "effort": "high"}, self._boom())
+        self.assertEqual(card, gk_model.seat_card("claude-opus-5-5", "opus", "high"))
 
     def test_startup_effort_only_from_launch(self):
         card = self.run_handle({"source": "startup", "model": "claude-sonnet-5-5"},

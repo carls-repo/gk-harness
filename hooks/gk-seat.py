@@ -157,9 +157,11 @@ def handle(data: Any) -> None:
         if gk_model.profile_for_model(model) is None:
             model = seat.get("model")
         effort = effort or seat.get("effort")
-        launch = None  # read at most once, and only at startup: after /clear or a compaction
-        # the process may have switched model since it was launched
-        if source == "startup" and (gk_model.profile_for_model(model) is None or not effort):
+        # The launch command is read at startup or resume (a desktop relaunch is a fresh
+        # process), at most once, and never after /clear or a compaction: that process may
+        # have switched model since it was launched.
+        if source in ("startup", "resume") and (
+                gk_model.profile_for_model(model) is None or not effort):
             launch = gk_model.launch_args()
             if gk_model.profile_for_model(model) is None:
                 model = launch[0]
