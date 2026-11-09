@@ -272,9 +272,11 @@ class LaunchFlagsTest(unittest.TestCase):
 
     def test_windows_spawns_nothing(self):
         with mock.patch.object(gk_model.sys, "platform", "win32"), \
-                mock.patch.object(gk_model.subprocess, "run",
-                                  side_effect=AssertionError("spawned")):
+                mock.patch.object(gk_model.subprocess, "run") as run, \
+                mock.patch.object(gk_model, "_proc_info") as info:
             self.assertEqual(gk_model.launch_args(), (None, None))
+        run.assert_not_called()
+        info.assert_not_called()
 
     def test_real_machine(self):
         r = gk_model.launch_args()
