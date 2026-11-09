@@ -210,6 +210,51 @@ class SeatHookTests(SeatHookBase):
         self.assertLess(len(json.dumps(out)), 10000)
 
 
+class LaunchFallbackTests(SeatHookBase):
+    """In-process: launch_args is patched, so the hook module is run through handle()."""
+
+    def run_handle(self, payload, launch):
+        import contextlib
+        import io
+        mod = load_seat_module()
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"GK_CLAUDE_DIR": str(self.cdir)}), \
+                mock.patch.object(gk_model, "launch_args", launch), \
+                mock.patch.object(mod, "update_notice", return_value=None), \
+                contextlib.redirect_stdout(buf):
+            mod.handle(dict({"hook_event_name": "SessionStart", "session_id": "s1"}, **payload))
+        return json.loads(buf.getvalue())["hookSpecificOutput"]["additionalContext"]
+
+    def test_startup_takes_model_and_effort_from_launch(self):
+        card = self.run_handle({"source": "startup"}, lambda: ("claude-opus-5-5", "xhigh"))
+        self.assertEqual(card, gk_model.seat_card("claude-opus-5-5", "opus", "xhigh"))
+        st = self.state()
+        self.assertEqual((st["model"], st["profile"], st["effort"]),
+                         ("claude-opus-5-5", "opus", "xhigh"))
+
+    def test_clear_never_reads_launch(self):
+        def boom():
+            raise AssertionError("launch_args called")
+        card = self.run_handle({"source": "clear"}, boom)
+        self.assertEqual(card, gk_model.seat_card(None, None, None))
+        self.assertIsNone(self.state())
+
+    def test_startup_effort_only_from_launch(self):
+        card = self.run_handle({"source": "startup", "model": "claude-sonnet-5-5"},
+                               lambda: (None, "high"))
+        self.assertEqual(card, gk_model.seat_card("claude-sonnet-5-5", "sonnet", "high"))
+        self.assertIn("at high", card)
+
+    def test_launch_called_at_most_once(self):
+        calls = []
+
+        def once():
+            calls.append(1)
+            return (None, None)
+        self.run_handle({"source": "startup"}, once)
+        self.assertEqual(len(calls), 1)
+
+
 class UpdateCheckTests(SeatHookBase):
     def make_repos(self):
         work, bare, root = self.tmp / "work", self.tmp / "origin.git", self.tmp / "root"

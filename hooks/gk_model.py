@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -18,6 +21,8 @@ MODE = {"fable": "A", "opus": "B", "sonnet": "C"}
 RANK = {"sonnet": 1, "opus": 2, "fable": 3}
 _LINEUP = ("fable", "opus", "sonnet")
 TAIL_BYTES = 262144
+_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_FLAG_RE = re.compile(r"(?:^|\s)--(model|effort)(?:=|\s+)([^\s=-][^\s]*)")
 
 
 def profile_for_model(model: Any) -> str | None:
@@ -39,7 +44,7 @@ def in_lineup(model: Any) -> bool:
 
 
 def model_from_transcript(path: Any, max_bytes: int = TAIL_BYTES) -> str | None:
-    """The model of the last main-thread assistant entry in the transcript's tail."""
+    """The model of the last main-thread assistant entry, or model attachment, in the tail."""
     if not isinstance(path, (str, bytes, os.PathLike)):
         return None  # an int (or bool) would be taken as a file descriptor and closed
     try:
@@ -68,13 +73,108 @@ def model_from_transcript(path: Any, max_bytes: int = TAIL_BYTES) -> str | None:
             e = json.loads(line.decode("utf-8"))
         except Exception:
             continue
-        if not isinstance(e, dict) or e.get("type") != "assistant" or e.get("isSidechain") is True:
+        if not isinstance(e, dict) or e.get("isSidechain") is True:
             continue
-        msg = e.get("message")
-        model = msg.get("model") if isinstance(msg, dict) else None
+        model = None
+        if e.get("type") == "assistant":
+            msg = e.get("message")
+            model = msg.get("model") if isinstance(msg, dict) else None
+        elif e.get("type") == "attachment":
+            att = e.get("attachment")
+            if isinstance(att, dict) and att.get("type") == "model":
+                ident = att.get("identity")
+                model = ident.get("modelId") if isinstance(ident, dict) else None
         if isinstance(model, str) and profile_for_model(model) is not None:
             return model
     return None
+
+
+def parse_launch_flags(argv: list[str]) -> tuple[str | None, str | None]:
+    """(model, effort) from a Claude Code argv; each is None unless it is usable."""
+    values: dict = {}
+    for i, arg in enumerate(argv):
+        if not isinstance(arg, str):
+            continue
+        for flag in ("model", "effort"):
+            if arg == "--" + flag:
+                if i + 1 < len(argv) and isinstance(argv[i + 1], str):
+                    values[flag] = argv[i + 1]
+            elif arg.startswith("--" + flag + "="):
+                values[flag] = arg.split("=", 1)[1]
+    model = values.get("model")
+    if profile_for_model(model) is None:
+        model = None
+    effort = values.get("effort")
+    effort = effort.lower() if isinstance(effort, str) else None
+    return model, (effort if effort in _EFFORTS else None)
+
+
+def _parse_ps_line(line: str) -> tuple[int | None, bool, str | None, str | None]:
+    """(ppid, is_claude_code, model, effort) from one `ps -o ppid=,args=` line (macOS)."""
+    parts = line.strip().split(None, 1)
+    if len(parts) < 2 or not parts[0].isdigit():
+        return None, False, None, None
+    ppid, args = int(parts[0]), parts[1]
+    is_cc = "claude" in args.split(" -", 1)[0].lower()
+    argv = []
+    for m in _FLAG_RE.finditer(args):
+        argv.append("--%s=%s" % (m.group(1), m.group(2)))
+    model, effort = parse_launch_flags(argv) if is_cc else (None, None)
+    return ppid, is_cc, model, effort
+
+
+def _proc_info(pid: int) -> tuple[int, list[str]] | None:
+    """(ppid, argv) of a process on Linux or macOS, or None. Linux reads /proc and spawns
+    nothing; macOS runs one ps. On macOS argv is the program followed by --flag=value items."""
+    try:
+        if sys.platform.startswith("linux"):
+            with open("/proc/%d/stat" % pid, "rb") as f:
+                stat_text = f.read().decode("utf-8", "replace")
+            ppid = int(stat_text[stat_text.rindex(")") + 1:].split()[1])
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                raw = f.read().decode("utf-8", "replace")
+            return ppid, [a for a in raw.split("\0") if a != ""]
+        if sys.platform == "darwin":
+            r = subprocess.run(["ps", "-ww", "-o", "ppid=,args=", "-p", str(pid)],
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=1)
+            line = r.stdout.decode("utf-8", "replace").strip()
+            ppid, is_cc, model, effort = _parse_ps_line(line)
+            if ppid is None:
+                return None
+            argv = [line.split(None, 1)[1].split(" -", 1)[0]] if is_cc else ["-"]
+            if model:
+                argv.append("--model=" + model)
+            if effort:
+                argv.append("--effort=" + effort)
+            return ppid, argv
+    except Exception:
+        return None
+    return None
+
+
+def launch_args(max_depth: int = 8) -> tuple[str | None, str | None]:
+    """(model, effort) from the command line of the nearest Claude Code ancestor process."""
+    try:
+        if not (sys.platform.startswith("linux") or sys.platform == "darwin"):
+            return None, None
+        pid = os.getppid()
+        seen: set = set()
+        for _ in range(max_depth):
+            if pid <= 1 or pid in seen:
+                return None, None
+            seen.add(pid)
+            info = _proc_info(pid)
+            if info is None:
+                return None, None
+            ppid, argv = info
+            if argv and "claude" in argv[0].lower():
+                return parse_launch_flags(argv)
+            if ppid == pid:
+                return None, None
+            pid = ppid
+    except Exception:
+        pass
+    return None, None
 
 
 def effort_of(data: Any) -> str | None:

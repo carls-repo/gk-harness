@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -199,6 +200,115 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(gk_model.resolve_profile(data), "sonnet")
         gk_model.save_seat("r1", "claude-opus-5-5", "opus", None, "s")
         self.assertEqual(gk_model.resolve_profile(data), "opus")
+
+
+DESKTOP_ARGV = ["/home/carls/.claude/remote/ccd-cli/2.1.317-a5bf08beebc8", "--output-format",
+                "stream-json", "--verbose", "--input-format", "stream-json", "--effort=xhigh",
+                "--model=claude-opus-5-5"]
+BASH_ARGV = ["bash", "-c", "/usr/bin/python3", "/home/carls/.claude/hooks/gk-harness/gk-seat.py"]
+PY_ARGV = ["/usr/bin/python3", "/home/carls/.claude/hooks/gk-harness/gk-seat.py"]
+TERM_ARGV = ["/home/carls/.local/bin/claude"]
+
+
+class LaunchFlagsTest(unittest.TestCase):
+    def test_parse_launch_flags(self):
+        cases = [
+            (DESKTOP_ARGV, ("claude-opus-5-5", "xhigh")),
+            (["claude", "--model", "sonnet", "--effort", "high"], ("sonnet", "high")),
+            (["claude"], (None, None)),
+            (["claude", "--model=gpt-4o"], (None, None)),
+            (["claude", "--effort=turbo"], (None, None)),
+            (["claude", "--model"], (None, None)),
+            (["claude", "--effort=XHIGH"], (None, "xhigh")),
+        ]
+        for argv, want in cases:
+            self.assertEqual(gk_model.parse_launch_flags(argv), want, argv)
+
+    def _table(self, rows):
+        # rows: {pid: (ppid, argv)}
+        return lambda pid: rows.get(pid)
+
+    def _launch(self, rows, ppid=300, **kw):
+        with mock.patch.object(gk_model.sys, "platform", "linux"), \
+                mock.patch.object(gk_model.os, "getppid", return_value=ppid), \
+                mock.patch.object(gk_model, "_proc_info", side_effect=self._table(rows)):
+            return gk_model.launch_args(**kw)
+
+    def test_desktop_chain(self):
+        rows = {300: (200, PY_ARGV), 200: (100, BASH_ARGV), 100: (1, DESKTOP_ARGV)}
+        self.assertEqual(self._launch(rows), ("claude-opus-5-5", "xhigh"))
+
+    def test_stops_at_first_claude_code(self):
+        rows = {300: (200, PY_ARGV), 200: (150, BASH_ARGV), 150: (100, TERM_ARGV),
+                100: (50, BASH_ARGV), 50: (1, DESKTOP_ARGV)}
+        self.assertEqual(self._launch(rows), (None, None))
+
+    def test_no_claude_code(self):
+        rows = {300: (200, PY_ARGV), 200: (1, BASH_ARGV)}
+        self.assertEqual(self._launch(rows), (None, None))
+
+    def test_depth_limit(self):
+        rows = {300: (200, PY_ARGV), 200: (100, BASH_ARGV), 100: (1, DESKTOP_ARGV)}
+        self.assertEqual(self._launch(rows, max_depth=2), (None, None))
+
+    def test_reader_fails_partway(self):
+        rows = {300: (200, PY_ARGV)}
+        self.assertEqual(self._launch(rows), (None, None))
+
+    def test_ppid_loop(self):
+        rows = {300: (200, PY_ARGV), 200: (300, BASH_ARGV)}
+        self.assertEqual(self._launch(rows), (None, None))
+        rows = {300: (300, PY_ARGV)}
+        self.assertEqual(self._launch(rows), (None, None))
+
+    def test_macos_line_parser(self):
+        ppid, is_cc, model, effort = gk_model._parse_ps_line(
+            " 1234 /Applications/Claude.app/Contents/Resources/claude --output-format "
+            "stream-json --model=claude-sonnet-5-5")
+        self.assertEqual((ppid, is_cc, model, effort), (1234, True, "claude-sonnet-5-5", None))
+        ppid, is_cc, _m, _e = gk_model._parse_ps_line(
+            "  99 /bin/bash -c /usr/bin/python3 /Users/c/.claude/hooks/gk-harness/gk-seat.py")
+        self.assertEqual((ppid, is_cc), (99, False))
+
+    def test_windows_spawns_nothing(self):
+        with mock.patch.object(gk_model.sys, "platform", "win32"), \
+                mock.patch.object(gk_model.subprocess, "run",
+                                  side_effect=AssertionError("spawned")):
+            self.assertEqual(gk_model.launch_args(), (None, None))
+
+    def test_real_machine(self):
+        r = gk_model.launch_args()
+        self.assertEqual(len(r), 2)
+
+
+ATTACH = {"type": "attachment", "attachment": {"type": "model", "identity": {
+    "modelId": "claude-opus-5-5", "marketingName": "Opus 5.5"}, "text": "You are powered by"}}
+
+
+class TranscriptAttachmentTest(unittest.TestCase):
+    def _model(self, entries):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "t.jsonl"
+            p.write_text("".join(json.dumps(e) + "\n" for e in entries))
+            return gk_model.model_from_transcript(p)
+
+    def test_attachment_only(self):
+        self.assertEqual(self._model([ATTACH]), "claude-opus-5-5")
+
+    def test_later_assistant_wins(self):
+        a = {"type": "assistant", "message": {"model": "claude-sonnet-5-5"}}
+        self.assertEqual(self._model([ATTACH, a]), "claude-sonnet-5-5")
+
+    def test_sidechain_attachment_ignored(self):
+        side = json.loads(json.dumps(ATTACH))
+        side["isSidechain"] = True
+        side["attachment"]["identity"]["modelId"] = "claude-sonnet-5-5"
+        self.assertEqual(self._model([ATTACH, side]), "claude-opus-5-5")
+
+    def test_other_attachment_type_ignored(self):
+        other = json.loads(json.dumps(ATTACH))
+        other["attachment"]["type"] = "todo"
+        self.assertIsNone(self._model([other]))
 
 
 if __name__ == "__main__":
