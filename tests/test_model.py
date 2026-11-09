@@ -211,7 +211,18 @@ PY_ARGV = ["/usr/bin/python3", "/home/carls/.claude/hooks/gk-harness/gk-seat.py"
 TERM_ARGV = ["/home/carls/.local/bin/claude"]
 
 
+def _clear_launch_switch(test: unittest.TestCase) -> None:
+    """An exported GK_NO_LAUNCH_ARGS must not turn off the walks these tests exercise."""
+    env = mock.patch.dict(os.environ)
+    env.start()
+    test.addCleanup(env.stop)
+    os.environ.pop("GK_NO_LAUNCH_ARGS", None)
+
+
 class LaunchFlagsTest(unittest.TestCase):
+    def setUp(self):
+        _clear_launch_switch(self)
+
     def test_parse_launch_flags(self):
         cases = [
             (DESKTOP_ARGV, ("claude-opus-5-5", "xhigh")),
@@ -337,6 +348,9 @@ class LaunchFlagsTest(unittest.TestCase):
 
 
 class ProcReaderTest(unittest.TestCase):
+    def setUp(self):
+        _clear_launch_switch(self)
+
     def test_linux_reader(self):
         with tempfile.TemporaryDirectory() as d:
             proc = Path(d)
