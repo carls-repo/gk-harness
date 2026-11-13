@@ -741,7 +741,7 @@ const goldenResultInNeutralWords = (r) => {
   return { planCheck: { ...plan, triggered: scrollList(pageRootPieces) }, pieces: r.pieces.map(neutralReport), check: r.check, reviews: r.reviews, judge: { ...judge, signOffRequired: scrollList(scrollAuditRequired) } }
 }
 const buildBehaviour = (r) => {
-  const { routing, seatMustRerun, classDisagreements, failed, signOff, ...rest } = r
+  const { routing, seatMustRerun, seatMustRerunIn, classDisagreements, failed, signOff, ...rest } = r
   return { ...rest, check: 'exitCode' in rest.check ? { passed: rest.check.passed } : rest.check }
 }
 const afterLast = (calls, phase, extra) => {
@@ -767,6 +767,9 @@ async function assertSameBuild(name, args, opts, expect = (calls) => step(calls)
   const pieces = args.pieces || BUILD_PIECES
   const names = pieces.map((p) => p.name)
   assert.equal(now.result.seatMustRerun, old.calls.some((c) => c.label === 'check') ? (args.check || 'npm run typecheck') : null, `${name}: seatMustRerun`)
+  // Goodricke names packages: the seat re-runs it from the folders the golden's check ran in.
+  const goldenWhere = /^Check: "[^"]*" in (.*); Review: /.exec(old.logs.find((l) => l.startsWith('Check: ')))[1]
+  assert.deepEqual(now.result.seatMustRerunIn, now.result.seatMustRerun ? goldenWhere.split(', ') : null, `${name}: seatMustRerunIn`)
   assert.deepEqual(now.result.failed.map((f) => f.name), names.filter((n) => !old.result.pieces.some((p) => p.name === n)), `${name}: failed`)
   assert.deepEqual(now.result.classDisagreements, [], `${name}: classDisagreements`)
   const roots = old.result.planCheck.pageRootPieces
@@ -1371,6 +1374,46 @@ test('check stage, gk-build: the check runs from each affected project package, 
     assert.ok(r.logs.includes('Check: no command — skipped; Review: 3 piece(s)'), r.logs.join('\n'))
     assert.ok(r.logs.some((l) => l.startsWith('Check skipped; reviews: ')), r.logs.join('\n'))
   }
+})
+
+test('seatMustRerunIn, gk-build: the seat re-runs the check from each affected package folder, from the top level without packages, and not at all when no check ran', async () => {
+  const pieces = [
+    { name: 'a', files: ['backend/src/a.ts'], brief: 'Add a.' },
+    { name: 'b', files: ['frontend/src/B.tsx'], brief: 'Add B.' },
+    { name: 'c', files: ['docs/c.md'], brief: 'Document c.' },
+  ]
+  const run = (project, ps = pieces) => runWorkflow(neutral('gk-build.js'), { plan: PLAN, pieces: structuredClone(ps), project }, buildResponders('generic', { pieces: ps, order: [ps.map((p) => p.name)] }))
+  // Goodricke's shape (check npm run typecheck, packages backend and frontend; no package.json at
+  // the top level): a two-package build re-runs from both folders, in the check stage's order.
+  const two = await run({ root: '/tmp/repo', check: 'npm run typecheck', packages: ['frontend', 'backend'] })
+  assert.equal(two.result.seatMustRerun, 'npm run typecheck')
+  assert.deepEqual(two.result.seatMustRerunIn, ['frontend', 'backend'])
+  assert.ok(two.calls.find((c) => c.label === 'check').prompt.includes('For each package in ["frontend","backend"]: '))
+  // One affected package of two: only that folder.
+  const one = await run({ root: '/tmp/repo', check: 'npm run typecheck', packages: ['backend', 'frontend'] }, [pieces[0], pieces[2]])
+  assert.deepEqual(one.result.seatMustRerunIn, ['backend'])
+  // The real fixture: the same, from Goodricke's own packages.
+  const fixture2 = await runWorkflow(neutral('gk-build.js'), { ...buildArgs(), project: goodricke() }, buildResponders('neutral'))
+  assert.deepEqual([fixture2.result.seatMustRerun, fixture2.result.seatMustRerunIn], ['npm run typecheck', ['backend', 'frontend']])
+  // No packages: the top level, so null.
+  const top = await run({ root: '/tmp/repo', check: 'make check' })
+  assert.equal(top.result.seatMustRerun, 'make check')
+  assert.equal(top.result.seatMustRerunIn, null)
+  // Packages, but no piece touches one: the check passes without running, so nothing to re-run.
+  const outside = await run({ root: '/tmp/repo', check: 'make check', packages: ['web'] })
+  assert.equal(outside.calls.some((c) => c.label === 'check'), false)
+  assert.deepEqual(outside.result.check, { passed: true, output: 'skipped: no files under web/' })
+  assert.equal(outside.result.seatMustRerun, null)
+  assert.equal(outside.result.seatMustRerunIn, null)
+  // No command: nothing to re-run either.
+  const none = await run({ root: '/tmp/repo', packages: ['backend'] })
+  assert.deepEqual([none.result.seatMustRerun, none.result.seatMustRerunIn], [null, null])
+  // The check agent dies: it was dispatched, so the seat must still re-run it, from the same folders.
+  const dead = await runWorkflow(neutral('gk-build.js'), { plan: PLAN, pieces: structuredClone(pieces), project: { root: '/tmp/repo', check: 'npm run typecheck', packages: ['backend', 'frontend'] } }, [{ match: /^check$/, reply: () => null }, ...buildResponders('generic', { pieces, order: [['a', 'b', 'c']] })])
+  assert.deepEqual([dead.result.seatMustRerun, dead.result.seatMustRerunIn], ['npm run typecheck', ['backend', 'frontend']])
+  // The usage text tells the seat where.
+  const whenToUse = /whenToUse: '((?:[^'\\]|\\.)*)'/.exec(readFileSync(neutral('gk-build.js'), 'utf8'))[1]
+  assert.ok(whenToUse.includes('The seat re-runs seatMustRerun itself before sign-off, from each folder in seatMustRerunIn (or the top level when it is null), applying the project\\\'s Check-stage guards'), whenToUse)
 })
 
 test('build returns signOff: an untriggered check lists every piece, a triggered one the pieces that met it', async () => {
