@@ -50,8 +50,10 @@ def _effort(value: Any) -> str | None:
     return value if isinstance(value, str) and value in _EFFORTS else None
 
 
-def model_from_transcript(path: Any, max_bytes: int = TAIL_BYTES) -> str | None:
-    """The model of the last main-thread assistant entry, or model attachment, in the tail."""
+def model_from_transcript(path: Any, max_bytes: int = TAIL_BYTES,
+                          accept: Any = None) -> str | None:
+    """The model of the last main-thread assistant entry, or model attachment, in the tail,
+    among those `accept(model)` is truthy for (by default, a model with a known alias)."""
     if not isinstance(path, (str, bytes, os.PathLike)):
         return None  # an int (or bool) would be taken as a file descriptor and closed
     try:
@@ -91,7 +93,7 @@ def model_from_transcript(path: Any, max_bytes: int = TAIL_BYTES) -> str | None:
             if isinstance(att, dict) and att.get("type") == "model":
                 ident = att.get("identity")
                 model = ident.get("modelId") if isinstance(ident, dict) else None
-        if isinstance(model, str) and alias_for_model(model) is not None:
+        if isinstance(model, str) and (accept or alias_for_model)(model):
             return model
     return None
 

@@ -216,10 +216,46 @@ class ProfileHookTests(unittest.TestCase):
         out = self.call({"name": "gk-build", "args": None}, extra_env={"GK_PROFILE": "fable"})
         self.assertEqual(self.args_of(out), {"profile": "fable"})
 
-    def test_v1_haiku_seat_gives_no_profile(self):
+    def test_v1_haiku_seat_gives_sonnet(self):
+        # as the retired profile_for_model did: haiku, and any other claude model, is sonnet
         self.v1_user_script()
         self.seat("haiku")
-        self.assertIsNone(self.call({"name": "gk-build"}))
+        out = self.call({"name": "gk-build"})
+        self.assertEqual(self.args_of(out), {"profile": "sonnet"})
+        (self.cdir / "state" / "gk-seat" / "s1.json").unlink()
+        tp = self.tmp / "t.jsonl"
+        tp.write_text(json.dumps({"type": "assistant",
+                                  "message": {"model": "claude-haiku-5-5"}}) + "\n")
+        out = self.call({"name": "gk-build"}, transcript_path=str(tp))
+        self.assertEqual(self.args_of(out), {"profile": "sonnet"})
+
+    def test_v1_unknown_claude_model_gives_sonnet(self):
+        self.v1_user_script()
+        tp = self.tmp / "t.jsonl"
+        tp.write_text(json.dumps({"type": "assistant",
+                                  "message": {"model": "claude-mystery-9"}}) + "\n")
+        out = self.call({"name": "gk-build"}, transcript_path=str(tp))
+        self.assertEqual(self.args_of(out), {"profile": "sonnet"})
+        # a seat record from the profile era is read by its profile, as before
+        d = self.cdir / "state" / "gk-seat"
+        d.mkdir(parents=True)
+        (d / "s1.json").write_text(json.dumps({"model": "claude-mystery-9",
+                                               "profile": "sonnet", "effort": "high"}))
+        out = self.call({"name": "gk-build"})
+        self.assertEqual(self.args_of(out), {"profile": "sonnet"})
+        # a model that is not a claude model gives nothing, as before
+        tp.write_text(json.dumps({"type": "assistant", "message": {"model": "gpt-9"}}) + "\n")
+        (d / "s1.json").unlink()
+        self.assertIsNone(self.call({"name": "gk-build"}, transcript_path=str(tp)))
+
+    def test_v1_haiku_seat_warns_on_a_higher_profile(self):
+        self.v1_user_script()
+        self.seat("haiku")
+        out = self.call({"name": "gk-build", "args": {"profile": "opus"}})
+        msg = HIGHER % ("opus", "sonnet")
+        self.assertEqual(out, {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                                      "additionalContext": msg},
+                               "systemMessage": msg})
 
     def test_v1_no_source_passthrough(self):
         self.v1_user_script()
@@ -465,13 +501,23 @@ class ProfileHookTests(unittest.TestCase):
         saved.write_bytes(self.harness_bytes("gk-review"))
         out = self.call({"scriptPath": str(saved), "args": {"target": "x"}})
         self.assertEqual(self.args_of(out), {"target": "x", "seat": "opus-high"})
-        # every harness workflow, run by its own path, is marked and so injected: the v2
-        # scripts with the seat, the one still on v1 (gk-selftest) with the profile
+        # every harness workflow, run by its own path, is an args-v2 script and gets the seat
         for js in sorted((Path(ROOT) / "workflows").glob("gk-*.js")):
+            self.assertIn(b"gk-harness:args-v2", js.read_bytes()[:16384], js.name)
             out = self.call({"scriptPath": str(js)})
-            want = ({"seat": "opus-high"} if b"gk-harness:args-v2" in js.read_bytes()
-                    else {"profile": "opus"})
-            self.assertEqual(self.args_of(out), want, js.name)
+            self.assertEqual(self.args_of(out), {"seat": "opus-high"}, js.name)
+
+    def test_selftest_gets_seat_and_dials(self):
+        self.seat("opus", effort="medium")
+        user = self.cdir / "workflows"
+        user.mkdir()
+        (user / "gk-selftest.js").write_bytes(self.harness_bytes("gk-selftest"))
+        out = self.call({"name": "gk-selftest", "args": {"dials": []}})
+        self.assertEqual(self.args_of(out), {"dials": [], "seat": "opus-medium"})
+        self.fable_off()
+        out = self.call({"name": "gk-selftest", "args": {"dials": []}})
+        self.assertEqual(self.args_of(out), {"dials": ["nofable"], "seat": "opus-medium"})
+        self.assertNotIn("profile", self.args_of(out))
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs mkfifo")
     def test_fifo_script_is_not_read(self):
@@ -619,10 +665,18 @@ class ProfileHookTests(unittest.TestCase):
         sub = repo / "src"
         out = self.call({"name": "gk-review", "args": {"target": "working-tree"}}, cwd=sub)
         self.assertEqual(self.args_of(out)["changedPaths"], ["src/a.py", "docs/new file.md"])
-        # an explicit list is kept; other workflows get none
+        # a caller's list adds paths after git's but never hides one; non-strings are dropped
         out = self.call({"name": "gk-review", "args": {"target": "working-tree",
-                                                       "changedPaths": ["z"]}}, cwd=repo)
-        self.assertEqual(self.args_of(out)["changedPaths"], ["z"])
+                                                       "changedPaths": ["z", "src/a.py", 5]}},
+                        cwd=repo)
+        self.assertEqual(self.args_of(out)["changedPaths"], ["src/a.py", "docs/new file.md", "z"])
+        out = self.call({"name": "gk-review", "args": {"target": "working-tree",
+                                                       "changedPaths": None}}, cwd=repo)
+        self.assertEqual(self.args_of(out)["changedPaths"], ["src/a.py", "docs/new file.md"])
+        # when git fails the caller's value is kept as given (the script judges it)
+        out = self.call({"name": "gk-review", "args": {"target": "nosuch..HEAD",
+                                                       "changedPaths": ["z", 5]}}, cwd=repo)
+        self.assertEqual(self.args_of(out)["changedPaths"], ["z", 5])
         out = self.call({"name": "gk-build", "args": {"target": "working-tree"}}, cwd=repo)
         self.assertNotIn("changedPaths", self.args_of(out))
         # outside a repository there is nothing to diff
@@ -646,6 +700,27 @@ class ProfileHookTests(unittest.TestCase):
         self.assertEqual(sorted(paths("main..feat")), ["feat.txt", "main-only.txt"])
         self.assertEqual(paths("main..main"), [])
         self.assertIsNone(paths("nosuch..feat"))
+
+    def test_empty_caller_list_cannot_hide_a_ui_path(self):
+        # The judge's path floor reads changedPaths: an empty or partial caller list must not
+        # switch it off.
+        repo = self.repo()
+        self.git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
+        self.commit_file(repo, "README.md", "1")
+        self.git(repo, "checkout", "-q", "-b", "feat")
+        self.commit_file(repo, "frontend/src/app/x.tsx", "ui")
+        self.commit_file(repo, "lib/y.py", "y")
+        for given in ([], ["lib/y.py"]):
+            out = self.call({"name": "gk-review", "args": {"target": "main..feat",
+                                                           "changedPaths": given}}, cwd=repo)
+            got = self.args_of(out)["changedPaths"]
+            self.assertIn("frontend/src/app/x.tsx", got, given)
+            self.assertEqual(got, ["frontend/src/app/x.tsx", "lib/y.py"], given)
+        # a caller's list that already equals git's changes nothing
+        out = self.call({"name": "gk-review", "args": {
+            "target": "main..feat", "changedPaths": ["frontend/src/app/x.tsx", "lib/y.py"],
+            "project": {}}}, cwd=repo)
+        self.assertIsNone(out)
 
     def test_hostile_target_gets_no_changed_paths(self):
         repo = self.repo()
@@ -783,6 +858,27 @@ class ChangedPathsTests(unittest.TestCase):
             target = "working-tree" if len(outputs) == 2 else "main..x"
             with mock.patch.object(gk_common, "_git", git):
                 self.assertIsNone(self.mod.changed_paths(self.top, target), outputs)
+
+    def test_merge_keeps_git_first_and_caps(self):
+        m = self.mod._merge_changed_paths
+        args = {"changedPaths": ["c", "a", 7, None, "c"]}
+        self.assertTrue(m(args, ["a", "b"]))
+        self.assertEqual(args["changedPaths"], ["a", "b", "c"])
+        args = {"changedPaths": "not a list"}
+        self.assertTrue(m(args, ["a"]))
+        self.assertEqual(args["changedPaths"], ["a"])
+        args = {"changedPaths": "not a list"}
+        self.assertFalse(m(args, None))  # git failed: the script judges the caller's value
+        self.assertEqual(args["changedPaths"], "not a list")
+        args = {}
+        self.assertFalse(m(args, None))
+        self.assertNotIn("changedPaths", args)
+        self.assertTrue(m(args, []))
+        self.assertEqual(args["changedPaths"], [])
+        args = {"changedPaths": ["x%d" % i for i in range(1500)]}
+        self.assertTrue(m(args, ["g%d" % i for i in range(1000)]))
+        self.assertEqual(len(args["changedPaths"]), 2000)
+        self.assertEqual(args["changedPaths"][999:1001], ["g999", "x0"])
 
     def test_capped_at_2000(self):
         many = "".join("f%d\0" % i for i in range(2500))

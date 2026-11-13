@@ -2,7 +2,8 @@
 
 Standard library only, Python 3.9+. The filename is historical: the hook no longer deals in
 profiles for current scripts. It never blocks: there is no permissionDecision, only
-updatedInput and warnings. An explicit value is always kept, except `project.legal`.
+updatedInput and warnings. An explicit value is always kept, except `project.legal` and
+gk-review's `changedPaths` (git's paths are always in it).
 
 What a gk call gets depends on the marker in the script it runs (the first MARKER_SCAN
 bytes, on the line after `meta`):
@@ -12,7 +13,8 @@ bytes, on the line after `meta`):
   `gkh fable off` holds; `project`, the project file (`.claude/gk-project.json` at the
   session's git top level, plus `root`), whose `legal` always comes from that file, even into
   a project the caller passed; `scratchpad` for gk-diagnose; and `changedPaths` for gk-review,
-  from git, only for a target that passes gk-review's own pattern. No `profile`.
+  git's paths for a target that passes gk-review's own pattern, followed by any other paths
+  the caller listed. No `profile`.
 - `gk-harness:args-v1` (an older copy still on disk): exactly what it always got, `profile`
   from the seat's model, `project` and `scratchpad`, with the warning for a profile above the
   seat; nothing it might reject as unknown.
@@ -53,8 +55,7 @@ TARGET_RE = re.compile(TARGET_PATTERN)
 CHANGED_MAX = 2000
 _MISSING = object()
 
-# args-v1 only: the profile an old script expects, by the seat model's alias (none for haiku).
-_V1_PROFILE = {"fable": "fable", "opus": "opus", "sonnet": "sonnet"}
+# args-v1 only: the profile an old script expects, as the retired profile_for_model gave it.
 _V1_RANK = {"sonnet": 1, "opus": 2, "fable": 3}
 
 HIGHER = ("gk-harness: this Workflow call asks for profile '{p}' above the seat ('{seat}') "
@@ -197,15 +198,28 @@ def changed_paths(top: Path, target: str) -> list[str] | None:
     return paths
 
 
+def _v1_map(model: Any) -> str | None:
+    """args-v1 only, the retired profile_for_model: fable|opus|sonnet when the model string
+    names one; sonnet for any other claude or haiku model; else None."""
+    if not isinstance(model, str):
+        return None
+    m = model.lower()
+    for p in ("fable", "opus", "sonnet"):
+        if p in m:
+            return p
+    return "sonnet" if "claude" in m or "haiku" in m else None
+
+
 def _v1_profile(data: dict) -> str | None:
-    """args-v1 scripts only: the seat state's model, then the transcript's, then
-    $GK_PROFILE, mapped to the profile an old script expects."""
-    rec = gk_model.load_seat(data.get("session_id"))
-    p = _V1_PROFILE.get(gk_model.alias_for_model(rec["model"])) if rec else None
-    if p:
-        return p
-    model = gk_model.model_from_transcript(data.get("transcript_path"))
-    p = _V1_PROFILE.get(gk_model.alias_for_model(model))
+    """args-v1 scripts only, as before: the seat record (its profile when it has one, else
+    its model), then the transcript's model, then $GK_PROFILE."""
+    sid = data.get("session_id")
+    rec = gk_common.read_json(gk_model.seat_path(sid)) if gk_common.safe_sid(sid) else None
+    if isinstance(rec, dict):
+        p = rec.get("profile") if rec.get("profile") in _V1_RANK else _v1_map(rec.get("model"))
+        if p:
+            return p
+    p = _v1_map(gk_model.model_from_transcript(data.get("transcript_path"), accept=_v1_map))
     if p:
         return p
     env = os.environ.get("GK_PROFILE")
@@ -261,12 +275,30 @@ def _inject_v2(name: str, args: dict, data: dict, top: Path | None, warnings: li
             changed = True
     changed = _inject_project(args, top, warnings) or changed
     changed = _set_legal(args, top) or changed
-    if name == "gk-review" and _absent(args, "changedPaths") and top is not None:
-        paths = changed_paths(top, args.get("target"))
-        if paths is not None:
-            args["changedPaths"] = paths
-            changed = True
+    if name == "gk-review" and top is not None:
+        changed = _merge_changed_paths(args, changed_paths(top, args.get("target"))) or changed
     return changed
+
+
+def _merge_changed_paths(args: dict, found: list | None) -> bool:
+    """changedPaths becomes git's paths, then the caller's other string entries, at most
+    CHANGED_MAX: a caller's list can add paths but never hide one (the judge's path floor
+    comes from code). When git found nothing usable (None) the caller's value is kept."""
+    if found is None:
+        return False
+    given = args.get("changedPaths")
+    merged = list(found)
+    seen = set(merged)
+    for p in given if isinstance(given, list) else []:
+        if len(merged) >= CHANGED_MAX:
+            break
+        if isinstance(p, str) and p not in seen:
+            seen.add(p)
+            merged.append(p)
+    if merged == given:
+        return False
+    args["changedPaths"] = merged
+    return True
 
 
 def _inject_v1(args: dict, data: dict, top: Path | None, warnings: list) -> bool:

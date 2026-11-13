@@ -164,11 +164,11 @@ test('harness: the script has no Node API, clock or randomness, like the real ru
 
 test('selftest echoes', async () => {
   const script = join(here, '..', '..', 'workflows', 'gk-selftest.js')
-  const full = await runWorkflow(script, { profile: 'opus', project: { name: 'P', root: '/r', guards: [1, 2] }, scratchpad: '/s' })
-  assert.deepEqual(full.result, { profile: 'opus', project: { name: 'P', root: '/r', guards: 2 }, scratchpad: '/s' })
+  const full = await runWorkflow(script, { profile: 'opus', seat: 'opus-medium', dials: ['nofable'], project: { name: 'P', root: '/r', guards: [1, 2] }, scratchpad: '/s' })
+  assert.deepEqual(full.result, { profile: 'opus', seat: 'opus-medium', dials: ['nofable'], project: { name: 'P', root: '/r', guards: 2 }, scratchpad: '/s' })
   assert.equal(full.calls.length, 0)
   const bare = await runWorkflow(script, undefined)
-  assert.deepEqual(bare.result, { profile: null, project: null, scratchpad: null })
+  assert.deepEqual(bare.result, { profile: null, seat: null, dials: null, project: null, scratchpad: null })
   const part = await runWorkflow(script, { project: {} })
   assert.deepEqual(part.result.project, { name: null, root: null, guards: 0 })
   const fixture = JSON.parse(readFileSync(join(here, 'fixtures', 'goodricke.gk-project.json'), 'utf8'))
@@ -178,11 +178,11 @@ test('selftest echoes', async () => {
 test('selftest echoes string args', async () => {
   // Args can arrive as a JSON string, as the five gk-* scripts already allow.
   const script = join(here, '..', '..', 'workflows', 'gk-selftest.js')
-  const str = await runWorkflow(script, JSON.stringify({ profile: 'opus', project: { name: 'X', root: '/r', guards: ['g'] } }))
-  assert.deepEqual(str.result, { profile: 'opus', project: { name: 'X', root: '/r', guards: 1 }, scratchpad: null })
+  const str = await runWorkflow(script, JSON.stringify({ seat: 'fable-medium', dials: [], project: { name: 'X', root: '/r', guards: ['g'] } }))
+  assert.deepEqual(str.result, { profile: null, seat: 'fable-medium', dials: [], project: { name: 'X', root: '/r', guards: 1 }, scratchpad: null })
   assert.equal(str.calls.length, 0)
   for (const odd of ['not json', 'null', '5', '"opus"']) {
     const r = await runWorkflow(script, odd)
-    assert.deepEqual(r.result, { profile: null, project: null, scratchpad: null }, odd)
+    assert.deepEqual(r.result, { profile: null, seat: null, dials: null, project: null, scratchpad: null }, odd)
   }
 })
