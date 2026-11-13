@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "priceSource": "/tmp/claude-1000/bundled-skills/2.1.321/b65716ee1119fb9975c64126fa926707/claude-api/shared/models.md (lines 78-91); cache writes are the 5-minute rate, 1.25x input, from shared/cost-optimization.md line 25; prices per million tokens",
+  "priceSource": "/tmp/claude-1000/bundled-skills/2.1.321/b65716ee1119fb9975c64126fa926707/claude-api/shared/models.md (lines 78-91); cacheWrite is the 5-minute rate, 1.25x input, from shared/cost-optimization.md line 25; cacheWrite1h is the 1-hour rate, 2x input (Fable's $16 from the model reference; Haiku's derived); prices per million tokens",
   "efforts": [
     "low",
     "medium",
@@ -17,18 +17,22 @@
         "input": 0.1,
         "output": 0.5,
         "cacheWrite": 0.125,
+        "cacheWrite1h": 0.2,
         "cacheRead": 0.01,
         "derived": [
-          "cacheRead"
+          "cacheRead",
+          "cacheWrite1h"
         ]
       },
       "priceOver100k": {
         "input": 0.5,
         "output": 2.5,
         "cacheWrite": 0.625,
+        "cacheWrite1h": 1.0,
         "cacheRead": 0.05,
         "derived": [
-          "cacheRead"
+          "cacheRead",
+          "cacheWrite1h"
         ]
       },
       "priceDate": "2026-11-13"
@@ -41,6 +45,7 @@
         "input": 2,
         "output": 10,
         "cacheWrite": 2.5,
+        "cacheWrite1h": 4,
         "cacheRead": 0.1
       },
       "priceDate": "2026-11-13"
@@ -53,6 +58,7 @@
         "input": 4,
         "output": 20,
         "cacheWrite": 5,
+        "cacheWrite1h": 8,
         "cacheRead": 0.2
       },
       "priceDate": "2026-11-13"
@@ -65,6 +71,7 @@
         "input": 8,
         "output": 40,
         "cacheWrite": 10,
+        "cacheWrite1h": 16,
         "cacheRead": 0.2
       },
       "priceDate": "2026-11-13"

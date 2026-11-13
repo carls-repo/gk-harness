@@ -30,6 +30,9 @@ AGENT_NAME = re.compile(r"^worker-[a-z0-9-]+$")
 EXTRA_AGENT_NAMES = ("Explore",)
 REQUIRED = ("version", "efforts", "models", "tiers")
 PRICE_KEYS = ("input", "output", "cacheWrite", "cacheRead")
+# Optional price keys: positive when present. cacheWrite1h is the 1-hour cache write rate
+# (cacheWrite is the 5-minute one).
+OPTIONAL_PRICE_KEYS = ("cacheWrite1h",)
 WHO = ("seat", "worker", "workflow")
 ON_FAIL = ("rerun", "unfinished", "hold")
 SEAT_TIER = "seat"
@@ -130,7 +133,7 @@ def _model_problems(models: dict) -> list:
             if not isinstance(price, dict):
                 out.append("model %s: %s must be an object" % (alias, field))
                 continue
-            for key in PRICE_KEYS:
+            for key in PRICE_KEYS + tuple(k for k in OPTIONAL_PRICE_KEYS if k in price):
                 if not _positive(price.get(key)):
                     out.append("model %s: %s.%s must be a positive number" % (alias, field, key))
     return out

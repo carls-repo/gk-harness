@@ -23,18 +23,23 @@ S2 = "22222222-2222-4222-8222-222222222222"
 # Prices per million tokens, fixed here so the arithmetic below does not move with routes.json.
 ROUTES = {"models": {
     "haiku": {"id": "claude-haiku-5-5",
-              "price": {"input": 0.1, "output": 0.5, "cacheWrite": 0.125, "cacheRead": 0.01},
+              "price": {"input": 0.1, "output": 0.5, "cacheWrite": 0.125, "cacheWrite1h": 0.2,
+                        "cacheRead": 0.01},
               "priceOver100k": {"input": 0.5, "output": 2.5, "cacheWrite": 0.625,
-                                "cacheRead": 0.05}},
+                                "cacheWrite1h": 1.0, "cacheRead": 0.05}},
     "sonnet": {"id": "claude-sonnet-5-5",
-               "price": {"input": 2, "output": 10, "cacheWrite": 2.5, "cacheRead": 0.1}},
+               "price": {"input": 2, "output": 10, "cacheWrite": 2.5, "cacheWrite1h": 4,
+                         "cacheRead": 0.1}},
     "opus": {"id": "claude-opus-5-5",
-             "price": {"input": 4, "output": 20, "cacheWrite": 5, "cacheRead": 0.2}},
+             "price": {"input": 4, "output": 20, "cacheWrite": 5, "cacheWrite1h": 8,
+                       "cacheRead": 0.2}},
     "fable": {"id": "claude-fable-5-2",
-              "price": {"input": 8, "output": 40, "cacheWrite": 10, "cacheRead": 0.2}},
-}}
+              "price": {"input": 8, "output": 40, "cacheWrite": 10, "cacheWrite1h": 16,
+                        "cacheRead": 0.2}},
+}, "classes": {"known-cause": {}, "feature": {}, "chat": {}}}
+# msg_sub1 writes 2,000 cache tokens: 500 for an hour (at 4) and 1,500 for 5 minutes (at 2.5).
 COST = {"msg_route1": 0.00024, "msg_dup": 0.0204, "msg_haiku_big": 0.0305,
-        "msg_haiku_small": 0.006, "msg_route2": 0.012, "msg_unknown": 0.0, "msg_sub1": 0.0173,
+        "msg_haiku_small": 0.006, "msg_route2": 0.012, "msg_unknown": 0.0, "msg_sub1": 0.01805,
         "msg_wf1": 0.0048, "msg_other": 0.002}
 TOTAL = sum(COST.values())
 
@@ -155,7 +160,19 @@ class IterCallsTests(ReportTestCase):
             "msg_route1": "known-cause", "msg_dup": "known-cause",
             "msg_haiku_big": "known-cause", "msg_haiku_small": "known-cause",
             "msg_sub1": "known-cause", "msg_route2": "feature", "msg_unknown": "feature",
-            "msg_wf1": "feature", "msg_other": None})
+            "msg_wf1": "feature", "msg_other": "Hartwell"})
+
+    def test_route_words_outside_the_classes_are_unrecognised(self):
+        calls = self.calls(classes=set(ROUTES["classes"]))
+        self.assertEqual(calls["msg_other"]["route_class"], report.UNRECOGNISED)
+        self.assertEqual(calls["msg_sub1"]["route_class"], "known-cause")
+
+    def test_the_one_hour_cache_split_is_carried(self):
+        calls = self.calls()
+        sub = calls["msg_sub1"]
+        self.assertEqual((sub["cache_write"], sub["cache_write_1h"], sub["cache_write_5m"]),
+                         (2000, 500, 1500))
+        self.assertNotIn("cache_write_1h", calls["msg_dup"])
 
 
 class PriceTests(unittest.TestCase):
@@ -165,6 +182,19 @@ class PriceTests(unittest.TestCase):
     def test_formula(self):
         self.assertAlmostEqual(report.price(ROUTES, self.call("claude-sonnet-5-5", 1000, 1000,
                                                               2000, 3000)), 0.0173)
+
+    def test_one_hour_cache_writes_take_their_own_price(self):
+        call = dict(self.call("claude-opus-5-5", 0, 0, 3000, 0), cache_write_1h=1000,
+                    cache_write_5m=2000)
+        self.assertAlmostEqual(report.price(ROUTES, call), (1000 * 8 + 2000 * 5) / 1e6)
+        # Without the split, every cache write is at the 5-minute price, as before.
+        self.assertAlmostEqual(report.price(ROUTES, self.call("claude-opus-5-5", 0, 0, 3000, 0)),
+                               3000 * 5 / 1e6)
+        # Haiku over 100K: the 1-hour part at priceOver100k's cacheWrite1h.
+        big = dict(self.call("claude-haiku-5-5", 1, 0, 200000, 0), cache_write_1h=100000,
+                   cache_write_5m=100000)
+        self.assertAlmostEqual(report.price(ROUTES, big),
+                               (1 * 0.5 + 100000 * 1.0 + 100000 * 0.625) / 1e6)
 
     def test_haiku_over_100k_takes_the_higher_price(self):
         self.assertAlmostEqual(report.price(ROUTES, self.call("claude-haiku-5-5", 50000, 1000,
@@ -228,7 +258,24 @@ class SummariseTests(ReportTestCase):
         self.assertAlmostEqual(rows["known-cause"], sum(COST[m] for m in (
             "msg_route1", "msg_dup", "msg_haiku_big", "msg_haiku_small", "msg_sub1")))
         self.assertAlmostEqual(rows["feature"], COST["msg_route2"] + COST["msg_wf1"])
-        self.assertAlmostEqual(rows[report.NO_ROUTE], COST["msg_other"])
+        self.assertAlmostEqual(rows[report.UNRECOGNISED], COST["msg_other"])
+        self.assertNotIn(report.NO_ROUTE, rows)
+
+    def test_a_prose_route_word_is_never_printed(self):
+        # summarise buckets it even when iter_calls was given no classes.
+        for as_json in (False, True):
+            self.assertNotIn("Hartwell", report.render(self.summary, as_json=as_json))
+        self.assertIn(report.UNRECOGNISED, report.render(self.summary, as_json=False))
+
+    def test_tokens_line_shows_one_hour_cache_writes(self):
+        self.assertEqual(self.summary["totals"]["cache_write_1h"], 500)
+        line = [l for l in report.render(self.summary, as_json=False).splitlines()
+                if l.startswith("Tokens:")][0]
+        self.assertIn("cache write 2.0K (1-hour 500)", line)
+
+    def test_no_older_id_note_when_every_id_is_current(self):
+        self.assertEqual(self.summary["notes"], [])
+        self.assertNotIn(report.OLDER_IDS, report.render(self.summary, as_json=False))
 
     def test_render_text(self):
         text = report.render(self.summary, as_json=False)
@@ -246,6 +293,36 @@ class SummariseTests(ReportTestCase):
                          "On a subscription, cost is a proxy for your share of the usage limits.")
 
 
+class RenderTests(unittest.TestCase):
+    def call(self, day, model="claude-opus-5-5"):
+        return {"session": "s", "agent": "seat", "workflow": None, "workflow_run": None,
+                "stage": None, "label": None, "model": model, "input": 1, "output": 1,
+                "cache_write": 0, "cache_read": 0, "message_id": day + model,
+                "timestamp": day + "T00:00:00Z", "day": day, "route_class": None}
+
+    def test_by_day_text_shows_the_latest_days_in_date_order(self):
+        days = ["2026-10-%02d" % d for d in range(1, 13)]
+        summary = report.summarise([self.call(d) for d in days], ROUTES)
+        self.assertEqual([r["key"] for r in summary["byDay"]], days)
+        text = report.render(summary, as_json=False)
+        block = text.split("\nBy day\n", 1)[1].split("\n\n", 1)[0].splitlines()
+        shown = [l.split()[0] for l in block[1:] if l.strip().startswith("2026-")]
+        self.assertEqual(shown, days[2:])
+        self.assertIn("2 earlier", block[-1])
+
+    def test_older_model_ids_get_a_note(self):
+        summary = report.summarise([self.call("2026-11-01", "claude-fable-5-1"),
+                                    self.call("2026-11-02", "claude-fable-5-2")], ROUTES)
+        self.assertEqual(summary["notes"], [report.OLDER_IDS])
+        self.assertEqual(report.OLDER_IDS,
+                         "Older model ids are priced at their alias's current price.")
+        text = report.render(summary, as_json=False)
+        block = text.split("\nBy model\n", 1)[1].split("\n\n", 1)[0].splitlines()
+        self.assertEqual(block[-1], report.OLDER_IDS)
+        self.assertEqual(json.loads(report.render(summary, as_json=True))["notes"],
+                         [report.OLDER_IDS])
+
+
 class CommandTests(ReportTestCase):
     def test_json_parses_and_prices_from_routes_json(self):
         code, out, err = run_cli(["report", "--config-dir", str(self.cdir), "--json"])
@@ -256,6 +333,9 @@ class CommandTests(ReportTestCase):
         self.assertAlmostEqual(data["totals"]["cost"], expected)
         self.assertEqual(data["totals"]["calls"], len(COST))
         self.assertNotIn("SECRET", out)
+        self.assertNotIn("Hartwell", out)
+        self.assertEqual({r["key"] for r in data["byClass"]["rows"]},
+                         {"known-cause", "feature", report.UNRECOGNISED})
 
     def test_since_and_session_and_equals_form(self):
         code, out, err = run_cli(["report", "--since=2026-11-05", "--config-dir",

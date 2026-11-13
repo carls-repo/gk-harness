@@ -1127,7 +1127,8 @@ def _price_report(values: dict, as_json: bool) -> int:
     except RoutesError as e:
         sys.stderr.write("gk-harness: %s\n" % e)
         return 2
-    summary = report.summarise(report.iter_calls(cdir, since, values.get(SESSION)), routes)
+    summary = report.summarise(report.iter_calls(cdir, since, values.get(SESSION),
+                                                 classes=routes.get("classes") or {}), routes)
     summary.update(since=since, session=values.get(SESSION))
     try:
         sys.stdout.write(report.render(summary, as_json))

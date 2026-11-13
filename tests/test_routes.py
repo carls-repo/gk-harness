@@ -99,6 +99,28 @@ class RoutesTests(unittest.TestCase):
         r["models"]["opus"]["price"]["input"] = 0
         self.assertTrue(any("opus" in p for p in rt.problems(r)))
 
+    def test_one_hour_cache_write_price_is_optional_but_positive(self):
+        r = fixture()
+        self.assertEqual(rt.problems(r), [])
+        r["models"]["opus"]["price"]["cacheWrite1h"] = 2
+        self.assertEqual(rt.problems(r), [])
+        for bad in (0, -1, "2", None, True):
+            with self.subTest(bad=bad):
+                r["models"]["opus"]["price"]["cacheWrite1h"] = bad
+                self.assertProblem(r, "model opus: price.cacheWrite1h")
+        r = fixture()
+        r["models"]["opus"]["priceOver100k"] = {"input": 1, "output": 1, "cacheWrite": 1,
+                                                "cacheRead": 1, "cacheWrite1h": 0}
+        self.assertProblem(r, "model opus: priceOver100k.cacheWrite1h")
+
+    def test_repo_prices_one_hour_cache_writes_for_every_model(self):
+        models = repo()["models"]
+        for alias, m in models.items():
+            for field in ("price", "priceOver100k"):
+                if field in m:
+                    self.assertGreater(m[field].get("cacheWrite1h", 0), m[field]["cacheWrite"],
+                                       "%s %s" % (alias, field))
+
     def test_invalid_json_raises(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "routes.json"

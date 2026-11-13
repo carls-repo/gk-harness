@@ -16,7 +16,8 @@ where it was first found.
 
 Privacy: the report prints only numbers, ids, model names, workflow names, stage labels and
 dates. Message content is never printed; the seat's text is read in memory only, to find its
-"Route: <class>" lines. Files are read line by line, never whole.
+"Route: <class>" lines, and only a word that is a class in routes.json is kept; any other is
+counted as UNRECOGNISED. Files are read line by line, never whole.
 """
 from __future__ import annotations
 
@@ -31,6 +32,10 @@ from typing import Any, Iterable, Iterator
 HEADER = "On a subscription, cost is a proxy for your share of the usage limits."
 TITLE = "gk-harness report: Claude Code transcripts priced from routes.json"
 NO_ROUTE = "(no route line)"
+# A Route: line whose word is not a class in routes.json: the word may be prose, so it is
+# never printed.
+UNRECOGNISED = "(unrecognised route line)"
+OLDER_IDS = "Older model ids are priced at their alias's current price."
 NO_WORKFLOW = "(not in a workflow)"
 NO_STAGE = "(no stage)"
 SEAT = "seat"
@@ -107,6 +112,17 @@ def _texts(content: Any) -> Iterator[str]:
                 yield block["text"]
 
 
+def _cache_split(usage: dict) -> dict:
+    """{cache_write_1h, cache_write_5m} when the usage line splits its cache writes by
+    lifetime; {} when it does not."""
+    split = usage.get("cache_creation")
+    if not isinstance(split, dict) or not ("ephemeral_1h_input_tokens" in split
+                                           or "ephemeral_5m_input_tokens" in split):
+        return {}
+    return {"cache_write_1h": _int(split.get("ephemeral_1h_input_tokens")),
+            "cache_write_5m": _int(split.get("ephemeral_5m_input_tokens"))}
+
+
 def _read_calls(path: Path, routes_out: list | None) -> dict:
     """{message id: call} for the file's assistant lines, in first-seen order with the last
     line's usage. With routes_out, appends (timestamp, class) for each Route: line found."""
@@ -136,7 +152,8 @@ def _read_calls(path: Path, routes_out: list | None) -> dict:
                       "input": _int(usage.get("input_tokens")),
                       "output": _int(usage.get("output_tokens")),
                       "cache_write": _int(usage.get("cache_creation_input_tokens")),
-                      "cache_read": _int(usage.get("cache_read_input_tokens"))}
+                      "cache_read": _int(usage.get("cache_read_input_tokens")),
+                      **_cache_split(usage)}
     return calls
 
 
@@ -237,19 +254,21 @@ def _session_files(project: Path, sid: str, cutoff: float | None) -> Iterator[tu
                          "stage": phase or label, "label": label}
 
 
-def iter_calls(claude_dir: Path, since: str | None = None,
-               session: str | None = None) -> Iterator[dict]:
+def iter_calls(claude_dir: Path, since: str | None = None, session: str | None = None,
+               classes: Iterable[str] | None = None) -> Iterator[dict]:
     """Every model call in the transcripts under claude_dir/projects, once per message id.
 
     Each call: {session, agent, workflow, workflow_run, stage, label, model, input, output,
     cache_write, cache_read, message_id, timestamp, day, route_class}. since (YYYY-MM-DD) keeps
     calls on or after that day (UTC); session keeps the sessions whose id is it or starts with
     it. route_class is the latest Route: line the seat wrote in the session at or before the
-    call, or None."""
+    call, or None; with classes, a word not among them becomes UNRECOGNISED. cache_write_1h and
+    cache_write_5m are there when the usage line splits its cache writes."""
     projects = Path(claude_dir) / "projects"
     if not projects.is_dir():
         return
     cutoff = _cutoff(since)
+    known = None if classes is None else set(classes)
     seen: set = set()
     for project in sorted(p for p in projects.iterdir() if p.is_dir()):
         for sid in _sessions(project):
@@ -259,6 +278,9 @@ def iter_calls(claude_dir: Path, since: str | None = None,
             for path, who in _session_files(project, sid, cutoff):
                 calls = _read_calls(path, events if who["agent"] == SEAT else None)
                 if who["agent"] == SEAT:
+                    if known is not None:
+                        events = [(ts, cls if cls in known else UNRECOGNISED)
+                                  for ts, cls in events]
                     events.sort()
                 stamps = [e[0] for e in events]
                 for mid, call in calls.items():
@@ -296,9 +318,14 @@ def price(routes: dict, call: dict) -> float:
     rates = entry.get("price") or {}
     if _prompt(call) > OVER_100K and isinstance(entry.get("priceOver100k"), dict):
         rates = entry["priceOver100k"]
+    # The 1-hour part of the cache writes, when the line says, at cacheWrite1h; the rest at
+    # cacheWrite (the 5-minute rate).
+    write, write_1h = call.get("cache_write", 0), min(call.get("cache_write_1h", 0),
+                                                       call.get("cache_write", 0))
     return (call.get("input", 0) * rates.get("input", 0)
             + call.get("output", 0) * rates.get("output", 0)
-            + call.get("cache_write", 0) * rates.get("cacheWrite", 0)
+            + (write - write_1h) * rates.get("cacheWrite", 0)
+            + write_1h * rates.get("cacheWrite1h", rates.get("cacheWrite", 0))
             + call.get("cache_read", 0) * rates.get("cacheRead", 0)) / 1e6
 
 
@@ -306,10 +333,10 @@ def _add(table: dict, key: str, call: dict, cost: float) -> None:
     row = table.get(key)
     if row is None:
         row = table[key] = {"key": key, "calls": 0, "cost": 0.0, "share": 0.0, "input": 0,
-                            "output": 0, "cache_write": 0, "cache_read": 0}
+                            "output": 0, "cache_write": 0, "cache_write_1h": 0, "cache_read": 0}
     row["calls"] += 1
     row["cost"] += cost
-    for k in ("input", "output", "cache_write", "cache_read"):
+    for k in ("input", "output", "cache_write", "cache_write_1h", "cache_read"):
         row[k] += call.get(k, 0)
 
 
@@ -325,7 +352,10 @@ def _rows(table: dict, total: float, by_key: bool = False) -> list:
 def summarise(calls: Iterable[dict], routes: dict) -> dict:
     """Totals, Fable's share, Haiku calls over 100K, the unknown models, and the cost grouped
     by model, day, workflow, workflow run, stage, agent and session; per route class as best
-    effort."""
+    effort: a route word that is not a class in routes.json counts as UNRECOGNISED."""
+    known = set(routes.get("classes") or {})
+    models = routes.get("models") or {}
+    older = False
     tables: dict = {g: {} for g in GROUPS}
     classes: dict = {}
     unknown: dict = {}
@@ -346,7 +376,11 @@ def summarise(calls: Iterable[dict], routes: dict) -> dict:
                 "bySession": call.get("session") or "?"}
         for group, key in keys.items():
             _add(tables[group], key, call, cost)
-        _add(classes, call.get("route_class") or NO_ROUTE, call, cost)
+        route = call.get("route_class")
+        _add(classes, NO_ROUTE if not route else route if route in known else UNRECOGNISED,
+             call, cost)
+        if name is not None and call.get("model") != (models.get(name) or {}).get("id"):
+            older = True
         _add(totals, "total", call, cost)
         if name is None:
             _add(unknown, call.get("model") or "?", call, 0.0)
@@ -358,10 +392,10 @@ def summarise(calls: Iterable[dict], routes: dict) -> dict:
             over_calls += 1
     total = totals["total"]["cost"] if totals else 0.0
     head = totals.get("total") or {"calls": 0, "cost": 0.0, "input": 0, "output": 0,
-                                   "cache_write": 0, "cache_read": 0}
+                                   "cache_write": 0, "cache_write_1h": 0, "cache_read": 0}
     summary = {"since": None, "session": None,
                "totals": {k: head[k] for k in ("calls", "cost", "input", "output",
-                                               "cache_write", "cache_read")},
+                                               "cache_write", "cache_write_1h", "cache_read")},
                "fable": {"calls": fable_calls, "cost": fable,
                          "share": fable / total if total else 0.0},
                "haikuOver100k": {"calls": over_calls, "cost": over}}
@@ -370,6 +404,7 @@ def summarise(calls: Iterable[dict], routes: dict) -> dict:
     summary["byClass"] = {"bestEffort": True, "note": CLASS_NOTE,
                           "rows": _rows(classes, total)}
     summary["unknownModels"] = _rows(unknown, total)
+    summary["notes"] = [OLDER_IDS] if older else []
     return summary
 
 
@@ -384,11 +419,12 @@ def _tokens(n: int) -> str:
     return str(n)
 
 
-def _table(title: str, rows: list, note: str | None = None) -> list:
+def _table(title: str, rows: list, note: str | None = None, latest: bool = False) -> list:
+    """Up to TOP rows: the first ones, or with latest the last ones (still in their order)."""
     out = ["", title + (" (%s)" % note if note else "")]
     if not rows:
         return out + ["  none"]
-    shown = rows[:TOP]
+    shown = rows[-TOP:] if latest else rows[:TOP]
     width = min(max(len(r["key"]) for r in shown), 48)
     out.append("  %-*s %7s %11s %6s %8s %8s %8s %8s" % (width, "", "calls", "cost", "share",
                                                        "in", "out", "c-write", "c-read"))
@@ -398,7 +434,8 @@ def _table(title: str, rows: list, note: str | None = None) -> list:
             width, key, r["calls"], _money(r["cost"]), 100 * r["share"], _tokens(r["input"]),
             _tokens(r["output"]), _tokens(r["cache_write"]), _tokens(r["cache_read"])))
     if len(rows) > TOP:
-        out.append("  ... and %d more (--json lists them all)" % (len(rows) - TOP))
+        out.append("  ... and %d %s (--json lists them all)"
+                   % (len(rows) - TOP, "earlier" if latest else "more"))
     return out
 
 
@@ -413,11 +450,13 @@ def render(summary: dict, as_json: bool) -> str:
              "Total: %s over %d calls; Fable %s (%.1f%%, %d calls); Haiku over 100K: %d calls, %s"
              % (_money(t["cost"]), t["calls"], _money(f["cost"]), 100 * f["share"], f["calls"],
                 h["calls"], _money(h["cost"])),
-             "Tokens: in %s, out %s, cache write %s, cache read %s"
+             "Tokens: in %s, out %s, cache write %s (1-hour %s), cache read %s"
              % (_tokens(t["input"]), _tokens(t["output"]), _tokens(t["cache_write"]),
-                _tokens(t["cache_read"]))]
+                _tokens(t["cache_write_1h"]), _tokens(t["cache_read"]))]
     for group in GROUPS:
-        lines += _table(TITLES[group], summary[group])
+        lines += _table(TITLES[group], summary[group], latest=group == "byDay")
+        if group == "byModel":
+            lines += summary.get("notes") or []
     lines += _table("By route class", summary["byClass"]["rows"], summary["byClass"]["note"])
     if summary["unknownModels"]:
         lines += _table("Unknown models (counted at no cost)", summary["unknownModels"])
