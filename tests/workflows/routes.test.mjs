@@ -320,9 +320,9 @@ test('runStage: under nofable a Fable stage runs on its noFable tier and is reco
 
 // ---------------- the workflows on the table (Task 9: gk-research, gk-diagnose; Task 10: gk-review; Task 11: gk-build) ----------------
 
-// The six rules, computed from routes.json alone, for a stage run with ctx {} under the given
-// dials: [model, effort], or null when the stage does not run. ctx {} meets no `when`
-// condition and names no implementer or author, so rules 2 and 4 never fire here.
+// The six rules, computed from routes.json alone, for a stage run with ctx (default {}) under
+// the given dials: [model, effort], or null when the stage does not run. ctx names no
+// implementer or author, so rule 4 never fires here; rule 2 fires on a true ctx flag.
 const FLOOR = 'opus-high'
 const APEX_TIER = 'fable-high'
 const capOf = (name) => {
@@ -333,9 +333,11 @@ const higherOf = (a, b) => {
   const [x, y] = [capOf(a), capOf(b)]
   return (y[0] !== x[0] ? y[0] > x[0] : y[1] > x[1]) ? b : a
 }
-function expectedRoute(stage, dials) {
+function expectedRoute(stage, dials, ctx = {}) {
   const s = routes.stages[stage]
   let tier = s.tier === 'byClass' ? s.byClass.judgement : s.tier // rule 1
+  const met = Object.entries(s.when || {}).filter(([flag]) => ctx[flag] === true).map(([, t]) => t)
+  if (met.length) tier = met.reduce(higherOf) // rule 2
   if (s.atLeast === 'implementer') tier = higherOf(tier, FLOOR) // rule 3
   if (dials.includes('fable') && s.apex === true) tier = APEX_TIER // rule 5
   if (dials.includes('nofable') && routes.tiers[tier].model === 'fable') { // rule 6
@@ -366,12 +368,28 @@ const fullReplies = {
   'gk-review': () => reviewReplies(),
   // Two judgement pieces in one wave; the check runs (make check) and every stage replies minimally.
   'gk-build': () => [{ match: /^plan-check$/, reply: () => ({ ok: true, problems: [], order: [['a', 'b']], classes: [] }) }],
+  // Three proposers reply minimally; each judge scores the proposals it is shown and names P1.
+  'gk-design': () => designReplies(),
 }
 const fullArgs = {
   'gk-research': () => ({ question: 'Where is the retry limit set?', depth: 'thorough', project: {} }),
   'gk-diagnose': () => ({ symptom: 'The list shows a deleted item until the second reload.', project: {} }),
   'gk-review': () => ({ target: 'main..HEAD', project: {} }),
   'gk-build': () => ({ plan: 'docs/plan.md', check: 'make check', pieces: [{ name: 'a', files: ['src/a.ts'], brief: 'Add a.' }, { name: 'b', files: ['src/b.ts'], brief: 'Add b.' }], project: {} }),
+  'gk-design': () => ({ brief: 'Add a dashboard of open items to the home page.', ui: true, project: {} }),
+}
+// gk-design: each judge scores every proposal it is shown (P1 highest) and names P1. `judge`
+// (prompt, opts, sheet) replaces a judge's reply, given the sheet it would have returned;
+// `signOff` (prompt, opts) answers the sign-off agent, which otherwise replies minimally.
+function designReplies({ judge = null, signOff = null } = {}) {
+  const sheet = (prompt) => {
+    const keys = [...new Set([...prompt.matchAll(/^=== (P\d) /gm)].map((m) => m[1]))].sort()
+    return { scores: keys.map((k) => ({ title: k, fit: k === 'P1' ? 9 : 6, simplicity: 7, risk: 7, design: 0, reason: 'r' })), winner: 'P1', grafts: [] }
+  }
+  return [
+    { match: /^judge:/, reply: judge ? (prompt, opts) => judge(prompt, opts, sheet(prompt)) : sheet },
+    ...(signOff ? [{ match: /^sign-off$/, reply: signOff }] : []),
+  ]
 }
 function reviewReplies({ detected = {}, scopeDead = false, judge = null } = {}) {
   return [
@@ -435,7 +453,7 @@ test('dead critic re-runs on opus high: under the fable dial gk-research\'s crit
 
 test('retired args are accepted: profile and escalate run, are ignored, and log the retired line once; no Profile: line', async () => {
   const retired = `profile is retired; routes come from routes.json v${routes.version}`
-  for (const wf of ['gk-research', 'gk-diagnose', 'gk-review', 'gk-build']) {
+  for (const wf of ['gk-research', 'gk-diagnose', 'gk-review', 'gk-build', 'gk-design']) {
     const plain = await runFull(wf)
     for (const extra of [{ profile: 'opus', escalate: true }, { profile: 'fable' }, { escalate: false }, { profile: 'nonsense' }]) {
       const { calls, logs, result } = await runFull(wf, extra)
@@ -791,4 +809,124 @@ test('dead plan check and judge, gk-build: each re-runs once on its noFable tier
   assert.ok(plain.logs.includes('Judge on fable medium'), plain.logs.join('\n'))
   const off = await runBuild({ pieces, ui: true, dials: ['nofable'] }, [buildPlanReply([['a']])])
   assert.ok(off.logs.includes('Judge on opus xhigh (ui work)'), off.logs.join('\n'))
+})
+
+// ---------------- gk-design: proposals, the judge panel and the UI sign-off (Task 12) ----------------
+
+const runDesign = (extra = {}, replies = designReplies()) => runFull('gk-design', extra, replies)
+const DESIGN_DIALS = [[], ['nofable'], ['fable']]
+const pairOf = (c) => [c.model, c.effort]
+const OWED = 'UI sign-off still owed by Fable'
+// [ui, dials, the proposers' tier, the judges' tier]: the six rules, written out.
+const DESIGN_TIERS = [
+  [true, [], 'fable-medium', 'fable-high'],
+  [true, ['nofable'], 'opus-high', 'opus-xhigh'],
+  [true, ['fable'], 'fable-medium', 'fable-high'],
+  [false, [], 'opus-high', 'fable-high'],
+  [false, ['nofable'], 'opus-high', 'opus-xhigh'],
+  [false, ['fable'], 'opus-high', 'fable-high'],
+]
+
+test('stage tiers equal routes.json, gk-design: proposals and judges run on the tier the six rules give, ui true and false, under no dials, nofable and fable', async () => {
+  assert.ok(readFileSync(join(workflowsDir, 'gk-design.js'), 'utf8').includes('}\n// gk-harness:args-v2\n'), 'gk-design: the args-v2 marker')
+  for (const [ui, dials, proposeTier, judgeTier] of DESIGN_TIERS) {
+    const name = `ui ${ui} ${JSON.stringify(dials)}`
+    const { calls, result, logs } = await runDesign({ ui, dials })
+    const at = (phase) => calls.filter((c) => c.phase === phase)
+    assert.deepEqual(expectedRoute('gk-design.propose', dials, { ui }), tierPair(proposeTier), `${name}: the table agrees with routes.json (propose)`)
+    assert.deepEqual(expectedRoute('gk-design.judge', dials, { ui }), tierPair(judgeTier), `${name}: the table agrees with routes.json (judge)`)
+    assert.deepEqual(at('Propose').map(pairOf), [tierPair(proposeTier), tierPair(proposeTier), tierPair(proposeTier)], `${name}: proposers`)
+    assert.deepEqual(at('Judge').map(pairOf), [tierPair(judgeTier), tierPair(judgeTier)], `${name}: judges`)
+    assert.deepEqual(at('Sign-off'), [], `${name}: no sign-off agent (the judges ran on fable, or fable is off, or no ui)`)
+    assert.deepEqual(calls.map((c) => c.phase), [...at('Propose'), ...at('Judge')].map((c) => c.phase), `${name}: every call is a proposer or a judge`)
+    // The log names each stage's route.
+    const [pm, pe] = tierPair(proposeTier)
+    const [jm, je] = tierPair(judgeTier)
+    assert.ok(logs.some((l) => l.startsWith('Proposing 3 approaches (') && l.includes(`) on ${pm} ${pe}; angles not run:`)), `${name}: ${logs.join('\n')}`)
+    assert.ok(logs.includes(`3 proposals in; convening 2 ${jm} ${je} judge(s)`), `${name}: ${logs.join('\n')}`)
+    assert.equal(result.routing.routes, routes.version)
+    assert.deepEqual(result.routing.dials, dials)
+    // Off tier: under nofable the stages moved off a Fable tier, and a ui sign-off that cannot run.
+    const off = !dials.includes('nofable') ? [] : [
+      ...(ui ? at('Propose').map((c) => ({ stage: 'gk-design.propose', label: c.label, tier: 'opus-high', reason: 'nofable' })) : []),
+      ...at('Judge').map((c) => ({ stage: 'gk-design.judge', label: c.label, tier: 'opus-xhigh', reason: 'nofable' })),
+      ...(ui ? [{ stage: 'gk-design.sign-off', label: 'sign-off', tier: null, reason: 'nofable' }] : []),
+    ]
+    assert.deepEqual(result.routing.offTier, off, `${name}: offTier`)
+  }
+})
+
+test('no sign-off agent when judges ran on fable, gk-design: their judgement is the UI sign-off; no ui, no sign-off', async () => {
+  for (const dials of [[], ['fable']]) {
+    const { calls, result, logs } = await runDesign({ ui: true, dials })
+    assert.ok(calls.every((c) => c.label !== 'sign-off' && c.phase !== 'Sign-off'), `${JSON.stringify(dials)}: no sign-off agent`)
+    assert.deepEqual(result.signOff, { satisfiedBy: 'judges', tier: 'fable-high' }, JSON.stringify(dials))
+    assert.ok(logs.includes('UI sign-off: satisfied by the fable high judge panel; no separate sign-off agent'), logs.join('\n'))
+  }
+  for (const dials of DESIGN_DIALS) {
+    const { calls, result, logs } = await runDesign({ ui: false, dials })
+    assert.ok(calls.every((c) => c.label !== 'sign-off'), `no ui ${JSON.stringify(dials)}: no sign-off agent`)
+    assert.equal(result.signOff, null, `no ui ${JSON.stringify(dials)}`)
+    assert.ok(!logs.some((l) => l.startsWith('UI sign-off')), logs.join('\n'))
+  }
+  // One Fable judge dies and is re-run on opus; the other returns its sheet from fable, so the
+  // panel still carries a Fable judgement and no sign-off agent runs.
+  const { calls, result } = await runDesign({ ui: true }, designReplies({ judge: (prompt, opts, sheet) => (opts.label === 'judge:1' && opts.model === 'fable' ? null : sheet) }))
+  assert.deepEqual(calls.filter((c) => c.label === 'judge:1').map(pairOf), [['fable', 'high'], ['opus', 'xhigh']])
+  assert.deepEqual(calls.filter((c) => c.label === 'judge:2').map(pairOf), [['fable', 'high']])
+  assert.ok(calls.every((c) => c.label !== 'sign-off'))
+  assert.deepEqual(result.signOff, { satisfiedBy: 'judges', tier: 'fable-high' })
+  assert.deepEqual(result.routing.offTier, [{ stage: 'gk-design.judge', label: 'judge:1', tier: 'opus-xhigh', reason: 'onFail' }])
+})
+
+test('sign-off pending when fable is off, gk-design: the judges run on opus xhigh, no sign-off agent runs, and the sign-off is owed', async () => {
+  const { calls, result, logs } = await runDesign({ ui: true, dials: ['nofable'] })
+  assert.deepEqual(calls.filter((c) => c.phase === 'Judge').map(pairOf), [['opus', 'xhigh'], ['opus', 'xhigh']])
+  assert.ok(calls.every((c) => c.label !== 'sign-off' && c.phase !== 'Sign-off'), 'no sign-off agent')
+  assert.ok(calls.every((c) => c.model !== 'fable'), 'nothing runs on fable')
+  assert.deepEqual(result.signOff, { pending: 'Fable off', note: OWED })
+  assert.ok(result.routing.offTier.some((o) => o.stage === 'gk-design.sign-off' && o.tier === null && o.reason === 'nofable'), 'the sign-off is listed as not run')
+  assert.ok(logs.includes(`UI sign-off: pending (Fable off); ${OWED}`), logs.join('\n'))
+})
+
+test('dead fable judges, gk-design: the panel re-runs on opus xhigh, so the sign-off agent runs on fable high; a dead sign-off is held', async () => {
+  const fableJudgesDie = (signOff) => designReplies({ judge: (prompt, opts, sheet) => (opts.model === 'fable' ? null : sheet), signOff })
+  const approved = { approved: true, concerns: ['c'], mustChange: [] }
+  const { calls, result, logs } = await runDesign({ ui: true }, fableJudgesDie(() => approved))
+  for (const label of ['judge:1', 'judge:2']) assert.deepEqual(calls.filter((c) => c.label === label).map(pairOf), [['fable', 'high'], ['opus', 'xhigh']], label)
+  assert.deepEqual(calls.filter((c) => c.label === 'sign-off').map((c) => [c.phase, c.model, c.effort]), [['Sign-off', 'fable', 'high']])
+  assert.deepEqual(result.signOff, approved, 'the sign-off agent\'s result, as before')
+  assert.equal(result.winner.key, 'P1')
+  assert.deepEqual(result.routing.offTier, [
+    { stage: 'gk-design.judge', label: 'judge:1', tier: 'opus-xhigh', reason: 'onFail' },
+    { stage: 'gk-design.judge', label: 'judge:2', tier: 'opus-xhigh', reason: 'onFail' },
+  ])
+  assert.ok(logs.includes('UI sign-off: one fable high agent over winner P1 (the judges ran on opus-xhigh)'), logs.join('\n'))
+  assert.ok(logs.includes('UI sign-off: approved; 0 must-change item(s)'), logs.join('\n'))
+  // The sign-off agent dies: held (onFail hold), not re-run; the sign-off is still owed.
+  const held = await runDesign({ ui: true }, fableJudgesDie(() => null))
+  assert.deepEqual(held.calls.filter((c) => c.label === 'sign-off').map(pairOf), [['fable', 'high']], 'one sign-off call, no re-run')
+  assert.deepEqual(held.result.signOff, { pending: 'Fable sign-off held', note: OWED })
+  assert.deepEqual(held.result.routing.offTier.slice(-1), [{ stage: 'gk-design.sign-off', label: 'sign-off', tier: 'fable-high', reason: 'hold' }])
+  assert.ok(held.logs.includes(`UI sign-off agent lost (skipped or errored); held: ${OWED}`), held.logs.join('\n'))
+  // Without ui a dead Fable panel re-runs on opus and no sign-off is owed.
+  const plain = await runDesign({ ui: false }, fableJudgesDie(() => approved))
+  assert.ok(plain.calls.every((c) => c.label !== 'sign-off'))
+  assert.equal(plain.result.signOff, null)
+})
+
+test('degraded results keep signOff null, gk-design: too few proposals or no judge sheets, with routing', async () => {
+  const one = await runDesign({ ui: true }, [{ match: /^propose:(risk|user)-first$/, reply: () => null }])
+  assert.equal(one.result.winner, null)
+  assert.match(one.result.degraded, /^only 1 proposal\(s\) survived/)
+  assert.equal(one.result.signOff, null)
+  assert.ok(one.calls.every((c) => c.phase === 'Propose'), 'no judge runs')
+  // Each ui proposer that died on fable medium was re-run once on opus high.
+  assert.deepEqual(one.result.routing.offTier.map((o) => [o.label, o.tier, o.reason]), [['propose:risk-first', 'opus-high', 'onFail'], ['propose:user-first', 'opus-high', 'onFail']])
+  const none = await runDesign({ ui: true }, designReplies({ judge: () => null }))
+  assert.equal(none.result.winner, null)
+  assert.equal(none.result.degraded, 'no judge sheets returned; proposals are unscored')
+  assert.equal(none.result.signOff, null)
+  assert.ok(none.calls.every((c) => c.label !== 'sign-off'))
+  assert.deepEqual(none.result.routing.offTier.map((o) => [o.label, o.reason]), [['judge:1', 'onFail'], ['judge:2', 'onFail']])
 })

@@ -20,7 +20,6 @@ const GOODRICKE_ROOT = '/home/carls/apps/mike-dev'
 const goodricke = () => ({ ...structuredClone(fixture), root: GOODRICKE_ROOT })
 
 const PROFILES = ['fable', 'opus', 'sonnet']
-const route = (calls) => calls.map((c) => [c.label, c.phase, c.model, c.effort])
 const ws = (s) => String(s).replace(/\s+/g, ' ').trim()
 // The log, less the lines about the project (the golden has none).
 const runLog = (logs) => logs.filter((l) => !l.startsWith('Project:'))
@@ -56,14 +55,17 @@ const replacementsFor = (e, s) => (typeof e.replacedBy === 'function' ? e.replac
 
 // gk-design: every proposer answers with its own title; each judge scores every proposal it is
 // shown (P2 highest) and names P2 the winner, grafting one idea from P1; the sign-off approves.
-// `dead` labels reply null.
-function designResponders({ dead = null } = {}) {
+// `dead` labels reply null. `fableJudgeDies`: a judge run on fable replies null, so the neutral
+// script re-runs it on opus and its UI sign-off agent runs (the golden's full run, under the
+// opus profile, has no fable judge, so it is unaffected).
+function designResponders({ dead = null, fableJudgeDies = false } = {}) {
   return [
     ...(dead ? [{ match: dead, reply: () => null }] : []),
     { match: /^propose:/, reply: (prompt, opts) => ({ ...minimalFromSchema(opts.schema), title: `Plan ${opts.label.slice('propose:'.length)}` }) },
     {
       match: /^judge:/,
-      reply: (prompt) => {
+      reply: (prompt, opts) => {
+        if (fableJudgeDies && opts.model === 'fable') return null
         const keys = [...new Set([...prompt.matchAll(/^=== (P\d) /gm)].map((m) => m[1]))].sort()
         return {
           scores: keys.map((k) => ({ title: k, fit: k === 'P2' ? 9 : 6, simplicity: 7, risk: 7, design: 0, reason: 'fit: f; simplicity: s; risk: r' })),
@@ -127,11 +129,12 @@ const SYMPTOM = 'The list shows a deleted item until the second reload.'
 const diagnoseArgs = (extra = {}) => ({ symptom: SYMPTOM, ...structuredClone(extra) })
 
 // Per workflow: its file, args builder, responders, and the run that reaches every stage and
-// every prompt variant (ui under a non-fable profile reaches gk-design's sign-off; thorough
-// with sources reaches gk-research's second round; a reproduce command and a scratchpad fill
-// gk-diagnose's test method).
+// every prompt variant (ui under a non-fable profile reaches the golden gk-design's sign-off,
+// and a fable judge that dies reaches the neutral's, so gk-design's responders kill every judge
+// run on fable; thorough with sources reaches gk-research's second round; a reproduce command
+// and a scratchpad fill gk-diagnose's test method).
 const WORKFLOWS = {
-  'gk-design': { args: designArgs, responders: designResponders, full: { ui: true, profile: 'opus', context: ['docs/home.md'], constraints: ['No new dependencies.'] }, phases: ['Propose', 'Judge', 'Sign-off'] },
+  'gk-design': { args: designArgs, responders: () => designResponders({ fableJudgeDies: true }), full: { ui: true, profile: 'opus', context: ['docs/home.md'], constraints: ['No new dependencies.'] }, phases: ['Propose', 'Judge', 'Sign-off'] },
   'gk-research': { args: researchArgs, responders: researchResponders, full: { depth: 'thorough', sources: SOURCES }, phases: ['Sweep', 'Merge', 'Deep-read', 'Critic'] },
   'gk-diagnose': { args: diagnoseArgs, responders: diagnoseResponders, full: { reproduce: 'npm test -- list', evidence: ['GET /items returns the item'], files: ['src/list.ts'], scratchpad: '/tmp/s' }, phases: ['Hypothesise', 'Test', 'Adjudicate'] },
 }
@@ -141,50 +144,6 @@ const fullRun = (wf, project) => {
   if (project !== undefined) args.project = project
   return runWorkflow(project === undefined ? golden(`${wf}.js`) : neutral(`${wf}.js`), args, w.responders())
 }
-
-// ---------------- routing equivalence ----------------
-
-// Runs the golden and the neutral script (with the Goodricke project, and with a generic one) on
-// the same args and replies, and checks they make the same calls on the same (model, effort),
-// log the same lines and return the same result.
-async function assertSameRouting(wf, name, args, responders) {
-  const old = await runWorkflow(golden(`${wf}.js`), structuredClone(args), responders())
-  const now = await runWorkflow(neutral(`${wf}.js`), { ...structuredClone(args), project: goodricke() }, responders())
-  assert.deepEqual(route(now.calls), route(old.calls), `${wf} ${name}`)
-  assert.deepEqual(runLog(now.logs), old.logs, `${wf} ${name}: the log`)
-  assert.deepEqual(now.result, old.result, `${wf} ${name}: the result`)
-  // A project changes words, never routing.
-  const generic = await runWorkflow(neutral(`${wf}.js`), { ...structuredClone(args), project: { root: '/tmp/repo' } }, responders())
-  assert.deepEqual(route(generic.calls), route(old.calls), `${wf} ${name} (generic)`)
-  assert.deepEqual(runLog(generic.logs), old.logs, `${wf} ${name} (generic): the log`)
-  assert.deepEqual(generic.result, old.result, `${wf} ${name} (generic): the result`)
-  return old
-}
-
-// profiles x {ui: true|false} x {escalate: true|false}
-const GRID = PROFILES.flatMap((profile) => [true, false].flatMap((ui) => [true, false].map((escalate) => ({ profile, ui, escalate }))))
-
-test('routing equivalence, gk-design: golden and neutral+Goodricke make the same calls on the same (model, effort)', async () => {
-  const cases = GRID.map((flags) => [JSON.stringify(flags), flags, {}])
-  for (const profile of PROFILES) {
-    cases.push(
-      [`${profile} four approaches, three judges`, { profile, approaches: 4, judges: 3 }, {}],
-      [`${profile} ui, two approaches, one judge`, { profile, ui: true, approaches: 2, judges: 1 }, {}],
-      [`${profile} ui, context and constraints`, { profile, ui: true, context: ['docs/home.md'], constraints: ['No new dependencies.'] }, {}],
-      [`${profile} ui, a proposer dies`, { profile, ui: true }, { dead: /^propose:user-first$/ }],
-      [`${profile} ui, one proposal survives`, { profile, ui: true }, { dead: /^propose:(risk|user)-first$/ }],
-      [`${profile} ui, every judge dies`, { profile, ui: true }, { dead: /^judge:/ }],
-      [`${profile} ui, the sign-off dies`, { profile, ui: true }, { dead: /^sign-off$/ }],
-    )
-  }
-  const seen = new Set()
-  for (const [name, flags, opts] of cases) {
-    const old = await assertSameRouting('gk-design', name, designArgs(flags), () => designResponders(opts))
-    for (const c of old.calls) seen.add(`${c.phase} ${c.model} ${c.effort}`)
-  }
-  // The grid reaches every route the golden has.
-  assert.deepEqual([...seen].sort(), ['Judge fable xhigh', 'Judge opus xhigh', 'Propose fable xhigh', 'Propose opus xhigh', 'Sign-off fable xhigh'])
-})
 
 // ---------------- behaviour parity (gk-research, gk-diagnose) ----------------
 
@@ -278,6 +237,81 @@ test('behaviour parity, gk-diagnose: golden and neutral make the same calls, log
       () => diagnoseResponders({ dead: /^adjudicate$/ }),
       (calls) => step(calls).flatMap((c) => (c[0] === 'adjudicate' ? [c, c] : [c])))
   }
+})
+
+// ---------------- behaviour parity (gk-design) ----------------
+
+// Its routing comes from routes.json (routes.test.mjs checks it, with the signOff shapes);
+// everything else is the golden's. The golden and the neutral script (with the Goodricke
+// project, and with a generic one) run on the same args and replies; they make the same calls by
+// [label, phase], log the same lines and return the same result. Left out of the comparison, by
+// design: result.routing and result.signOff (the UI sign-off now follows the judges' tier, not
+// the profile), and the log lines about the project, the profile, the retired profile and the UI
+// sign-off; the route words in the Proposing and convening lines are compared as <route>.
+const designRouteWords = (l) => l
+  .replace(/^(Proposing \d+ approaches \([^)]*\)) on \w+ \w+(; angles not run: .*)$/, '$1 on <route>$2')
+  .replace(/^(\d+ proposals in; convening \d+) \w+ \w+ (judge\(s\))$/, '$1 <route> $2')
+const designLog = (logs) => behaviourLog(logs).filter((l) => !l.startsWith('UI sign-off')).map(designRouteWords)
+const withoutRoutingOrSignOff = (r) => {
+  const { routing, signOff, ...rest } = r
+  return rest
+}
+// The neutral calls a case expects, from the golden's: the golden's sign-off call goes (the
+// neutral's judges ran on fable high, so their judgement is the UI sign-off; in these cases a
+// judge that dies dies twice, so no judge comes back from opus), and each dead stage that ran
+// on fable is re-run once on its noFable tier, after that phase's first attempts: every dead
+// judge (fable high) and, with ui, every dead proposer (fable medium).
+const designExpect = (ui, dead) => (calls) => ['Propose', 'Judge'].flatMap((phase) => {
+  const first = calls.filter((c) => c.phase === phase)
+  const rerun = first.filter((c) => dead && dead.test(c.label) && (phase === 'Judge' || ui))
+  return [...step(first), ...step(rerun)]
+})
+
+test('behaviour parity, gk-design: golden and neutral make the same calls, log the same lines and return the same result on every path', async () => {
+  // The old routing-equivalence grid: every profile x ui x escalate, plus its named cases.
+  const grid = PROFILES.flatMap((profile) => [true, false].flatMap((ui) => [true, false].map((escalate) => ({ profile, ui, escalate }))))
+  const cases = grid.map((flags) => [JSON.stringify(flags), flags, {}])
+  for (const profile of [...PROFILES, undefined]) {
+    const p = profile ? { profile } : {}
+    cases.push(
+      [`${profile} four approaches, three judges`, { ...p, approaches: 4, judges: 3 }, {}],
+      [`${profile} ui, two approaches, one judge`, { ...p, ui: true, approaches: 2, judges: 1 }, {}],
+      [`${profile} ui, context and constraints`, { ...p, ui: true, context: ['docs/home.md'], constraints: ['No new dependencies.'] }, {}],
+      [`${profile} ui, a proposer dies`, { ...p, ui: true }, { dead: /^propose:user-first$/ }],
+      [`${profile} a proposer dies`, p, { dead: /^propose:user-first$/ }],
+      [`${profile} ui, one proposal survives`, { ...p, ui: true }, { dead: /^propose:(risk|user)-first$/ }],
+      [`${profile} ui, a judge dies`, { ...p, ui: true }, { dead: /^judge:1$/ }],
+      [`${profile} ui, every judge dies`, { ...p, ui: true }, { dead: /^judge:/ }],
+      [`${profile} ui, the sign-off dies`, { ...p, ui: true }, { dead: /^sign-off$/ }],
+    )
+  }
+  const seen = new Set()
+  const differences = { signOffDropped: 0, judgeReruns: 0, proposeReruns: 0 }
+  for (const [name, flags, opts] of cases) {
+    const args = designArgs(flags)
+    const expect = designExpect(flags.ui === true, opts.dead)
+    const old = await runWorkflow(golden('gk-design.js'), structuredClone(args), designResponders(opts))
+    for (const c of old.calls) seen.add(c.phase)
+    const want = expect(old.calls)
+    if (old.calls.some((c) => c.label === 'sign-off')) differences.signOffDropped++
+    differences.judgeReruns += want.filter((c) => c[1] === 'Judge').length - old.calls.filter((c) => c.phase === 'Judge').length
+    differences.proposeReruns += want.filter((c) => c[1] === 'Propose').length - old.calls.filter((c) => c.phase === 'Propose').length
+    for (const [kind, project] of [['goodricke', goodricke()], ['generic', { root: '/tmp/repo' }]]) {
+      const now = await runWorkflow(neutral('gk-design.js'), { ...structuredClone(args), project }, designResponders(opts))
+      assert.deepEqual(step(now.calls), want, `${name} (${kind}): the calls`)
+      assert.deepEqual(designLog(now.logs), designLog(old.logs), `${name} (${kind}): the log`)
+      assert.ok(now.result && now.result.routing, `${name} (${kind}): the result carries routing`)
+      assert.deepEqual(withoutRoutingOrSignOff(now.result), withoutRoutingOrSignOff(old.result), `${name} (${kind}): the result`)
+      // signOff: null without ui or on a degraded run; else the fable panel's judgement.
+      const signOff = flags.ui === true && !old.result.degraded ? { satisfiedBy: 'judges', tier: 'fable-high' } : null
+      assert.deepEqual(now.result.signOff, signOff, `${name} (${kind}): signOff`)
+    }
+  }
+  // The grid reaches every phase the golden has, and each legitimate difference.
+  assert.deepEqual([...seen].sort(), ['Judge', 'Propose', 'Sign-off'])
+  assert.ok(differences.signOffDropped > 0, 'some case drops the golden\'s sign-off call')
+  assert.ok(differences.judgeReruns > 0, 'some case re-runs a dead fable judge')
+  assert.ok(differences.proposeReruns > 0, 'some case re-runs a dead fable proposer')
 })
 
 // gk-research takes no ui argument: both scripts reject it, true or false, before any agent.
@@ -408,8 +442,11 @@ const EXCEPTIONS = {
 }
 
 // The runs whose prompts are compared: between them every prompt variant of the golden.
+// gk-design's runs take the opus profile, so the golden's judges are not on fable (its
+// responders kill every fable judge); the golden's prompts do not change with the profile
+// except in the sign-off, which the full run reaches.
 const PRESERVED_RUNS = {
-  'gk-design': [{}, { ui: true }, WORKFLOWS['gk-design'].full],
+  'gk-design': [{ profile: 'opus' }, { ui: true, profile: 'opus' }, WORKFLOWS['gk-design'].full],
   'gk-research': [{}, { depth: 'thorough' }, WORKFLOWS['gk-research'].full],
   'gk-diagnose': [{}, WORKFLOWS['gk-diagnose'].full],
 }
@@ -497,10 +534,12 @@ test('goodricke guards, design/research/diagnose: each guard scoped to one reach
   for (const wf of Object.keys(WORKFLOWS)) {
     const old = await fullRun(wf)
     const now = await fullRun(wf, goodricke())
-    const all = now.calls.map((c) => c.label)
+    // A stage re-run on its noFable tier (gk-design's judges here) has the same label and brief.
+    const labels = (calls) => [...new Set(calls.map((c) => c.label))]
+    const all = labels(now.calls)
     for (const g of fixture.guards) {
       const text = guardText(g)
-      const got = now.calls.filter((c) => c.prompt.includes(`\n- ${text}`)).map((c) => c.label)
+      const got = labels(now.calls.filter((c) => c.prompt.includes(`\n- ${text}`)))
       if (typeof g === 'string') {
         // A string guard binds every step in the repository (ruling R15).
         assert.deepEqual(got, all, `${wf} string guard: ${text}`)

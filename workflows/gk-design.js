@@ -2,14 +2,14 @@ export const meta = {
   name: 'gk-design',
   description: 'Decide a design-heavy or architecturally novel question by angle-diverse proposals scored by a judge panel',
   whenToUse:
-    'Use when a design or architecture question has a wide solution space and should be settled by competing proposals rather than one attempt. Requires args {brief: string (REQUIRED); constraints?: string[]; context?: string[] — files to read first; approaches?: number — default 3, 2..4; ui?: boolean — true means proposals run on the apex model (fable; opus under the opus/sonnet profiles); judges?: number — default 2, 1..3; profile?: fable|opus|sonnet — default fable (the tier map of the seat); escalate?: boolean — under a non-fable profile, route the judge panel to fable on Carl\'s word; project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. Returns {proposals, judgeSheets, scoreboard, winner, grafts, signOff} as structured JSON (signOff is a fable UI sign-off over the winner when ui under the opus/sonnet profiles, else null; plus degraded: string, with winner null, when fewer than 2 proposals or no judge sheets survive); the calling session (the seat) writes the design from the winner plus grafts.',
+    'Use when a design or architecture question has a wide solution space and should be settled by competing proposals rather than one attempt. Requires args {brief: string (REQUIRED); constraints?: string[]; context?: string[] — files to read first; approaches?: number — default 3, 2..4; ui?: boolean — true puts the proposals on fable and calls for a UI sign-off; judges?: number — default 2, 1..3; dials?: string[] — routing dials: "fable" (the judge panel is already on fable), "nofable" keeps every stage off fable (each stage\'s model and effort come from routes.json); project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. Returns {proposals, judgeSheets, scoreboard, winner, grafts, signOff, routing} as structured JSON (signOff is null without ui; with ui it is {satisfiedBy: "judges", tier} when a judge that returned a sheet ran on fable, whose judgement is the UI sign-off; a fable sign-off agent\'s {approved, concerns, mustChange} over the winner when every such judge was re-run on opus after its fable run died; {pending: "Fable off", note} under nofable, and {pending: "Fable sign-off held", note} when that sign-off agent died: the UI sign-off is still owed by fable. Plus degraded: string, with winner null and signOff null, when fewer than 2 proposals or no judge sheets survive); the calling session (the seat) writes the design from the winner plus grafts.',
   phases: [
-    { title: 'Propose', detail: 'one agent per angle (MVP-first, risk-first, user-first, maintainability-first), each commits to ONE recommendation; fable xhigh when ui (opus xhigh under the opus/sonnet profiles), else opus xhigh' },
-    { title: 'Judge', detail: 'fable xhigh judge panel scores every proposal 1..10 on fit, simplicity, risk (and design when ui); plain code averages and picks the winner (fable; opus xhigh under the opus/sonnet profiles unless escalate)', model: 'fable' },
-    { title: 'Sign-off', detail: 'UI sign-off over the winner under the opus/sonnet profiles', model: 'fable' },
+    { title: 'Propose', detail: 'one agent per angle (MVP-first, risk-first, user-first, maintainability-first), each commits to ONE recommendation; opus high, fable medium when ui (opus high under nofable)' },
+    { title: 'Judge', detail: 'judge panel scores every proposal 1..10 on fit, simplicity, risk (and design when ui); plain code averages and picks the winner (fable high; opus xhigh under nofable)', model: 'fable' },
+    { title: 'Sign-off', detail: 'fable high UI sign-off over the winner, only when ui and no judge that returned a sheet ran on fable; owed, not run, under nofable', model: 'fable' },
   ],
 }
-// gk-harness:args-v1
+// gk-harness:args-v2
 
 // `args` may arrive as a raw JSON string; normalise so both shapes work.
 const ARGS = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch (e) { return args } })() : args
@@ -25,7 +25,7 @@ const ANGLE_BRIEFS = {
 }
 
 if (!ARGS || typeof ARGS !== 'object') {
-  throw new Error('gk-design requires args {brief: string, constraints?: string[], context?: string[], approaches?: 2..4, ui?: boolean, judges?: 1..3, profile?: fable|opus|sonnet, escalate?: boolean, project?: object}')
+  throw new Error('gk-design requires args {brief: string, constraints?: string[], context?: string[], approaches?: 2..4, ui?: boolean, judges?: 1..3, dials?: string[], project?: object}')
 }
 if (typeof ARGS.brief !== 'string' || !ARGS.brief.trim()) {
   throw new Error('gk-design: args.brief is required and must be a non-empty string')
@@ -52,15 +52,6 @@ if (ARGS.ui !== undefined && typeof ARGS.ui !== 'boolean') {
   throw new Error('gk-design: args.ui must be a boolean')
 }
 const UI = ARGS.ui === true
-
-// ---------------- Profile (three-seat policy, 2026-10-13) ----------------
-// 'fable' = Mode A (default, unchanged behaviour); 'opus' = Mode B; 'sonnet' = Mode C.
-const PROFILE = ARGS.profile === undefined ? 'fable' : ARGS.profile
-if (!['fable', 'opus', 'sonnet'].includes(PROFILE)) throw new Error(`gk-design: args.profile must be one of fable|opus|sonnet (got ${JSON.stringify(ARGS.profile)})`)
-if (ARGS.escalate !== undefined && typeof ARGS.escalate !== 'boolean') throw new Error('gk-design: args.escalate, when given, must be a boolean')
-const ESCALATE = ARGS.escalate === true  // Carl's word: route the apex judge to fable under a non-fable profile
-const APEX = PROFILE === 'fable' ? 'fable' : 'opus'   // the top of the ladder for this profile
-log(`Profile: ${PROFILE} (apex ${APEX}${ESCALATE ? ', escalated to fable on Carl\'s word' : ''})`)
 
 // ================= gk-project block: BEGIN (copy verbatim; only WF and PHASES differ) =================
 // Every gk-* workflow carries this same block (scripts cannot import): the args.project
@@ -305,12 +296,16 @@ async function runStage(stage, ctx, prompt, opts = {}) {
 }
 const routingResult = () => ({ routes: ROUTES.version, dials: DIALS.slice(), offTier: offTier.slice() })
 // </gk-routes>
+// profile and escalate are retired: every stage takes its model and effort from ROUTES.
+if (ARGS.profile !== undefined || ARGS.escalate !== undefined) log(`profile is retired; routes come from routes.json v${ROUTES.version}`)
 
 const BRIEF = ARGS.brief.trim()
 const CONSTRAINTS = ARGS.constraints || []
 const CONTEXT = ARGS.context || []
-const PROPOSE_MODEL = UI ? APEX : 'opus'
-const JUDGE_MODEL = ESCALATE ? 'fable' : APEX
+// ui lifts the proposals (routes.json `when`); the judge panel and the sign-off take no ctx flag.
+const STAGE_CTX = { ui: UI }
+const PROPOSE_ROUTE = routeOf('gk-design.propose', STAGE_CTX)
+const JUDGE_ROUTE = routeOf('gk-design.judge', STAGE_CTX)
 
 const briefBlock = `DESIGN BRIEF:\n${BRIEF}\n` +
   (CONSTRAINTS.length ? `\nHARD CONSTRAINTS:\n${CONSTRAINTS.map(c => `- ${c}`).join('\n')}\n` : '') +
@@ -384,10 +379,12 @@ const JUDGE_SCHEMA = {
 // ---- Propose: one agent per angle, independent, so pipeline (no barrier).
 phase('Propose')
 const angles = ANGLES.slice(0, APPROACHES)
-log(`Proposing ${APPROACHES} approaches (${angles.join(', ')}) on ${PROPOSE_MODEL} xhigh; angles not run: ${ANGLES.slice(APPROACHES).join(', ') || 'none'}`)
+log(`Proposing ${APPROACHES} approaches (${angles.join(', ')}) on ${PROPOSE_ROUTE.model} ${PROPOSE_ROUTE.effort}; angles not run: ${ANGLES.slice(APPROACHES).join(', ') || 'none'}`)
 
 const rawProposals = await pipeline(angles, (angle, _orig, i) =>
-  agent(
+  runStage(
+    'gk-design.propose',
+    STAGE_CTX,
     `You are proposal author ${i + 1} of ${APPROACHES} on a design question. Other authors take other angles; yours is ${angle.toUpperCase()}: ${ANGLE_BRIEFS[angle]}
 
 ${briefBlock}
@@ -398,7 +395,7 @@ METHOD:
 3. Describe it concretely: architecture, the components with their responsibility and interface (function signature, route, props or table shape), the data flow end to end, honest tradeoffs (gain vs cost), risks, and the open questions only the user can answer.
 Set angle to "${angle}".
 ${GROUND_RULES}${projectRules('Propose')}`,
-    { label: `propose:${angle}`, phase: 'Propose', model: PROPOSE_MODEL, effort: 'xhigh', schema: PROPOSAL_SCHEMA },
+    { label: `propose:${angle}`, phase: 'Propose', schema: PROPOSAL_SCHEMA },
   ).then(r => (r ? { ...r, angle, key: `P${i + 1}` } : null)),
 )
 const proposals = rawProposals.filter(Boolean)
@@ -408,19 +405,21 @@ if (proposals.length < 2) {
   // Degraded, not fatal: hand back what survived rather than discard it; the seat decides.
   const degraded = `only ${proposals.length} proposal(s) survived; a judged comparison needs at least 2, so judging was skipped`
   log(`gk-design: ${degraded}`)
-  return { proposals, judgeSheets: [], scoreboard: [], winner: null, grafts: [], signOff: null, degraded }
+  return { proposals, judgeSheets: [], scoreboard: [], winner: null, grafts: [], signOff: null, degraded, routing: routingResult() }
 }
 
 // ---- Judge. BARRIER (justified): every judge must see ALL proposals to compare them.
 phase('Judge')
-log(`${proposals.length} proposals in; convening ${JUDGES} ${JUDGE_MODEL} xhigh judge(s)`)
+log(`${proposals.length} proposals in; convening ${JUDGES} ${JUDGE_ROUTE.model} ${JUDGE_ROUTE.effort} judge(s)`)
 // Each judge sees the proposals in a different rotation (varied by index) so position bias does not compound.
 const proposalDump = j => proposals.map((_, k) => proposals[(k + j) % proposals.length])
   .map(p => `=== ${p.key} (${p.angle}): ${p.title} ===\n${JSON.stringify(p, null, 2)}`).join('\n\n')
 const DIMENSIONS = UI ? 'fit-to-brief, simplicity, risk, design quality' : 'fit-to-brief, simplicity, risk'
 
 const judgeSheetsRaw = await pipeline(Array.from({ length: JUDGES }, (_, j) => j), (_j, _orig, j) =>
-  agent(
+  runStage(
+    'gk-design.judge',
+    STAGE_CTX,
     `You are judge ${j + 1} of ${JUDGES} on a panel deciding a design question. Judge independently.
 
 ${briefBlock}
@@ -430,7 +429,7 @@ ${proposalDump(j)}
 SCORING: for EVERY proposal, score 1..10 on ${DIMENSIONS} (10 is best; for risk, 10 = lowest risk).${UI ? ` Design quality is judged against the project's existing design language: ${DESIGN_LANGUAGE} Read those files before scoring.` : ' Set design to 0 (not a UI brief).'} Give a one-line reason per score inside "reason". Verify claims against the code where a score turns on them (does the named module exist, does the interface fit). Use the proposal key ("P1", "P2", ...) as "title" and as "winner".
 Name your winner, then for each runner-up name the single best idea worth grafting onto the winner (grafts[].from = that runner-up's key).
 ${GROUND_RULES}${projectRules('Judge')}`,
-    { label: `judge:${j + 1}`, phase: 'Judge', model: JUDGE_MODEL, effort: 'xhigh', schema: JUDGE_SCHEMA },
+    { label: `judge:${j + 1}`, phase: 'Judge', schema: JUDGE_SCHEMA },
   ),
 )
 const judgeSheets = judgeSheetsRaw.filter(Boolean)
@@ -438,8 +437,12 @@ if (judgeSheets.length < JUDGES) log(`${JUDGES - judgeSheets.length} judge(s) lo
 if (!judgeSheets.length) {
   const degraded = 'no judge sheets returned; proposals are unscored'
   log(`gk-design: ${degraded}`)
-  return { proposals, judgeSheets: [], scoreboard: [], winner: null, grafts: [], signOff: null, degraded }
+  return { proposals, judgeSheets: [], scoreboard: [], winner: null, grafts: [], signOff: null, degraded, routing: routingResult() }
 }
+// The tier each judge that returned a sheet ran on: its route, or, when its first run died and
+// runStage re-ran it (onFail rerun, recorded in offTier), the re-run's tier.
+const rerunTier = (label) => (routingResult().offTier.find(o => o.label === label && o.reason === 'onFail') || {}).tier
+const judgeTiers = judgeSheetsRaw.map((sheet, j) => (sheet ? rerunTier(`judge:${j + 1}`) || JUDGE_ROUTE.tier : null)).filter(Boolean)
 
 // ---- Plain code: average per proposal, winner by total, ties to the first judge's pick.
 const keyOf = s => {
@@ -487,10 +490,11 @@ judgeSheets.forEach((sheet, j) => {
 })
 log(`Winner ${winner.key} "${winner.title}" (${winner.angle}) total ${winner.total}; ${grafts.length} graft(s) collected${graftDupes ? `, ${graftDupes} exact duplicate(s) dropped` : ''}`)
 
-// ---- Sign-off: the UI sign-off rule holds in every profile. Under the fable profile the panel
-// already ran on fable (likewise under opus/sonnet with escalate, so no second fable pass); under
-// opus/sonnet one fable xhigh agent signs off the winner. It never changes the winner; the seat
-// acts on mustChange.
+// ---- Sign-off: the UI sign-off rule (fable signs off UI work) holds under every dial. A judge
+// that returned a sheet from a fable tier has already given that judgement, so no sign-off agent
+// runs. Otherwise (every such judge was re-run on opus after its fable run died) one fable agent
+// signs off the winner; under nofable it cannot run, and the sign-off is owed. It never changes
+// the winner; the seat acts on mustChange.
 const SIGN_OFF_SCHEMA = {
   type: 'object',
   properties: {
@@ -500,12 +504,24 @@ const SIGN_OFF_SCHEMA = {
   },
   required: ['approved', 'concerns', 'mustChange'],
 }
+const OWED = 'UI sign-off still owed by Fable'
+const fableJudgeTiers = judgeTiers.filter(t => routeTier(t).model === 'fable')
 let signOff = null
-if (UI && PROFILE !== 'fable' && !ESCALATE && winner) {
-  phase('Sign-off')
-  log(`UI sign-off: one fable xhigh agent over winner ${winner.key} (profile ${PROFILE})`)
-  signOff = await agent(
-    `You are the UI sign-off reviewer for a design decision. A judge panel under the ${PROFILE} profile has already picked the winning proposal below; your job is to sign it off as UI/UX work, not to re-run the contest. You cannot change the winner: approve it, or name what must change before it is built.
+if (UI && fableJudgeTiers.length) {
+  signOff = { satisfiedBy: 'judges', tier: fableJudgeTiers[0] }
+  const t = routeTier(signOff.tier)
+  log(`UI sign-off: satisfied by the ${t.model} ${t.effort} judge panel; no separate sign-off agent`)
+} else if (UI) {
+  const route = routeOf('gk-design.sign-off', STAGE_CTX)
+  if (route.tier !== null) {
+    phase('Sign-off')
+    log(`UI sign-off: one ${route.model} ${route.effort} agent over winner ${winner.key} (the judges ran on ${[...new Set(judgeTiers)].join(', ')})`)
+  }
+  // Under nofable the stage's noFable is "none": runStage records it as not run and calls no agent.
+  signOff = await runStage(
+    'gk-design.sign-off',
+    STAGE_CTX,
+    `You are the UI sign-off reviewer for a design decision. A judge panel has already picked the winning proposal below; your job is to sign it off as UI/UX work, not to re-run the contest. You cannot change the winner: approve it, or name what must change before it is built.
 
 ${briefBlock}
 This is UI/UX work. ${DESIGN_LANGUAGE} Read those files before judging.
@@ -518,11 +534,17 @@ ${grafts.length ? grafts.map(g => `- from ${g.from}${g.fromTitle ? ` (${g.fromTi
 
 METHOD: read the context files and the code the winner touches; check the flows, clarity, defaults, accessibility and fit with the design language. Set approved true only if the winner plus grafts is fit to build as designed. List concerns (anything worth the seat's attention) and mustChange (only the changes required before build; empty when approved outright).
 ${GROUND_RULES}${projectRules('Sign-off')}`,
-    { label: 'sign-off', phase: 'Sign-off', model: 'fable', effort: 'xhigh', schema: SIGN_OFF_SCHEMA },
+    { label: 'sign-off', phase: 'Sign-off', schema: SIGN_OFF_SCHEMA },
   )
-  signOff = signOff || null
-  if (signOff) log(`UI sign-off: ${signOff.approved ? 'approved' : 'NOT approved'}; ${(signOff.mustChange || []).length} must-change item(s)`)
-  else log('UI sign-off agent lost (skipped or errored); signOff is null')
+  if (route.tier === null) {
+    signOff = { pending: 'Fable off', note: OWED }
+    log(`UI sign-off: pending (Fable off); ${OWED}`)
+  } else if (signOff) {
+    log(`UI sign-off: ${signOff.approved ? 'approved' : 'NOT approved'}; ${(signOff.mustChange || []).length} must-change item(s)`)
+  } else {
+    signOff = { pending: 'Fable sign-off held', note: OWED }
+    log(`UI sign-off agent lost (skipped or errored); held: ${OWED}`)
+  }
 }
 
-return { proposals, judgeSheets, scoreboard: tallies, winner, grafts, signOff }
+return { proposals, judgeSheets, scoreboard: tallies, winner, grafts, signOff, routing: routingResult() }
