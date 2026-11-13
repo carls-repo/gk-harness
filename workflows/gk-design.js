@@ -223,8 +223,11 @@ const DIALS = (() => {
   return kept
 })()
 const offTier = []
+// An own entry of a routes table, or undefined: a prototype key ('constructor', '__proto__',
+// 'toString') names no tier, stage or class.
+const routeOwn = (table, key) => (table !== null && typeof table === 'object' && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined)
 const routeTier = (name) => {
-  const t = ROUTES.tiers[name]
+  const t = routeOwn(ROUTES.tiers, name)
   if (!t) throw new Error(`routes: tier ${JSON.stringify(name)} is not in this workflow's routes block`)
   return t
 }
@@ -238,24 +241,24 @@ const routeHigher = (a, b) => (routeAbove(b, a) ? b : a)
 // A tier name the caller passed, or null when it names no tier in this block (logged).
 const routeKnown = (name, what) => {
   if (name === undefined || name === null) return null
-  if (typeof name === 'string' && ROUTES.tiers[name]) return name
+  if (typeof name === 'string' && routeOwn(ROUTES.tiers, name)) return name
   log(`routes: ${what} ${JSON.stringify(name)} is not a tier this workflow knows; ignored`)
   return null
 }
 function routeStage(stage) {
-  const s = ROUTES.stages[stage]
+  const s = routeOwn(ROUTES.stages, stage)
   if (!s) throw new Error(`routes: unknown stage ${JSON.stringify(stage)}`)
   return s
 }
 // The stage's noFable entry for this class: a tier, 'none', or undefined.
 function routeNoFable(s, cls) {
-  return s.noFable !== null && typeof s.noFable === 'object' ? s.noFable[cls] : s.noFable
+  return s.noFable !== null && typeof s.noFable === 'object' ? routeOwn(s.noFable, cls) : s.noFable
 }
 function routeOf(stage, ctx = {}) {
   const s = routeStage(stage)
   const c = ctx || {}
   const cls = c.cls || 'judgement'
-  let tier = s.tier === 'byClass' ? (s.byClass || {})[cls] : s.tier
+  let tier = s.tier === 'byClass' ? routeOwn(s.byClass, cls) : s.tier
   if (!tier) throw new Error(`routes: stage ${stage} has no tier for class ${JSON.stringify(cls)}`)
   routeTier(tier)
   const met = Object.entries(s.when || {}).filter(([cond]) => c[cond] === true).map(([, t]) => t)

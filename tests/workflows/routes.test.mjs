@@ -556,3 +556,33 @@ test('changedPaths, gk-review: an array of strings or absent; anything else stop
   }
   for (const ok of [[], ['src/a.ts']]) await runReview({ changedPaths: ok })
 })
+
+// ---------------- prototype keys are not tiers (Task 11, step 0) ----------------
+
+test('routeOf: a caller-supplied author or implementer that is a prototype key is logged as unknown and routes as if absent', () => {
+  const { routeOf, logs } = helper()
+  for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    logs.length = 0
+    assert.deepEqual(tierOf(routeOf('wf.judge', { author: name })), tierOf(routeOf('wf.judge', {})), `author ${name}`)
+    assert.deepEqual(tierOf(routeOf('wf.review', { implementer: name })), tierOf(routeOf('wf.review', {})), `implementer ${name}`)
+    assert.deepEqual(logs, [
+      `routes: ctx.author ${JSON.stringify(name)} is not a tier this workflow knows; ignored`,
+      `routes: ctx.implementer ${JSON.stringify(name)} is not a tier this workflow knows; ignored`,
+    ], name)
+  }
+  // A class, a stage or a noFable class that is a prototype key names nothing either.
+  assert.throws(() => routeOf('wf.implement', { cls: 'constructor' }), /no tier for class "constructor"/)
+  assert.throws(() => routeOf('constructor', {}), /unknown stage "constructor"/)
+  assert.throws(() => routeOf('__proto__', {}), /unknown stage "__proto__"/)
+  const off = helper(['nofable']).routeOf
+  assert.throws(() => off('wf.implement', { cls: 'toString' }), /no tier for class "toString"/)
+})
+
+test('runStage, the real gk-review block: author "constructor" judges as if no author was given', async () => {
+  const blk = blockOf(readFileSync(join(workflowsDir, 'gk-review.js'), 'utf8'))
+  const { calls, agent } = recorder([{ confirmed: [], rejected: [] }])
+  const h = evalBlock(blk.text, { agent })
+  assert.deepEqual(await h.runStage('gk-review.judge', { author: 'constructor' }, 'p', { label: 'judge' }), { confirmed: [], rejected: [] })
+  assert.deepEqual(calls.map((c) => [c.model, c.effort]), [['opus', 'high']])
+  assert.deepEqual(h.logs, ['routes: ctx.author "constructor" is not a tier this workflow knows; ignored'])
+})
