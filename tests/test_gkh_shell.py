@@ -38,7 +38,7 @@ SH_FUNCTIONS = [
         "gk-harness: open a new shell, or run install.py install from the gk-harness checkout"),
 ]
 UNALIAS = ('for _gk_n in gk gk-opus gk-sonnet gk-fable gk-ultra gkh; do unalias "$_gk_n" '
-           "2>/dev/null; done; unset _gk_n")
+           "2>/dev/null || true; done; unset _gk_n")
 UNSET_ROOT_MESSAGE = ("gk-harness: open a new shell, or run install.py install from the "
                       "gk-harness checkout")
 
@@ -283,6 +283,16 @@ class AliasFileTests(unittest.TestCase):
                               capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.splitlines(), ["ARGS:--model fable --effort medium y"])
+
+    def test_sourcing_under_set_e_succeeds(self):
+        # A startup file run with set -e must not stop at an unalias of a name never defined.
+        bash = shutil.which("bash")
+        if bash is None or (os.name == "nt" and "system32" in bash.lower()):
+            self.skipTest("no usable bash")
+        proc = subprocess.run([bash, "-ec", '. "$1"; echo ok', "bash", ALIASES_SH.as_posix()],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "ok\n")
 
     def test_ps1_gkh_without_the_root_writes_an_error_and_returns(self):
         text = ALIASES_PS1.read_text(encoding="utf-8")

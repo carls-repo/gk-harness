@@ -5,7 +5,7 @@
 # A shell that loaded an older version holds these names as aliases, which bash would expand
 # inside the function definitions below; drop them first, one name at a time, so a shell that
 # stops at a missing name (zsh) still drops the rest.
-for _gk_n in gk gk-opus gk-sonnet gk-fable gk-ultra gkh; do unalias "$_gk_n" 2>/dev/null; done; unset _gk_n
+for _gk_n in gk gk-opus gk-sonnet gk-fable gk-ultra gkh; do unalias "$_gk_n" 2>/dev/null || true; done; unset _gk_n
 gk() { claude --model opus --effort medium "$@"; }
 gk-fable() { claude --model fable --effort medium "$@"; }
 gk-ultra() { claude --model opus --effort medium --settings '{"ultracode":true}' "$@"; }
