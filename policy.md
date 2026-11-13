@@ -7,7 +7,7 @@
 
 | Seat model | Mode | Use for |
 |---|---|---|
-| Fable 5.1 | **Mode A** (apex seat) | Architecture, design-heavy UI, security-sensitive code, anything client-facing, the hardest debugging |
+| Fable 5.2 | **Mode A** (apex seat) | Architecture, design-heavy UI, security-sensitive code, anything client-facing, the hardest debugging |
 | Opus 5.5 | **Mode B** (middle seat) | Medium-complexity features, unclear-cause bugs, multi-file changes with a settled design |
 | Sonnet 5.5 | **Mode C** (routine seat) | Straightforward work with a clear spec: known-cause fixes, bounded refactors, CRUD, chores |
 | anything else | Mode C rules | …and say so to Carl in the first reply |
@@ -25,8 +25,8 @@ of 2026-10-08, unchanged.
 > **Haiku 5.5** (`claude-haiku-5-5`, $0.10/$0.50 up to a 100K-token prompt, then
 > $0.50/$2.50; default effort medium) · **Sonnet 5.5** (`claude-sonnet-5-5`, $2/$10;
 > default effort high, recalibrated — start agentic coding at medium) · **Opus 5.5**
-> (`claude-opus-5-5`, $4/$20; default effort medium, one below Opus 5) · **Fable 5.1**
-> (`claude-fable-5-1`, $10/$50, 1M context, thinking always on). Worker agents use the
+> (`claude-opus-5-5`, $4/$20; default effort medium, one below Opus 5) · **Fable 5.2**
+> (`claude-fable-5-2`, $8/$40, 1M context, thinking always on). Worker agents use the
 > **aliases** `haiku` / `sonnet` / `opus` / `fable` so they always resolve to this lineup —
 > never pin dated model IDs in agent definitions or workflow scripts.
 

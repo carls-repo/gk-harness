@@ -1,6 +1,6 @@
 ---
 name: worker-fable-max
-description: Maximum-effort worker (Fable 5.1, max effort). Last resort — use only when an xhigh-effort attempt has failed or the problem is exceptionally hard (deep correctness proofs, hostile debugging with no leads, subtle distributed/state bugs). Expensive; never the first choice.
+description: Maximum-effort worker (Fable 5.2, max effort). Last resort — use only when an xhigh-effort attempt has failed or the problem is exceptionally hard (deep correctness proofs, hostile debugging with no leads, subtle distributed/state bugs). Expensive; never the first choice.
 model: fable
 effort: max
 ---

@@ -45,6 +45,11 @@ def frontmatter(text: str) -> dict:
 
 
 class PolicyTest(unittest.TestCase):
+    def test_no_stale_fable_version(self):
+        stale = [f.name for f in [POLICY, *sorted(AGENTS.glob("*.md"))]
+                 if "Fable 5.1" in f.read_text() or "fable-5-1" in f.read_text()]
+        self.assertEqual(stale, [], "stale Fable 5.1 text in: %s" % stale)
+
     def test_policy_fits_and_has_no_box_paths(self):
         text = POLICY.read_text(encoding="utf-8")
         self.assertLess(len(text), 40000)
