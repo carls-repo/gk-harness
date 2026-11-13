@@ -25,8 +25,11 @@ const ws = (s) => String(s).replace(/\s+/g, ' ').trim()
 // Scope sees one changed file and reports the given detection flags (or dies); every finder
 // reports one distinct finding, so Verify and Judge always run. Refuters and the judge get the
 // harness's minimal reply (refuted: false, so every finding survives).
-function reviewResponders({ detected = {}, scopeDead = false } = {}) {
+// `dead` makes every agent whose label it matches return nothing; `none` makes every finder
+// report no findings.
+function reviewResponders({ detected = {}, scopeDead = false, dead = null, none = false } = {}) {
   return [
+    ...(dead ? [{ match: dead, reply: () => null }] : []),
     {
       match: /^scope$/,
       reply: () => (scopeDead ? null : {
@@ -40,6 +43,7 @@ function reviewResponders({ detected = {}, scopeDead = false } = {}) {
       match: /^find:/,
       reply: (prompt, opts) => {
         const key = opts.label.slice('find:'.length)
+        if (none) return { findings: [] }
         return { findings: [{ file: `backend/src/${key}.ts`, line: 7, title: `${key} issue`, claim: 'c', failureScenario: 'f', severity: 'medium' }] }
       },
     },
@@ -55,37 +59,98 @@ const REVIEW_DETECTED = [
   ['scope detects client wording', {}, { detected: { touchesClientWording: true } }],
   ['scope agent dies', {}, { scopeDead: true }],
 ]
-// The log lines that state the judge's route; golden and neutral must state the same one.
-const judgeRouteLogs = (logs) => logs.filter((l) => /^(Judge: \w+ xhigh over|Security-sensitive scope)/.test(l))
+// The log lines that state the judge's route: the Judge: line (the golden's "Judge: <model>
+// xhigh over", the neutral's "Judge: <model> <effort> over", from routes.json) and the golden's
+// security notice. They name the route, which routes.test.mjs checks; parity leaves them out.
+const judgeRouteLogs = (logs) => logs.filter((l) => /^(Judge: \w+ \w+ over|Security-sensitive scope)/.test(l))
 
-test('routing equivalence, gk-review: golden and neutral+Goodricke make the same calls on the same (model, effort)', async () => {
+// ---------------- behaviour parity (gk-review) ----------------
+
+// The judge's model and effort come from routes.json (routes.test.mjs checks them, with the
+// judge floor); everything else is the golden's. Runs the golden and the neutral script with
+// the Goodricke project on the same args and replies, and checks they make the same calls by
+// [label, phase], log the same lines and return the same result. The neutral script's only
+// additions are left out: result.routing, and the log lines about the project, the profile (the
+// golden's "Profile:"), the retired profile and the judge's route. A generic project runs the
+// same stages in the same order with the same counts (its finder keys are the core ones, so its
+// labels and titles differ from the golden's Goodricke ones).
+// `expect(oldCalls)` gives the neutral calls a case expects when they legitimately differ.
+const step = (calls) => calls.map((c) => [c.label, c.phase])
+const RETIRED = /^profile is retired; routes come from routes\.json v\d+$/
+const behaviourLog = (logs) => logs.filter((l) => !l.startsWith('Profile:') && !l.startsWith('Project:') && !RETIRED.test(l) && !judgeRouteLogs([l]).length)
+const withoutRouting = (r) => {
+  if (!r || typeof r !== 'object') return r
+  const { routing, ...rest } = r
+  return rest
+}
+const counts = (r) => ({ files: r.scope.files.length, confirmed: r.confirmed.length, rejected: r.rejected.length, killed: r.killedByRefuters.length, dedupDropped: r.dedupDropped, unjudged: r.unjudged.length })
+async function assertSameReview(name, args, opts, expect = (calls) => step(calls)) {
+  const old = await runWorkflow(golden('gk-review.js'), structuredClone(args), reviewResponders(opts))
+  const now = await runWorkflow(neutral('gk-review.js'), { ...structuredClone(args), project: goodricke() }, reviewResponders(opts))
+  assert.deepEqual(step(now.calls), expect(old.calls), `${name}: the calls`)
+  assert.deepEqual(behaviourLog(now.logs), behaviourLog(old.logs), `${name}: the log`)
+  assert.equal(judgeRouteLogs(now.logs).length, judgeRouteLogs(old.logs).some((l) => l.startsWith('Judge:')) ? 1 : 0, `${name}: one judge line when the judge runs`)
+  assert.ok(now.result && now.result.routing, `${name}: the result carries routing`)
+  assert.deepEqual(withoutRouting(now.result), old.result, `${name}: the result`)
+  const generic = await runWorkflow(neutral('gk-review.js'), { ...structuredClone(args), target: 'main..HEAD', project: { root: '/tmp/repo' } }, reviewResponders(opts))
+  assert.deepEqual(generic.calls.map((c) => c.phase), expect(old.calls).map((c) => c[1]), `${name} (generic): the stages`)
+  assert.deepEqual(counts(generic.result), counts(old.result), `${name} (generic): the result's counts`)
+  assert.ok(generic.result.routing, `${name} (generic): the result carries routing`)
+  return old
+}
+
+// The judge is sensitive (routes.json's fable-high) for these inputs: a flag, a Scope detection,
+// or a Scope agent that died. escalate is retired, so on its own it is not.
+const sensitiveCase = (flags, opts) => !!(flags.ui || flags.security || flags.clientFacing || opts.scopeDead || Object.values(opts.detected || {}).some(Boolean))
+
+test('behaviour parity, gk-review: golden and neutral make the same calls, log the same lines and return the same result on every path', async () => {
+  // The old routing-equivalence grid, every profile x every flag and detection, plus the
+  // degraded paths: dead finders, refuters and judge, no findings.
   const cases = []
-  for (const profile of PROFILES) {
-    for (const flags of REVIEW_FLAGS) cases.push([`${profile} ${JSON.stringify(flags)}`, { ...flags, profile }, {}])
-    for (const [name, extra, opts] of REVIEW_DETECTED) cases.push([`${profile} ${name}`, { ...extra, profile }, opts])
+  for (const profile of [...PROFILES, undefined]) {
+    const p = profile ? { profile } : {}
+    for (const flags of REVIEW_FLAGS) cases.push([`${profile} ${JSON.stringify(flags)}`, { ...flags, ...p }, {}])
+    for (const [name, extra, opts] of REVIEW_DETECTED) cases.push([`${profile} ${name}`, { ...extra, ...p }, opts])
+    cases.push(
+      [`${profile} a finder dies`, p, { dead: /^find:correctness$/ }],
+      [`${profile} every finder dies`, p, { dead: /^find:/ }],
+      [`${profile} no findings`, p, { none: true }],
+      [`${profile} a refuter dies`, p, { dead: /^refute:1\.1$/ }],
+      [`${profile} every refuter of finding 1 dies`, p, { dead: /^refute:1\./ }],
+      [`${profile} every refuter dies`, p, { dead: /^refute:/ }],
+      [`${profile} two votes, focus`, { ...p, votes: 2, focus: ['accessibility', 'logging'] }, {}],
+      [`${profile} working tree`, { ...p, target: 'working-tree' }, {}],
+    )
   }
-  let fableJudges = 0
-  const escalatedSecurity = []
+  const seen = new Set()
+  let judged = 0
   for (const [name, flags, opts] of cases) {
-    const args = { target: 'develop..HEAD', ...flags }
-    const old = await runWorkflow(golden('gk-review.js'), structuredClone(args), reviewResponders(opts))
-    const now = await runWorkflow(neutral('gk-review.js'), { ...structuredClone(args), project: goodricke() }, reviewResponders(opts))
-    assert.ok(old.calls.some((c) => c.label === 'judge'), `${name}: the golden run reaches the judge`)
-    assert.deepEqual(route(now.calls), route(old.calls), name)
-    assert.deepEqual(judgeRouteLogs(now.logs), judgeRouteLogs(old.logs), `${name}: the judge route log`)
-    // A project changes words, never routing: the generic run keeps every (phase, model, effort).
-    const generic = await runWorkflow(neutral('gk-review.js'), { ...structuredClone(args), target: 'main..HEAD', project: { root: '/tmp/repo' } }, reviewResponders(opts))
-    assert.deepEqual(generic.calls.map((c) => [c.phase, c.model, c.effort]), old.calls.map((c) => [c.phase, c.model, c.effort]), `${name} (generic)`)
-    assert.deepEqual(judgeRouteLogs(generic.logs), judgeRouteLogs(old.logs), `${name} (generic): the judge route log`)
-    if (old.calls.some((c) => c.label === 'judge' && c.model === 'fable')) fableJudges++
-    if (old.logs.some((l) => l.endsWith('(security route, escalated on Carl\'s word)'))) escalatedSecurity.push(name)
+    const old = await assertSameReview(name, { target: 'develop..HEAD', ...flags }, opts)
+    for (const c of old.calls) seen.add(c.phase)
+    if (old.calls.some((c) => c.label === 'judge')) judged++
   }
-  assert.ok(fableJudges > 0 && fableJudges < cases.length, 'the grid exercises both judge routes')
-  // The escalated security route exists only under a non-fable profile, flagged or detected.
-  assert.deepEqual(escalatedSecurity, [
-    'opus {"escalate":true,"security":true}', 'opus scope detects security, escalated',
-    'sonnet {"escalate":true,"security":true}', 'sonnet scope detects security, escalated',
-  ])
+  assert.deepEqual([...seen].sort(), ['Find', 'Judge', 'Scope', 'Verify'])
+  assert.ok(judged > 0 && judged < cases.length, 'the grid reaches the judge and stops before it')
+  // The judge dies: the one legitimate difference in the calls. The golden ran it once; the
+  // neutral script runs a sensitive judge on fable high and, when that dies, once more on its
+  // noFable tier, opus xhigh (onFail rerun), so its calls have one extra judge call. A judge
+  // that is not sensitive runs on opus high and is not re-run. Here both die, so the results
+  // (less routing) and the logs still match.
+  const deadJudge = []
+  for (const profile of [...PROFILES, undefined]) {
+    const p = profile ? { profile } : {}
+    for (const [name, flags, opts] of [
+      ['plain', {}, {}], ['ui', { ui: true }, {}], ['security', { security: true }, {}], ['escalate', { escalate: true }, {}],
+      ['scope detects client wording', {}, { detected: { touchesClientWording: true } }], ['scope dies', {}, { scopeDead: true }],
+    ]) {
+      const sensitive = sensitiveCase(flags, opts)
+      const label = `${profile} ${name}, the judge dies`
+      await assertSameReview(label, { target: 'develop..HEAD', ...flags, ...p }, { ...opts, dead: /^judge$/ },
+        (calls) => step(calls).flatMap((c) => (c[0] === 'judge' && sensitive ? [c, c] : [c])))
+      if (sensitive) deadJudge.push(label)
+    }
+  }
+  assert.equal(deadJudge.length, 16, 'the re-run is exercised under every profile')
 })
 
 // The golden is mike-dev 8302903ad (golden/README.md, ruling R48), which carries the
@@ -506,6 +571,13 @@ const PROJECT_MALFORMED = [
   [{ packages: [] }, 'packages'],
   [{ packages: ['backend', 3] }, 'packages[1]'],
   [{ packages: ['back\nend'] }, 'packages[0]'],
+  // uiPaths: a non-empty list of regular expressions (printable lines that compile), as paths.
+  [{ uiPaths: '^frontend/' }, 'uiPaths'],
+  [{ uiPaths: [] }, 'uiPaths'],
+  [{ uiPaths: ['^frontend/', 3] }, 'uiPaths[1]'],
+  [{ uiPaths: ['^(frontend/'] }, 'uiPaths[0]'],
+  [{ uiPaths: ['^a/\n|^b/'] }, 'uiPaths[0]'],
+  [{ uiPaths: [''] }, 'uiPaths[0]'],
 ]
 // gk-review's own checks: a replaces names a core finder not yet replaced, and finder keys
 // (core and project) are unique. Other workflows ignore reviewFinders beyond their shape.
@@ -537,10 +609,19 @@ test('project malformed throws, gk-review: before any agent runs, naming the fie
   // The full Goodricke fixture, a root-only project and {} (the generic rules) are well formed,
   // and so is every sign-off field (ruling R52, plus paths), check and packages, which gk-review
   // checks but does not use.
-  const allFields = { root: '/tmp/repo', check: 'make check', packages: ['web'], signOff: [{ key: 'k', seat: 's', sharedFile: 'NOTICE', trigger: 't', paths: ['^web/'], uiJudge: false, implementer: 'i', reviewer: 'r' }] }
+  const allFields = { root: '/tmp/repo', check: 'make check', packages: ['web'], uiPaths: ['^web/app/'], signOff: [{ key: 'k', seat: 's', sharedFile: 'NOTICE', trigger: 't', paths: ['^web/'], uiJudge: false, implementer: 'i', reviewer: 'r' }] }
   for (const project of [goodricke(), { root: '/tmp/repo' }, {}, allFields]) {
     await runWorkflow(neutral('gk-review.js'), { target: 'main..HEAD', project }, reviewResponders())
   }
+})
+
+test('uiPaths validated, gk-review and gk-build: a non-string or non-compiling entry throws the project-block error before any agent', async () => {
+  for (const [project, field] of [[{ uiPaths: [7] }, 'uiPaths[0]'], [{ uiPaths: ['^ok/', { re: 'x' }] }, 'uiPaths[1]'], [{ uiPaths: ['[a-'] }, 'uiPaths[0]'], [{ uiPaths: null }, 'uiPaths']]) {
+    await assertMalformed('gk-review.js', { target: 'main..HEAD' }, project, field)
+    await assertMalformed('gk-build.js', buildArgs(), project, field)
+  }
+  // Well-formed uiPaths run (gk-build checks their shape and does not use them).
+  await runWorkflow(neutral('gk-review.js'), { target: 'main..HEAD', project: { root: '/tmp/repo', uiPaths: ['^web/', 'components/'] } }, reviewResponders())
 })
 
 // ---------------- gk-build ----------------

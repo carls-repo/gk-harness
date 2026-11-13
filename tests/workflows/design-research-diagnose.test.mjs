@@ -726,6 +726,8 @@ const PROJECT_MALFORMED = [
   [{ reviewFinders: [{ key: 'a' }] }, 'reviewFinders[0].brief'],
   [{ signOff: [{ key: 'k' }] }, 'signOff[0].seat'],
   [{ packages: [] }, 'packages'],
+  [{ uiPaths: [3] }, 'uiPaths[0]'],
+  [{ uiPaths: [] }, 'uiPaths'],
 ]
 
 test('project malformed throws, design/research/diagnose: before any agent runs, naming the field; well-formed projects run', async () => {
@@ -741,7 +743,7 @@ test('project malformed throws, design/research/diagnose: before any agent runs,
       assert.deepEqual(seen, [], `${wf} ${JSON.stringify(project)}: no agent ran`)
     }
     // The fixture, a root-only project, {} and every field of schema v1 are well formed.
-    const allFields = { version: 1, name: 'X', sharedBranch: 'main', root: '/tmp/repo', check: 'make check', packages: ['web'], guards: ['g'], reviewFinders: [{ key: 'k', brief: 'b' }], signOff: [{ key: 'k', seat: 's', sharedFile: 'NOTICE', trigger: 't', paths: ['^web/'], uiJudge: false, implementer: 'i', reviewer: 'r' }] }
+    const allFields = { version: 1, name: 'X', sharedBranch: 'main', root: '/tmp/repo', check: 'make check', packages: ['web'], uiPaths: ['^web/app/'], guards: ['g'], reviewFinders: [{ key: 'k', brief: 'b' }], signOff: [{ key: 'k', seat: 's', sharedFile: 'NOTICE', trigger: 't', paths: ['^web/'], uiJudge: false, implementer: 'i', reviewer: 'r' }] }
     for (const project of [goodricke(), { root: '/tmp/repo' }, {}, allFields]) {
       const { calls } = await runWorkflow(neutral(`${wf}.js`), { ...args(full), project }, responders())
       assert.ok(calls.length > 3, `${wf} ${JSON.stringify(project).slice(0, 60)}`)

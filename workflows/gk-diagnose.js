@@ -63,9 +63,11 @@ if (ARGS.scratchpad !== undefined && (typeof ARGS.scratchpad !== 'string' || !/^
 // reviewer?}: key and seat are printable lines, the other texts non-empty strings, uiJudge a
 // boolean, and paths a non-empty list of regular expressions (printable lines that compile),
 // given only with a trigger; any other key is malformed. check is one printable line and
-// packages a non-empty list of printable lines. gk-build uses the sign-off checks, check (its
-// default check command) and packages (the folders it runs that check from); the other
-// workflows only check their shape.
+// packages a non-empty list of printable lines. uiPaths is a non-empty list of regular
+// expressions, checked like a sign-off check's paths. gk-build uses the sign-off checks, check
+// (its default check command) and packages (the folders it runs that check from); gk-review
+// uses uiPaths and the sign-off checks' paths (a changed file that is not a test file and
+// matches one raises its judge); the other workflows only check their shape.
 const WF = 'gk-diagnose'
 const PHASES = ['Hypothesise', 'Test', 'Adjudicate']
 const KNOWN_WORKFLOWS = ['gk-review', 'gk-build', 'gk-design', 'gk-research', 'gk-diagnose']
@@ -90,6 +92,8 @@ const PROJECT = (() => {
   if (p.check !== undefined && !isLine(p.check)) projectMalformed('check')
   if (Array.isArray(p.packages) && !p.packages.length) projectMalformed('packages')
   const packages = list('packages', (k, at) => { if (!isLine(k)) projectMalformed(at) })
+  if (Array.isArray(p.uiPaths) && !p.uiPaths.length) projectMalformed('uiPaths')
+  const uiPaths = list('uiPaths', (s, at) => { if (!isLine(s) || !compiles(s)) projectMalformed(at) })
   const guards = list('guards', (g, at) => {
     if (typeof g === 'string') { if (!isLine(g)) projectMalformed(at); return }
     if (!isObject(g)) projectMalformed(at)
@@ -124,6 +128,7 @@ const PROJECT = (() => {
     signOff,
     check: p.check === undefined ? null : p.check,
     packages: p.packages === undefined ? null : packages,
+    uiPaths,
   }
 })()
 const ROOT = PROJECT ? PROJECT.root : null

@@ -318,7 +318,7 @@ test('runStage: under nofable a Fable stage runs on its noFable tier and is reco
   assert.deepEqual(h.routingResult().offTier, [{ stage: 'wf.review', label: 'review:a', tier: 'opus-xhigh', reason: 'nofable' }])
 })
 
-// ---------------- the workflows on the table (Task 9: gk-research, gk-diagnose) ----------------
+// ---------------- the workflows on the table (Task 9: gk-research, gk-diagnose; Task 10: gk-review) ----------------
 
 // The six rules, computed from routes.json alone, for a stage run with ctx {} under the given
 // dials: [model, effort], or null when the stage does not run. ctx {} meets no `when`
@@ -361,15 +361,32 @@ const fullReplies = {
     { match: /^test:/, reply: () => ({ id: 'H1', verdict: 'confirmed', evidence: ['src/cache.ts:4'], contradictsPriorEvidence: false }) },
     { match: /^adjudicate$/, reply: () => ({ mechanism: 'A stale cache entry survives the reload', confirmed: ['H1'], refuted: [], undetermined: [], contradictions: [], suggestedFixScope: ['src/cache.ts'] }) },
   ],
+  // Scope sees one backend file and flags nothing (so the judge is not sensitive); every finder
+  // reports one finding and every refuter upholds it (the minimal reply), so the judge runs.
+  'gk-review': () => reviewReplies(),
 }
 const fullArgs = {
   'gk-research': () => ({ question: 'Where is the retry limit set?', depth: 'thorough', project: {} }),
   'gk-diagnose': () => ({ symptom: 'The list shows a deleted item until the second reload.', project: {} }),
+  'gk-review': () => ({ target: 'main..HEAD', project: {} }),
+}
+function reviewReplies({ detected = {}, scopeDead = false, judge = null } = {}) {
+  return [
+    {
+      match: /^scope$/,
+      reply: () => (scopeDead ? null : { files: [{ path: 'src/a.ts', kind: 'backend' }], touchesUi: false, touchesSecurity: false, touchesClientWording: false, ...detected, summary: 'Changes a.ts.' }),
+    },
+    {
+      match: /^find:/,
+      reply: (prompt, opts) => ({ findings: [{ file: `src/${opts.label.slice(5)}.ts`, line: 3, title: `${opts.label} issue`, claim: 'c', failureScenario: 'f', severity: 'medium' }] }),
+    },
+    ...(judge ? [{ match: /^judge$/, reply: judge }] : []),
+  ]
 }
 const runFull = (wf, extra = {}, replies = fullReplies[wf]()) =>
   runWorkflow(join(workflowsDir, `${wf}.js`), { ...fullArgs[wf](), ...extra }, replies)
 
-for (const wf of ['gk-research', 'gk-diagnose']) {
+for (const wf of ['gk-research', 'gk-diagnose', 'gk-review']) {
   test(`stage tiers equal routes.json, ${wf}: every call runs on the tier the six rules give, under no dials, nofable and fable`, async () => {
     const phases = routes.phases[wf]
     assert.ok(readFileSync(join(workflowsDir, `${wf}.js`), 'utf8').includes('}\n// gk-harness:args-v2\n'), `${wf}: the args-v2 marker`)
@@ -415,7 +432,7 @@ test('dead critic re-runs on opus high: under the fable dial gk-research\'s crit
 
 test('retired args are accepted: profile and escalate run, are ignored, and log the retired line once; no Profile: line', async () => {
   const retired = `profile is retired; routes come from routes.json v${routes.version}`
-  for (const wf of ['gk-research', 'gk-diagnose']) {
+  for (const wf of ['gk-research', 'gk-diagnose', 'gk-review']) {
     const plain = await runFull(wf)
     for (const extra of [{ profile: 'opus', escalate: true }, { profile: 'fable' }, { escalate: false }, { profile: 'nonsense' }]) {
       const { calls, logs, result } = await runFull(wf, extra)
@@ -429,4 +446,113 @@ test('retired args are accepted: profile and escalate run, are ignored, and log 
     // The new fields are accepted too.
     await runFull(wf, { dials: ['deep'], seat: 'opus-medium', changedPaths: ['src/a.ts'] })
   }
+})
+
+// ---------------- gk-review: the judge's floor (Task 10) ----------------
+
+// The judge is sensitive (fable-high) when the caller says ui, security or clientFacing, when a
+// changed path that is not a test file matches the project's uiPaths or a sign-off check's
+// paths, or when the Scope pass detects ui, security or client wording; the Scope pass only
+// raises it. Its author floor is args.author, else args.seat. Each case runs under no dials and
+// under nofable, where a Fable judge moves to opus-xhigh and is listed in offTier.
+const UI_PROJECT = { root: '/tmp/repo', uiPaths: ['^frontend/src/app/'] }
+const PAGE_PROJECT = { root: '/tmp/repo', signOff: [{ key: 'scroll', seat: 's', trigger: 't', paths: ['^frontend/src/app/(.*/)?page\\.tsx$'] }] }
+// [case, inputs (args), responder options, the judge's tier under no dials]
+const JUDGE_CASES = [
+  ['a: none', {}, {}, 'opus-high'],
+  ['b: ui', { ui: true }, {}, 'fable-high'],
+  ['c: security', { security: true }, {}, 'fable-high'],
+  ['d: a changed path matches uiPaths', { changedPaths: ['frontend/src/app/x.tsx'], project: UI_PROJECT }, {}, 'fable-high'],
+  ['e: the only match is a test file', { changedPaths: ['frontend/src/app/x.test.tsx'], project: UI_PROJECT }, {}, 'opus-high'],
+  ['f: scope detects touchesUi', {}, { detected: { touchesUi: true } }, 'fable-high'],
+  ['g: seat fable-medium', { seat: 'fable-medium' }, {}, 'fable-medium'],
+  ['h: author fable-high', { author: 'fable-high' }, {}, 'fable-high'],
+  // Beyond the ten: the other inputs and edges of the same rules.
+  ['clientFacing', { clientFacing: true }, {}, 'fable-high'],
+  ['scope detects security', {}, { detected: { touchesSecurity: true } }, 'fable-high'],
+  ['scope detects client wording', {}, { detected: { touchesClientWording: true } }, 'fable-high'],
+  ['the scope agent dies (nothing can be ruled out)', {}, { scopeDead: true }, 'fable-high'],
+  ['the scope pass cannot lower ui', { ui: true, changedPaths: ['src/a.ts'], project: UI_PROJECT }, { detected: { touchesUi: false, touchesSecurity: false, touchesClientWording: false } }, 'fable-high'],
+  ['a changed path matches a sign-off check\'s paths', { changedPaths: ['README.md', 'frontend/src/app/x/page.tsx'], project: PAGE_PROJECT }, {}, 'fable-high'],
+  ['a matching path inside a test folder', { changedPaths: ['frontend/src/app/__tests__/x.tsx', 'frontend/src/app/tests/y.tsx'], project: UI_PROJECT }, {}, 'opus-high'],
+  ['a spec file', { changedPaths: ['frontend/src/app/x.spec.ts'], project: UI_PROJECT }, {}, 'opus-high'],
+  ['an absolute path under the root, written with backslashes', { changedPaths: ['\\tmp\\repo\\frontend\\src\\app\\x.tsx'], project: UI_PROJECT }, {}, 'fable-high'],
+  ['changed paths and no project rules', { changedPaths: ['frontend/src/app/x.tsx'], project: { root: '/tmp/repo' } }, {}, 'opus-high'],
+  ['the path rules and no changed paths', { project: UI_PROJECT }, {}, 'opus-high'],
+  ['author wins over seat', { author: 'fable-medium', seat: 'fable-high' }, {}, 'fable-medium'],
+  ['an author at the floor or below does not lower it', { author: 'sonnet-medium' }, {}, 'opus-high'],
+  ['an author above the floor, below Fable', { author: 'opus-xhigh' }, {}, 'opus-xhigh'],
+  ['sensitive with a fable-medium seat', { security: true, seat: 'fable-medium' }, {}, 'fable-high'],
+]
+const runReview = (args, opts = {}) => runWorkflow(join(workflowsDir, 'gk-review.js'), { target: 'main..HEAD', project: {}, ...structuredClone(args) }, reviewReplies(opts))
+const tierName = (c) => `${c.model}-${c.effort}`
+const noFableOf = (tier) => (routes.tiers[tier].model === 'fable' ? routes.stages['gk-review.judge'].noFable : tier)
+
+test('judge floor, gk-review: cases a-h and the edges of the same rules, under no dials and nofable', async () => {
+  assert.equal(routes.stages['gk-review.judge'].noFable, 'opus-xhigh')
+  for (const [name, args, opts, want] of JUDGE_CASES) {
+    for (const dials of [[], ['nofable']]) {
+      const { calls, logs, result } = await runReview({ ...args, dials }, opts)
+      const expected = dials.length ? noFableOf(want) : want
+      const judges = calls.filter((c) => c.label === 'judge')
+      assert.deepEqual(judges.map(tierName), [expected], `${name} ${JSON.stringify(dials)}: the judge`)
+      // The other stages keep their base tiers.
+      for (const c of calls.filter((x) => x.label !== 'judge')) {
+        assert.deepEqual([c.model, c.effort], expectedRoute(routes.phases['gk-review'][c.phase], dials), `${name}: ${c.label}`)
+      }
+      const t = routes.tiers[expected]
+      assert.equal(logs.filter((l) => /^Judge: \S+ \S+ over /.test(l)).length, 1, `${name}: one judge line`)
+      assert.ok(logs.some((l) => l.startsWith(`Judge: ${t.model} ${t.effort} over 4 survivor(s)`)), `${name} ${JSON.stringify(dials)}: the judge line\n${logs.join('\n')}`)
+      const moved = dials.length && expected !== want
+      assert.deepEqual(result.routing.offTier, moved ? [{ stage: 'gk-review.judge', label: 'judge', tier: 'opus-xhigh', reason: 'nofable' }] : [], `${name} ${JSON.stringify(dials)}: offTier`)
+    }
+  }
+})
+
+test('judge floor, gk-review: case i, ui under nofable, is judged on opus xhigh and listed in offTier', async () => {
+  const { calls, result } = await runReview({ ui: true, dials: ['nofable'] })
+  assert.deepEqual(calls.filter((c) => c.label === 'judge').map((c) => [c.model, c.effort]), [['opus', 'xhigh']])
+  assert.deepEqual(result.routing.dials, ['nofable'])
+  assert.deepEqual(result.routing.offTier, [{ stage: 'gk-review.judge', label: 'judge', tier: 'opus-xhigh', reason: 'nofable' }])
+})
+
+test('judge floor, gk-review: case j, a dead fable-high judge re-runs once on opus xhigh and the drop is listed in offTier', async () => {
+  const verdict = { confirmed: [], rejected: [{ title: 'find:correctness issue', reason: 'r' }] }
+  const judge = (prompt, opts) => (opts.model === 'fable' ? null : verdict)
+  const { calls, result } = await runReview({ ui: true }, { judge })
+  assert.deepEqual(calls.filter((c) => c.label === 'judge').map((c) => [c.model, c.effort]), [['fable', 'high'], ['opus', 'xhigh']])
+  assert.deepEqual(result.rejected, verdict.rejected, 'the re-run\'s verdict is used')
+  assert.equal(result.unjudged.length, 3)
+  assert.deepEqual(result.routing.offTier, [{ stage: 'gk-review.judge', label: 'judge', tier: 'opus-xhigh', reason: 'onFail' }])
+  // Under nofable the judge starts on opus xhigh; when it dies there is no re-run.
+  const off = await runReview({ ui: true, dials: ['nofable'] }, { judge: () => null })
+  assert.deepEqual(off.calls.filter((c) => c.label === 'judge').map((c) => [c.model, c.effort]), [['opus', 'xhigh']])
+  assert.equal(off.result.unjudged.length, 4)
+  assert.deepEqual(off.result.routing.offTier, [{ stage: 'gk-review.judge', label: 'judge', tier: 'opus-xhigh', reason: 'nofable' }])
+  // A dead judge that was not on Fable is not re-run either.
+  const plain = await runReview({}, { judge: () => null })
+  assert.deepEqual(plain.calls.filter((c) => c.label === 'judge').map((c) => [c.model, c.effort]), [['opus', 'high']])
+  assert.deepEqual(plain.result.routing.offTier, [])
+})
+
+test('judge floor, gk-review: an author or seat that names no tier is logged and ignored', async () => {
+  for (const [k, v] of [['author', 'fable'], ['seat', 'opus-medium+ultracode'], ['author', 7]]) {
+    const { calls, logs } = await runReview({ [k]: v })
+    assert.deepEqual(calls.filter((c) => c.label === 'judge').map(tierName), ['opus-high'], `${k} ${JSON.stringify(v)}`)
+    assert.deepEqual(logs.filter((l) => l.startsWith('routes: ctx.author')), [`routes: ctx.author ${JSON.stringify(v)} is not a tier this workflow knows; ignored`], `${k} ${JSON.stringify(v)}: logged once`)
+  }
+})
+
+test('changedPaths, gk-review: an array of strings or absent; anything else stops the run before any agent', async () => {
+  for (const bad of ['src/a.ts', [3], ['ok', null], {}, null, true]) {
+    const seen = []
+    const spy = [{ match: /.*/, reply: (prompt, opts) => { seen.push(opts.label); return null } }]
+    await assert.rejects(
+      runWorkflow(join(workflowsDir, 'gk-review.js'), { target: 'main..HEAD', changedPaths: bad }, spy),
+      (e) => e.message === 'gk-review: args.changedPaths must be an array of strings when given',
+      JSON.stringify(bad),
+    )
+    assert.deepEqual(seen, [], JSON.stringify(bad))
+  }
+  for (const ok of [[], ['src/a.ts']]) await runReview({ changedPaths: ok })
 })

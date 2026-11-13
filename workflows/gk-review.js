@@ -2,22 +2,22 @@ export const meta = {
   name: 'gk-review',
   description: 'Review a diff, branch range or the working tree before it is believed: scope, four-dimension find, adversarial refute, one judge',
   whenToUse:
-    'Run before believing a change (pre-merge to the shared branch, after a build workflow, before sign-off). Requires args {target: string — a git revision range such as "main..HEAD" or "main..feat/x" (branches are shared across worktrees, so a worktree branch is reviewed by naming it), or the literal "working-tree" for the uncommitted tree of the repository (REQUIRED); focus?: string[] — optional extra review dimensions, one finder each; ui?: boolean; security?: boolean; clientFacing?: boolean — any true (or the Scope pass detecting ui/security/client wording) routes the judge to fable under the fable profile; under the opus/sonnet profiles only ui/client-facing work routes to fable and security-only work is judged by opus xhigh; votes?: number — refuters per finding, default 3, integer 1..5; profile?: "fable" | "opus" | "sonnet" — the seat\'s tier profile, default "fable"; escalate?: boolean — route the judge to fable under a non-fable profile on Carl\'s word; project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases) and reviewFinders ([{key, brief, replaces?}] — a finder that replaces a core one takes its place, others run after the core four); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. Returns {scope, confirmed, rejected, killedByRefuters: [titles], dedupDropped: number, unjudged: [survivors the judge died on or gave no verdict for]} as JSON; the calling session writes the synthesis.',
+    'Run before believing a change (pre-merge to the shared branch, after a build workflow, before sign-off). Requires args {target: string — a git revision range such as "main..HEAD" or "main..feat/x" (branches are shared across worktrees, so a worktree branch is reviewed by naming it), or the literal "working-tree" for the uncommitted tree of the repository (REQUIRED); focus?: string[] — optional extra review dimensions, one finder each; ui?: boolean; security?: boolean; clientFacing?: boolean — any true makes the change sensitive, which puts the judge on fable high; so does a changed path (not a test file) that matches the project\'s uiPaths or a sign-off check\'s paths, or the Scope pass detecting ui, security or client wording (the Scope pass only raises it); votes?: number — refuters per finding, default 3, integer 1..5; author?: string — the tier that wrote the change (e.g. "fable-medium"), the judge\'s floor; seat?: string — the seat\'s tier, the floor when author is not given (normally added by the gk-harness hook); changedPaths?: string[] — the target\'s changed paths relative to the top level (normally added by the gk-harness hook); dials?: string[] — routing dials: "fable" puts the judge on fable, "nofable" moves a fable judge to opus xhigh (each stage\'s model and effort come from routes.json; a judge that dies on fable runs once more on opus xhigh); project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases), reviewFinders ([{key, brief, replaces?}] — a finder that replaces a core one takes its place, others run after the core four) and uiPaths (regular expressions over changed paths that raise the judge); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. Returns {scope, confirmed, rejected, killedByRefuters: [titles], dedupDropped: number, unjudged: [survivors the judge died on or gave no verdict for], routing: {routes, dials, offTier}} as JSON; the calling session writes the synthesis.',
   phases: [
     { title: 'Scope', detail: 'one haiku reader classifies the changed files and flags ui/security/client-wording', model: 'haiku' },
     { title: 'Find', detail: 'four sonnet finders (correctness, security, regressions-and-tests, efficiency-and-simplification; a project finder may take one\'s place or run after them) plus one per focus entry; then dedup', model: 'sonnet' },
     { title: 'Verify', detail: '`votes` sonnet refuters per finding; survives on a strict majority not refuting', model: 'sonnet' },
-    { title: 'Judge', detail: 'one judge over all survivors: fable xhigh for ui/security/client-facing work, else opus xhigh (under the opus/sonnet profiles fable only for ui/client-facing work or escalate; security-only work is judged by opus xhigh)' },
+    { title: 'Judge', detail: 'one judge over all survivors: fable high for sensitive work (ui, security or client wording, by flag, changed path or the Scope pass), else opus high, never below the author\'s tier; opus xhigh under nofable' },
   ],
 }
-// gk-harness:args-v1
+// gk-harness:args-v2
 
 // `args` may arrive as a raw JSON string depending on the invoking runtime.
 const ARGS = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch (e) { return args } })() : args
 const DEFAULT_VOTES = 3
 
 if (!ARGS || typeof ARGS !== 'object') {
-  throw new Error('gk-review requires args {target: "main..HEAD" | "working-tree", focus?: string[], ui?: boolean, security?: boolean, clientFacing?: boolean, votes?: 1..5, profile?: "fable" | "opus" | "sonnet", escalate?: boolean, project?: object}')
+  throw new Error('gk-review requires args {target: "main..HEAD" | "working-tree", focus?: string[], ui?: boolean, security?: boolean, clientFacing?: boolean, votes?: 1..5, author?: string, seat?: string, changedPaths?: string[], dials?: string[], project?: object}')
 }
 const target = ARGS.target
 if (typeof target !== 'string' || !target.trim()) {
@@ -38,15 +38,11 @@ const votes = ARGS.votes === undefined ? DEFAULT_VOTES : ARGS.votes
 if (!Number.isInteger(votes) || votes < 1 || votes > 5) {
   throw new Error(`gk-review: args.votes must be an integer 1..5 (got ${JSON.stringify(ARGS.votes)})`)
 }
-
-// ---------------- Profile (three-seat policy, 2026-10-13) ----------------
-// 'fable' = Mode A (default, unchanged behaviour); 'opus' = Mode B; 'sonnet' = Mode C.
-const PROFILE = ARGS.profile === undefined ? 'fable' : ARGS.profile
-if (!['fable', 'opus', 'sonnet'].includes(PROFILE)) throw new Error(`gk-review: args.profile must be one of fable|opus|sonnet (got ${JSON.stringify(ARGS.profile)})`)
-if (ARGS.escalate !== undefined && typeof ARGS.escalate !== 'boolean') throw new Error('gk-review: args.escalate, when given, must be a boolean')
-const ESCALATE = ARGS.escalate === true  // Carl's word: route the apex judge to fable under a non-fable profile
-const APEX = PROFILE === 'fable' ? 'fable' : 'opus'   // the top of the ladder for this profile
-log(`Profile: ${PROFILE} (apex ${APEX}${ESCALATE ? ', escalated to fable on Carl\'s word' : ''})`)
+// The target's changed paths, which the gk-harness hook adds; they feed the judge's floor.
+if (ARGS.changedPaths !== undefined && (!Array.isArray(ARGS.changedPaths) || !ARGS.changedPaths.every(f => typeof f === 'string'))) {
+  throw new Error('gk-review: args.changedPaths must be an array of strings when given')
+}
+// author and seat name tiers; one that names no tier is logged and ignored by routeOf.
 
 // ================= gk-project block: BEGIN (copy verbatim; only WF and PHASES differ) =================
 // Every gk-* workflow carries this same block (scripts cannot import): the args.project
@@ -72,9 +68,11 @@ log(`Profile: ${PROFILE} (apex ${APEX}${ESCALATE ? ', escalated to fable on Carl
 // reviewer?}: key and seat are printable lines, the other texts non-empty strings, uiJudge a
 // boolean, and paths a non-empty list of regular expressions (printable lines that compile),
 // given only with a trigger; any other key is malformed. check is one printable line and
-// packages a non-empty list of printable lines. gk-build uses the sign-off checks, check (its
-// default check command) and packages (the folders it runs that check from); the other
-// workflows only check their shape.
+// packages a non-empty list of printable lines. uiPaths is a non-empty list of regular
+// expressions, checked like a sign-off check's paths. gk-build uses the sign-off checks, check
+// (its default check command) and packages (the folders it runs that check from); gk-review
+// uses uiPaths and the sign-off checks' paths (a changed file that is not a test file and
+// matches one raises its judge); the other workflows only check their shape.
 const WF = 'gk-review'
 const PHASES = ['Scope', 'Find', 'Verify', 'Judge']
 const KNOWN_WORKFLOWS = ['gk-review', 'gk-build', 'gk-design', 'gk-research', 'gk-diagnose']
@@ -99,6 +97,8 @@ const PROJECT = (() => {
   if (p.check !== undefined && !isLine(p.check)) projectMalformed('check')
   if (Array.isArray(p.packages) && !p.packages.length) projectMalformed('packages')
   const packages = list('packages', (k, at) => { if (!isLine(k)) projectMalformed(at) })
+  if (Array.isArray(p.uiPaths) && !p.uiPaths.length) projectMalformed('uiPaths')
+  const uiPaths = list('uiPaths', (s, at) => { if (!isLine(s) || !compiles(s)) projectMalformed(at) })
   const guards = list('guards', (g, at) => {
     if (typeof g === 'string') { if (!isLine(g)) projectMalformed(at); return }
     if (!isObject(g)) projectMalformed(at)
@@ -133,6 +133,7 @@ const PROJECT = (() => {
     signOff,
     check: p.check === undefined ? null : p.check,
     packages: p.packages === undefined ? null : packages,
+    uiPaths,
   }
 })()
 const ROOT = PROJECT ? PROJECT.root : null
@@ -289,6 +290,8 @@ async function runStage(stage, ctx, prompt, opts = {}) {
 }
 const routingResult = () => ({ routes: ROUTES.version, dials: DIALS.slice(), offTier: offTier.slice() })
 // </gk-routes>
+// profile and escalate are retired: every stage takes its model and effort from ROUTES.
+if (ARGS.profile !== undefined || ARGS.escalate !== undefined) log(`profile is retired; routes come from routes.json v${ROUTES.version}`)
 
 const WT = target === 'working-tree'
 const DIFF_CMDS = WT
@@ -382,24 +385,46 @@ const FOCUS_DIMENSIONS = (() => {
 })()
 const DIMENSIONS = [...PROJECT_DIMENSIONS, ...FOCUS_DIMENSIONS]
 
+// A finder on Windows may report C:\r\src\a.ts: backslashes become slashes before the root
+// prefix (root plus "/", so /tmp/repository is not under /tmp/repo) and a leading ./ go.
+const slashes = s => String(s).replace(/\\/g, '/')
+const ROOT_PREFIX = ROOT ? slashes(ROOT).replace(/\/+$/, '') + '/' : null
+const normFile = s => {
+  const f = slashes(s)
+  return (ROOT_PREFIX && f.startsWith(ROOT_PREFIX) ? f.slice(ROOT_PREFIX.length) : f).replace(/^\.\//, '')
+}
+
+// ---------------- The judge's floor, from code ----------------
+// The change is sensitive (routes.json puts a sensitive judge on its `when` tier) when the
+// caller says ui, security or clientFacing, when a changed path matches one of the project's
+// own path rules (its uiPaths and every sign-off check's paths; there are no built-in patterns),
+// or when the Scope pass detects ui, security or client wording. The Scope pass only raises it.
+// A test file never counts: TEST_FILE is the Scope pass's own test rule (TEST_KINDS, which its
+// prompt states) as code.
+const TEST_KINDS = '*.test.* / *.spec.* / test dirs'
+const TEST_FILE = /\.(test|spec)\.[^/]*$|(^|\/)(tests?|__tests__)\//
+const PATH_RULES = PROJECT ? [...PROJECT.uiPaths, ...PROJECT.signOff.flatMap(c => c.paths || [])].map(s => new RegExp(s)) : []
+const PATH_HITS = (ARGS.changedPaths || []).map(normFile).filter(f => !TEST_FILE.test(f) && PATH_RULES.some(re => re.test(f)))
+const FLAGGED = ARGS.ui === true || ARGS.security === true || ARGS.clientFacing === true
+
 phase('Scope')
 log(`gk-review: ${WT ? 'working tree' : target}; ${votes} refuter(s) per finding; ${FOCUS_DIMENSIONS.length} extra focus dimension(s)`)
-const scopeRaw = await agent(
+const scopeRaw = await runStage('gk-review.scope', {},
   `Scope a code change for review. Run ${DIFF_CMDS}.
-Return every changed file (excluding untracked scratch) with a kind judged from its path: user-interface code (pages, components, views, styles) = ui; database migrations = migration; *.test.* / *.spec.* / test dirs = test; docs/, *.md = docs; other application or library source = backend; anything else = other.
+Return every changed file (excluding untracked scratch) with a kind judged from its path: user-interface code (pages, components, views, styles) = ui; database migrations = migration; ${TEST_KINDS} = test; docs/, *.md = docs; other application or library source = backend; anything else = other.
 touchesUi: any ui file changed. touchesSecurity: any change to authentication, authorisation or access control, permissions, middleware, session or secret handling, PII handling or audit logging. touchesClientWording: any change to code or text that renders client-visible wording — reports, letters and other generated documents, LLM prompts or rubrics, document templates.${stageGuards('Scope').length ? ' Where the project rules below give this repository\'s own file kinds, or its own touchesUi, touchesSecurity or touchesClientWording rule, use those instead of the matching definitions above (they replace them; they do not add to them).' : ''}
 summary: two or three sentences on what the change does.${COMMON}${projectRules('Scope')}`,
-  { label: 'scope', phase: 'Scope', model: 'haiku', effort: 'high', schema: SCOPE_SCHEMA },
+  { label: 'scope', phase: 'Scope', schema: SCOPE_SCHEMA },
 )
 // A dead Scope agent must not sink the review: the finders read the diff themselves.
-// An unknown scope cannot rule out ui/security/client wording, so the judge keeps the fable route.
+// An unknown scope cannot rule out ui/security/client wording, so the judge is sensitive.
 const scope = scopeRaw || { files: [], touchesUi: true, touchesSecurity: true, touchesClientWording: true, summary: '(unavailable: the Scope agent returned nothing; read the diff yourself)', unavailable: true }
 log(scopeRaw
   ? `Scope: ${scope.files.length} file(s); ui=${scope.touchesUi} security=${scope.touchesSecurity} clientWording=${scope.touchesClientWording}`
   : 'Scope: agent returned nothing; reviewing without a file list, judge on the fable route')
 if (scopeRaw && !scope.files.length) {
   log('Scope: no changed files; nothing to review')
-  return { scope, confirmed: [], rejected: [], killedByRefuters: [], dedupDropped: 0, unjudged: [] }
+  return { scope, confirmed: [], rejected: [], killedByRefuters: [], dedupDropped: 0, unjudged: [], routing: routingResult() }
 }
 // Untracked new files are invisible to `git diff HEAD`, so the finders get the scoped list.
 const FILES = scope.files.length
@@ -410,11 +435,11 @@ phase('Find')
 // Finders are independent, so they run as a pipeline; awaiting the whole set is
 // the BARRIER the dedup below needs (it compares findings across all finders).
 const finderRuns = await pipeline(DIMENSIONS, (d, _o, i) =>
-  agent(
+  runStage('gk-review.find', {},
     `You are finder #${i + 1} on a code review, dimension "${d.key}". Look only for: ${d.brief}
 Change summary: ${scope.summary}${FILES}
 Read the full diff yourself, then the surrounding code as needed. Report only defects introduced or exposed by this change, each with file, line (in the new version), a short title, the claim, a concrete failure scenario and a severity. An empty list is a valid answer; do not pad.${COMMON}${projectRules('Find')}`,
-    { label: `find:${d.key}`, phase: 'Find', model: 'sonnet', effort: 'medium', schema: FINDINGS_SCHEMA },
+    { label: `find:${d.key}`, phase: 'Find', schema: FINDINGS_SCHEMA },
   ).then(r => (r ? r.findings.map(f => ({ ...f, dimension: d.key })) : null)),
 )
 const deadFinders = DIMENSIONS.filter((d, i) => !finderRuns[i]).map(d => d.key)
@@ -422,14 +447,6 @@ if (deadFinders.length) log(`Find: ${deadFinders.length} finder(s) returned noth
 const found = finderRuns.filter(Boolean).flat()
 
 const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
-// A finder on Windows may report C:\r\src\a.ts: backslashes become slashes before the root
-// prefix (root plus "/", so /tmp/repository is not under /tmp/repo) and a leading ./ go.
-const slashes = s => String(s).replace(/\\/g, '/')
-const ROOT_PREFIX = ROOT ? slashes(ROOT).replace(/\/+$/, '') + '/' : null
-const normFile = s => {
-  const f = slashes(s)
-  return (ROOT_PREFIX && f.startsWith(ROOT_PREFIX) ? f.slice(ROOT_PREFIX.length) : f).replace(/^\.\//, '')
-}
 const seen = new Set()
 const deduped = found.filter(f => {
   const k = `${normFile(f.file)}|${f.line}|${norm(f.title)}`
@@ -439,20 +456,20 @@ const deduped = found.filter(f => {
 })
 const dedupDropped = found.length - deduped.length
 log(`Find: ${found.length} raw finding(s) from ${DIMENSIONS.length - deadFinders.length}/${DIMENSIONS.length} finder(s); dedup dropped ${dedupDropped}; ${deduped.length} go to Verify`)
-if (!deduped.length) return { scope, confirmed: [], rejected: [], killedByRefuters: [], dedupDropped, unjudged: [] }
+if (!deduped.length) return { scope, confirmed: [], rejected: [], killedByRefuters: [], dedupDropped, unjudged: [], routing: routingResult() }
 
 phase('Verify')
 const LENSES = ['does it actually reproduce', 'is the code path reachable in practice', 'is it already handled elsewhere', 'is the claimed line/behaviour read correctly', 'is the severity justified']
 const verdicts = (await pipeline(deduped, (f, _o, i) =>
   parallel(Array.from({ length: votes }, (_, v) => () =>
-    agent(
+    runStage('gk-review.refute', {},
       `You are refuter ${v + 1}/${votes} for finding #${i + 1}. Your job is to REFUTE this review finding; default to refuted=true if uncertain. Lens: ${LENSES[v % LENSES.length]}.
 Finding (${f.dimension}, ${f.severity}): ${f.title}
 File: ${f.file}:${f.line}
 Claim: ${f.claim}
 Failure scenario: ${f.failureScenario}
 Read the diff and the code at that location. Set refuted=false only if you confirmed the defect is real and introduced or exposed by this change; give the reason in one or two sentences.${COMMON}${projectRules('Verify')}`,
-      { label: `refute:${i + 1}.${v + 1}`, phase: 'Verify', model: 'sonnet', effort: 'medium', schema: VOTE_SCHEMA },
+      { label: `refute:${i + 1}.${v + 1}`, phase: 'Verify', schema: VOTE_SCHEMA },
     ),
   )).then(vs => {
     const ok = vs.filter(Boolean)
@@ -467,34 +484,37 @@ const killedByRefuters = verdicts.filter(v => !v.survives).map(v => v.finding.ti
 const deadVotes = verdicts.reduce((n, v) => n + v.dead, 0)
 const lost = deduped.length - verdicts.length
 log(`Verify: ${survivors.length} survived, ${killedByRefuters.length} killed by refuters${deadVotes ? `; ${deadVotes} refuter(s) died and counted as refutations` : ''}${lost ? `; ${lost} finding(s) lost to a failed verify stage` : ''}`)
-if (!survivors.length) return { scope, confirmed: [], rejected: [], killedByRefuters, dedupDropped, unjudged: [] }
+if (!survivors.length) return { scope, confirmed: [], rejected: [], killedByRefuters, dedupDropped, unjudged: [], routing: routingResult() }
 
 phase('Judge')
-const signOff = !!(ARGS.ui || ARGS.clientFacing || scope.touchesUi || scope.touchesClientWording)   // UI sign-off rule, all profiles
-const securityOnly = !signOff && !!(ARGS.security || scope.touchesSecurity)
-const judgeModel = (PROFILE === 'fable' && (signOff || securityOnly)) || signOff || ESCALATE ? 'fable' : 'opus'
-if (securityOnly && judgeModel !== 'fable') log('Security-sensitive scope judged by opus xhigh under the ' + PROFILE + ' profile — escalate to fable on Carl\'s word (args.escalate: true)')
-const judgeRoute = signOff ? ' (ui/client-facing sign-off route)'
-  : securityOnly && judgeModel === 'fable' ? (PROFILE === 'fable' ? ' (security route)' : ' (security route, escalated on Carl\'s word)')
-  : securityOnly ? ' (security route, judged by opus under the ' + PROFILE + ' profile)'
-  : ESCALATE && judgeModel === 'fable' ? ' (escalated on Carl\'s word)'
-  : ''
-log(`Judge: ${judgeModel} xhigh over ${survivors.length} survivor(s)${judgeRoute}`)
-const judged = await agent(
+const detected = scope.touchesUi === true || scope.touchesSecurity === true || scope.touchesClientWording === true
+const sensitive = FLAGGED || PATH_HITS.length > 0 || detected
+if (PATH_HITS.length) log(`Judge floor: ${PATH_HITS.length} changed path(s) match the project's path rules: ${PATH_HITS.join(', ')}`)
+// The route's reason, for the log: ui or client wording first, then security, then a path rule.
+const uiRoute = ARGS.ui === true || ARGS.clientFacing === true || scope.touchesUi === true || scope.touchesClientWording === true
+const securityRoute = ARGS.security === true || scope.touchesSecurity === true
+const judgeRoute = uiRoute ? ' (ui/client-facing sign-off route)' : securityRoute ? ' (security route)' : PATH_HITS.length ? ' (project path route)' : ''
+// The author's tier is the judge's floor: args.author, else the seat's tier.
+const author = ARGS.author || ARGS.seat
+const judgeRouted = routeOf('gk-review.judge', { sensitive, author })
+log(`Judge: ${judgeRouted.model} ${judgeRouted.effort} over ${survivors.length} survivor(s)${judgeRoute}`)
+// routeOf has logged an author that names no tier; runStage routes again, so it gets the author
+// only when it names one (the same route, and the line once).
+const judged = await runStage('gk-review.judge', { sensitive, author: Object.keys(ROUTES.tiers).includes(author) ? author : null },
   `You are the final judge on a code review. Change summary: ${scope.summary}
 The findings below each survived ${votes} adversarial refuter(s). For each one, read the diff and the code yourself and decide: confirmed (real, caused or exposed by this change) or rejected. For confirmed findings keep every field, set the severity you judge correct, and give a concrete minimal fix (what to change, where). For rejected ones give the title and the reason. Return exactly one verdict per finding and keep each title verbatim. Weigh client-visible wording and security invariants heavily.
 
 Findings (JSON):
 ${JSON.stringify(survivors, null, 2)}${COMMON}${projectRules('Judge')}`,
-  { label: 'judge', phase: 'Judge', model: judgeModel, effort: 'xhigh', schema: JUDGE_SCHEMA },
+  { label: 'judge', phase: 'Judge', schema: JUDGE_SCHEMA },
 )
 // A dead judge must not discard the verified survivors: hand them back unjudged.
 if (!judged) {
   log(`Judge: agent returned nothing; ${survivors.length} survivor(s) returned unjudged`)
-  return { scope, confirmed: [], rejected: [], killedByRefuters, dedupDropped, unjudged: survivors }
+  return { scope, confirmed: [], rejected: [], killedByRefuters, dedupDropped, unjudged: survivors, routing: routingResult() }
 }
 const decided = new Set([...judged.confirmed, ...judged.rejected].map(x => norm(x.title)))
 const unjudged = survivors.filter(s => !decided.has(norm(s.title)))
 log(`Judge: ${judged.confirmed.length} confirmed, ${judged.rejected.length} rejected${unjudged.length ? `; ${unjudged.length} survivor(s) matched no verdict by title (left out or retitled): ${unjudged.map(s => s.title).join('; ')}` : ''}`)
 
-return { scope, confirmed: judged.confirmed, rejected: judged.rejected, killedByRefuters, dedupDropped, unjudged }
+return { scope, confirmed: judged.confirmed, rejected: judged.rejected, killedByRefuters, dedupDropped, unjudged, routing: routingResult() }
