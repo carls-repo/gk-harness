@@ -24,11 +24,16 @@ def is_end(line: str) -> bool:
 
 
 def render_block(root: Any, windows: bool) -> str:
-    """The block that sources <root>/shell/aliases.sh, or dot-sources <root>/shell/aliases.ps1
-    on Windows (PowerShell reads `#` as a comment too). The path is posix and double-quoted;
-    raises ValueError (paths.quotable) when it holds '"', '$' or '`'."""
-    name = "aliases.ps1" if windows else "aliases.sh"
-    return '%s\n. "%s/shell/%s"\n%s\n' % (BEGIN_MARKER, quotable(root), name, END_MARKER)
+    """The block that sets GK_HARNESS_ROOT to root (gkh runs $GK_HARNESS_ROOT/install.py) and
+    then sources <root>/shell/aliases.sh, or dot-sources <root>/shell/aliases.ps1 on Windows
+    (PowerShell reads `#` as a comment too). The path is posix and double-quoted; raises
+    ValueError (paths.quotable) when it holds '"', '$' or '`'."""
+    q = quotable(root)
+    if windows:
+        export, name = '$env:GK_HARNESS_ROOT = "%s"' % q, "aliases.ps1"
+    else:
+        export, name = 'export GK_HARNESS_ROOT="%s"' % q, "aliases.sh"
+    return '%s\n%s\n. "%s/shell/%s"\n%s\n' % (BEGIN_MARKER, export, q, name, END_MARKER)
 
 
 def apply(existing: str | None, block: str, label: str = LABEL,

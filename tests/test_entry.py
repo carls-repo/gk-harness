@@ -33,6 +33,9 @@ class EntryTests(unittest.TestCase):
         self.assertRegex(gkh.VERSION, r"\d+\.\d+\.\d+")
         self.assertTrue(re.fullmatch(r"\d+\.\d+\.\d+", gkh.VERSION))
 
+    def test_version_is_2_0_0(self):
+        self.assertEqual(gkh.VERSION, "2.0.0")
+
     def test_install_py_runs_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             proc = subprocess.run(

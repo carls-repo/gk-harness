@@ -640,6 +640,120 @@ class PreflightTests(InstallBase):
         self.assertEqual(os.listdir(str(self.cdir)), [])
 
 
+class BusyPeerTests(InstallBase):
+    """install refuses, before it writes anything, while another Claude session is busy, so an
+    install never swaps hooks under a working session; --ignore-busy goes ahead."""
+
+    def setUp(self):
+        super().setUp()
+        if os.name == "nt":
+            self.skipTest("spawns sleep")
+        self.child = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(self.child.wait)
+        self.addCleanup(self.child.kill)
+
+    def busy(self, stem: str, name: str | None) -> None:
+        data = {"pid": self.child.pid, "sessionId": stem, "status": "busy"}
+        if name is not None:
+            data["name"] = name
+        write(self.cdir / "sessions" / ("%s.json" % stem), json.dumps(data))
+
+    def test_install_refuses_with_exit_3_and_writes_nothing(self):
+        self.busy("s1", "builder")
+        self.busy("s2", None)
+        write(self.cdir / "sessions" / "s3.json", json.dumps(
+            {"pid": self.child.pid, "status": "idle", "name": "idler"}))
+        before = snapshot(self.home)
+        code, out, err = self.gk("install")
+        self.assertEqual(code, 3, out + err)
+        self.assertEqual(err, "2 session(s) busy: builder, s2. Wait until they are idle, or "
+                              "pass --ignore-busy.\n")
+        self.assertEqual(out, "")
+        self.assertEqual(snapshot(self.home), before)
+        code, _, err = self.gk("install", "--retire-legacy")
+        self.assertEqual(code, 3, err)
+        self.assertEqual(snapshot(self.home), before)
+
+    def test_ignore_busy_installs(self):
+        self.busy("s1", "builder")
+        self.ok("install", "--ignore-busy")
+        self.assertTrue((self.cdir / "settings.json").is_file())
+        self.ok("install", "--retire-legacy", "--ignore-busy")
+
+    def test_our_own_ancestor_does_not_count(self):
+        write(self.cdir / "sessions" / "me.json", json.dumps(
+            {"pid": os.getppid(), "status": "busy", "name": "me"}))
+        self.ok("install")
+
+    def test_uninstall_and_status_do_not_check(self):
+        self.busy("s1", "builder")
+        self.ok("status")
+        self.ok("uninstall")
+
+    def test_update_reexecutes_install_with_ignore_busy_once_the_check_passed(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(cli.subprocess, "run", fake_run):
+            self.ok("update")
+            self.ok("update", "--retire-legacy")
+            self.busy("s1", "builder")
+            self.ok("update", "--ignore-busy")
+            code, _, err = self.gk("update")
+        self.assertEqual(code, 3, err)
+        self.assertIn("1 session(s) busy: builder.", err)
+        pulls = [c for c in calls if c[0] == "git"]
+        installs = [c[2:] for c in calls if c[0] != "git"]
+        self.assertEqual(len(pulls), 3)  # the refused update never pulled
+        self.assertEqual(installs, [["install", "--ignore-busy"],
+                                    ["install", "--retire-legacy", "--ignore-busy"],
+                                    ["install", "--ignore-busy"]])
+
+
+class FableSwitchTests(InstallBase):
+    """gkh fable off|on|status: the switch file the hooks read (gk_common.fable_off_file)."""
+
+    def test_off_on_status(self):
+        switch = self.cdir / "state" / "gk-fable-off.json"
+        out, _ = self.ok("fable", "status")
+        self.assertEqual(out, "Fable is on\n")
+        out, _ = self.ok("fable", "off")
+        data = json.loads(switch.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(data), ["since"])
+        self.assertRegex(data["since"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertIn("off", out)
+        out, _ = self.ok("fable", "status")
+        self.assertEqual(out, "Fable is off since %s\n" % data["since"])
+        self.ok("fable", "off")  # off again keeps the switch off
+        self.assertTrue(switch.is_file())
+        out, _ = self.ok("fable", "on")
+        self.assertFalse(os.path.lexists(str(switch)))
+        self.assertIn("on", out)
+        self.ok("fable", "on")  # on when already on is a no-op
+        out, _ = self.ok("fable", "status")
+        self.assertEqual(out, "Fable is on\n")
+
+    def test_the_hooks_read_the_same_file(self):
+        sys.path.insert(0, str(Path(ROOT) / "hooks"))
+        self.addCleanup(sys.path.remove, str(Path(ROOT) / "hooks"))
+        import gk_common
+        self.ok("fable", "off")
+        self.assertTrue(gk_common.fable_off())
+        self.ok("fable", "on")
+        self.assertFalse(gk_common.fable_off())
+
+    def test_fable_needs_exactly_one_word(self):
+        for argv in (["fable"], ["fable", "maybe"], ["fable", "on", "off"], ["fable", "--check"]):
+            with self.subTest(argv=argv):
+                code, _, err = self.gk(*argv)
+                self.assertEqual(code, 2)
+                self.assertTrue(err.startswith("usage: "), err)
+                self.assertIn("fable off|on|status", err)
+
+
 class UninstallTests(InstallBase):
     def test_nothing_recorded(self):
         out, err = self.ok("uninstall")
@@ -1420,7 +1534,8 @@ class RcChoiceTests(InstallBase):
                 rc_files = sorted(p.name for p in self.home.iterdir() if p.is_file())
                 self.assertEqual(rc_files, [name])
                 text = (self.home / name).read_text(encoding="utf-8")
-                self.assertIn('. "%s/shell/aliases.sh"\n' % root, text)
+                self.assertIn('export GK_HARNESS_ROOT="%s"\n. "%s/shell/aliases.sh"\n'
+                              % (root, root), text)
                 self.assertNotIn(EXECUTION_POLICY, out)
                 self.ok("uninstall")
                 self.assertTreeEqual(start, snapshot(self.home))
@@ -1455,7 +1570,8 @@ class RcChoiceTests(InstallBase):
         # uninstall returns it to zero bytes, whether or not it was edited inside the block. A
         # UTF-16 profile holding only its mark keeps that mark and gets no second one.
         profile = self.home / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
-        block = '# >>> gk-harness >>>\n. "%s/shell/aliases.ps1"\n# <<< gk-harness <<<\n' % root
+        block = ('# >>> gk-harness >>>\n$env:GK_HARNESS_ROOT = "%s"\n. "%s/shell/aliases.ps1"\n'
+                 '# <<< gk-harness <<<\n' % (root, root))
         for original, edited, encoding, mark in (
                 (b"", False, "utf-8", codecs.BOM_UTF8), (b"", True, "utf-8", codecs.BOM_UTF8),
                 (codecs.BOM_UTF16_LE, False, "utf-16-le", codecs.BOM_UTF16_LE)):
@@ -1523,10 +1639,42 @@ class UpdateTests(unittest.TestCase):
         self.git(self.seed, "commit", "-q", "-am", line)
         self.git(self.seed, "push", "-q", str(self.origin), "HEAD")
 
-    def update(self) -> subprocess.CompletedProcess:
-        return subprocess.run([sys.executable, str(self.clone / "install.py"), "update"],
-                              capture_output=True, text=True, env=self.env,
+    def update(self, *options: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(self.clone / "install.py"), "update"]
+                              + list(options), capture_output=True, text=True, env=self.env,
                               stdin=subprocess.DEVNULL, timeout=120)
+
+    def busy_peer(self) -> None:
+        """A busy session whose process (a sleep) is alive and not one of update's ancestors."""
+        child = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        write(self.cdir / "sessions" / "peer.json",
+              json.dumps({"pid": child.pid, "status": "busy", "name": "builder"}))
+
+    @unittest.skipIf(os.name == "nt", "spawns sleep")
+    def test_update_refuses_before_pulling_while_a_peer_is_busy(self):
+        head = self.git(self.clone, "rev-parse", "HEAD")
+        self.push_policy_line("Not yet.")
+        self.busy_peer()
+        proc = self.update()
+        self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stderr, "1 session(s) busy: builder. Wait until they are idle, or "
+                                      "pass --ignore-busy.\n")
+        self.assertEqual(self.git(self.clone, "rev-parse", "HEAD"), head)
+        self.assertNotEqual(head, self.git(self.seed, "rev-parse", "HEAD"))
+        self.assertEqual(os.listdir(str(self.cdir)), ["sessions"])
+
+    @unittest.skipIf(os.name == "nt", "spawns sleep")
+    def test_update_with_ignore_busy_pulls_and_installs(self):
+        self.push_policy_line("Busy but forced.")
+        self.busy_peer()
+        proc = self.update("--ignore-busy")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self.git(self.clone, "rev-parse", "HEAD"),
+                         self.git(self.seed, "rev-parse", "HEAD"))
+        md = (self.cdir / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn("Busy but forced.\n%s" % claude_md.END_MARKER, md)
 
     def test_update_pulls_then_installs(self):
         self.push_policy_line("Update probe line.")

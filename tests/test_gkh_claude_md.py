@@ -43,6 +43,7 @@ class RenderTests(unittest.TestCase):
     def test_the_real_policy_renders(self):
         text = (Path(ROOT) / "policy.md").read_text(encoding="utf-8")
         b = cm.render_block(text, gkh.VERSION)
+        self.assertTrue(b.startswith("<!-- gk-harness:begin v2.0.0 -->\n"), b[:60])
         self.assertEqual(len(cm.marker_spans(b, cm.is_begin, cm.is_end, "CLAUDE.md")), 1)
         self.assertEqual(cm.strip(b), "")
 

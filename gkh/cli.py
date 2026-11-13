@@ -1,4 +1,5 @@
-"""The installer's commands: install [--retire-legacy], uninstall, update and status.
+"""The installer's commands: install [--retire-legacy] [--ignore-busy], uninstall, update
+[--retire-legacy] [--ignore-busy], status, gen [--check] and fable off|on|status.
 
 install reads everything and decides every write before it makes the first one, so a problem
 found then (the preflight) stops it with nothing changed (exit 2). The writes then run in a fixed
@@ -10,6 +11,9 @@ The journal is saved before each write it records, and uninstall saves it after 
 reverses, so a run stopped at any point (a kill, a closed terminal, power loss) leaves a journal
 that names every change still in place. An action whose write never happened, or whose reversal
 already happened, finds its file absent or equal to its backup, and is passed over.
+
+install and update refuse (exit 3) while another Claude session on this machine is busy, so an
+update never swaps hooks under a working session; update checks before it pulls.
 """
 from __future__ import annotations
 
@@ -22,16 +26,20 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from . import VERSION, claude_md, gen, legacy, manifest, paths, shell
+from . import VERSION, claude_md, gen, legacy, manifest, paths, peers, shell
 from .routes import RoutesError, agent_names, load as load_routes
 from . import settings_merge as sm
 
-COMMANDS = ("install", "uninstall", "update", "status", "gen")
+COMMANDS = ("install", "uninstall", "update", "status", "gen", "fable")
 RETIRE = "--retire-legacy"
 CHECK = "--check"
-OPTIONS = {"install": (RETIRE,), "update": (RETIRE,), "gen": (CHECK,)}
-USAGE = ("usage: install [install [%s] | uninstall | update [%s] | status | gen [%s]]\n"
-         % (RETIRE, RETIRE, CHECK))
+IGNORE_BUSY = "--ignore-busy"
+FABLE_WORDS = ("off", "on", "status")
+OPTIONS = {"install": (RETIRE, IGNORE_BUSY), "update": (RETIRE, IGNORE_BUSY), "gen": (CHECK,),
+           "fable": FABLE_WORDS}
+USAGE = ("usage: install [install [%s] [%s] | uninstall | update [%s] [%s] | status | gen [%s] "
+         "| fable off|on|status]\n" % (RETIRE, IGNORE_BUSY, RETIRE, IGNORE_BUSY, CHECK))
+BUSY_EXIT = 3
 # Sources install will not run without. It deploys every hooks/*.py, agents/worker-*.md,
 # agents/Explore.md and workflows/gk-*.js present; there may be no workflows yet.
 HOOK_SUPPORT = ("gk_common.py", "gk_model.py", "gk-remote-skip.py")
@@ -42,8 +50,8 @@ DEPLOYED = (("hooks", "*.py", ("hooks", "gk-harness")),
             ("agents", "Explore.md", ("agents",)),
             ("workflows", "gk-*.js", ("workflows",)))
 EXECUTION_POLICY_NOTICE = (
-    "gk-harness: the gk, gk-opus and gk-sonnet functions load from your PowerShell profile only "
-    "when PowerShell may run profile scripts. If a new PowerShell window does not know them, "
+    "gk-harness: the gk, gk-fable, gk-ultra and gkh functions load from your PowerShell profile "
+    "only when PowerShell may run profile scripts. If a new PowerShell window does not know them, "
     "run: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned")
 _GIT_REPO_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
 # Either one overrides every agent's own model, so the routing in routes.json would not hold.
@@ -59,6 +67,17 @@ class Stop(Exception):
 def _stopped(problem: Any) -> int:
     sys.stderr.write("gk-harness: %s; nothing was changed.\n" % problem)
     return 2
+
+
+def _busy_refusal() -> int | None:
+    """BUSY_EXIT, with the refusal on stderr, when another Claude session on this machine is
+    busy (its own ancestors never count); None when none is."""
+    names = peers.busy_peers(paths.claude_dir(), peers.ancestor_pids())
+    if not names:
+        return None
+    sys.stderr.write("%d session(s) busy: %s. Wait until they are idle, or pass %s.\n"
+                     % (len(names), ", ".join(names), IGNORE_BUSY))
+    return BUSY_EXIT
 
 
 def _warn(text: str) -> None:
@@ -489,7 +508,11 @@ def _report(done: list, record: dict, cdir: Path, root: Path) -> None:
     print("undo with: %s" % _command_line(root, "uninstall"))
 
 
-def install(retire: bool) -> int:
+def install(retire: bool, ignore_busy: bool = False) -> int:
+    if not ignore_busy:
+        refused = _busy_refusal()
+        if refused is not None:
+            return refused
     try:
         root, cdir, python = _preflight()
         journal = manifest.load(paths.manifest_path())
@@ -850,6 +873,13 @@ def _drop_update_stamp() -> None:
 
 
 def update(options: list) -> int:
+    if IGNORE_BUSY not in options:
+        refused = _busy_refusal()
+        if refused is not None:
+            return refused
+        # Checked once, here, before the pull: the install below must not refuse after it, and
+        # leave the new code pulled but not installed.
+        options = list(options) + [IGNORE_BUSY]
     root = paths.harness_root()
     python = paths.python_exe()
     if python is None:
@@ -1010,6 +1040,46 @@ def status() -> int:
     return 0
 
 
+# --- fable ----------------------------------------------------------------------------------
+
+def _fable_off_file() -> Path:
+    """The Fable switch the hooks read (hooks/gk_common.py fable_off_file)."""
+    return paths.claude_dir() / "state" / "gk-fable-off.json"
+
+
+def _fable_since(path: Path) -> str:
+    try:
+        data = json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, ValueError):
+        return "an unknown time"
+    since = data.get("since") if isinstance(data, dict) else None
+    return since if isinstance(since, str) and since else "an unknown time"
+
+
+def fable(word: str) -> int:
+    """off writes the switch file ({"since": UTC time}), on removes it, status says which."""
+    path = _fable_off_file()
+    try:
+        if word == "off":
+            if not path.is_file():
+                manifest.write_json_atomic(path, {"since": paths.utc_iso()})
+            print("Fable is off since %s" % _fable_since(path))
+        elif word == "on":
+            try:
+                os.remove(str(path))
+            except FileNotFoundError:
+                pass
+            print("Fable is on")
+        elif path.exists():
+            print("Fable is off since %s" % _fable_since(path))
+        else:
+            print("Fable is on")
+    except OSError as e:
+        _warn("%s: %s" % (paths.posix(path), e.strerror or e))
+        return 1
+    return 0
+
+
 # --- entry point ----------------------------------------------------------------------------
 
 def _forgiving_output() -> None:
@@ -1042,12 +1112,14 @@ def main(argv: list[str]) -> int:
     command, options = args[0], args[1:]
     allowed = OPTIONS.get(command, ())
     if command not in COMMANDS or any(o not in allowed for o in options) \
-            or len(set(options)) != len(options):
+            or len(set(options)) != len(options) or (command == "fable" and len(options) != 1):
         sys.stderr.write(USAGE)
         return 2
     _forgiving_output()
     if command == "install":
-        return install(RETIRE in options)
+        return install(RETIRE in options, IGNORE_BUSY in options)
+    if command == "fable":
+        return fable(options[0])
     if command == "gen":
         return _gen(CHECK in options)
     if command == "uninstall":

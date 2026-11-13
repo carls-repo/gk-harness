@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import codecs
+import json
 import os
 import re
 import shutil
@@ -25,7 +26,16 @@ BASHRC = (
     "alias gk-sonnet='claude --settings ~/.claude/profiles/sonnet-seat.json'\n"
     "alias ll='ls -l'\n"
 )
-SEATS = (("gk", "fable"), ("gk-opus", "opus"), ("gk-sonnet", "sonnet"))
+# Each shortcut and the arguments it passes before the user's own.
+SHORTCUTS = (("gk", "--model opus --effort medium"),
+             ("gk-fable", "--model fable --effort medium"),
+             ("gk-ultra", "--model opus --effort medium --settings {\"ultracode\":true}"))
+SH_FUNCTIONS = [
+    'gk() { claude --model opus --effort medium "$@"; }',
+    'gk-fable() { claude --model fable --effort medium "$@"; }',
+    'gk-ultra() { claude --model opus --effort medium --settings \'{"ultracode":true}\' "$@"; }',
+    'gkh() { python3 "$GK_HARNESS_ROOT/install.py" "$@"; }',
+]
 
 
 class BlockTests(unittest.TestCase):
@@ -35,13 +45,17 @@ class BlockTests(unittest.TestCase):
 
     def test_posix_block(self):
         self.assertEqual(shell.render_block("/home/carl selby/.gk-harness", windows=False),
-                         '# >>> gk-harness >>>\n. "/home/carl selby/.gk-harness/shell/aliases.sh"\n'
+                         '# >>> gk-harness >>>\n'
+                         'export GK_HARNESS_ROOT="/home/carl selby/.gk-harness"\n'
+                         '. "/home/carl selby/.gk-harness/shell/aliases.sh"\n'
                          "# <<< gk-harness <<<\n")
 
     def test_windows_block(self):
         root = PureWindowsPath(r"C:\Users\Carl Selby\.gk-harness")
         self.assertEqual(shell.render_block(root, windows=True),
-                         '# >>> gk-harness >>>\n. "C:/Users/Carl Selby/.gk-harness/shell/aliases.ps1"\n'
+                         '# >>> gk-harness >>>\n'
+                         '$env:GK_HARNESS_ROOT = "C:/Users/Carl Selby/.gk-harness"\n'
+                         '. "C:/Users/Carl Selby/.gk-harness/shell/aliases.ps1"\n'
                          "# <<< gk-harness <<<\n")
 
     def test_a_root_a_shell_would_expand_or_unquote_is_refused(self):
@@ -144,38 +158,92 @@ class LegacyAliasTests(unittest.TestCase):
 
 
 class AliasFileTests(unittest.TestCase):
-    def test_sh_defines_exactly_the_three_aliases(self):
+    def test_sh_defines_exactly_the_four_functions(self):
         lines = [l for l in ALIASES_SH.read_text(encoding="utf-8").splitlines()
                  if l.strip() and not l.lstrip().startswith("#")]
-        self.assertEqual(lines, ["alias gk='claude --model fable'",
-                                 "alias gk-opus='claude --model opus'",
-                                 "alias gk-sonnet='claude --model sonnet'"])
+        self.assertEqual(lines, ["unalias gk gk-opus gk-sonnet gk-fable gk-ultra gkh "
+                                 "2>/dev/null || true"] + SH_FUNCTIONS)
+        text = ALIASES_SH.read_text(encoding="utf-8")
+        self.assertNotIn("gk-opus()", text)
+        self.assertNotIn("gk-sonnet()", text)
 
-    def test_ps1_defines_three_functions_passing_args(self):
+    def test_ultracode_settings_file(self):
+        data = json.loads((Path(ROOT) / "shell" / "gk-ultra.json").read_text(encoding="utf-8"))
+        self.assertEqual(data, {"ultracode": True})
+
+    def test_sh_parses(self):
+        # The installer writes the block to ~/.bashrc or ~/.zshrc only (paths.rc_file); a POSIX
+        # sh such as dash would refuse the hyphenated function names.
+        for sh in ("bash", "zsh"):
+            exe = shutil.which(sh)
+            if exe is None or (os.name == "nt" and "system32" in exe.lower()):
+                continue
+            with self.subTest(shell=sh):
+                proc = subprocess.run([exe, "-n", str(ALIASES_SH)], capture_output=True,
+                                      text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_ps1_defines_four_functions_passing_args(self):
         text = ALIASES_PS1.read_text(encoding="utf-8")
-        funcs = re.findall(r"^function (\S+) \{ claude --model (\S+) @args \}\s*$", text, re.M)
-        self.assertEqual(funcs, [("gk", "fable"), ("gk-opus", "opus"), ("gk-sonnet", "sonnet")])
+        funcs = re.findall(r"^function (\S+) \{", text, re.M)
+        self.assertEqual(funcs, ["gk", "gk-fable", "gk-ultra", "gkh"])
+        for name in ("gk", "gk-fable", "gk-ultra", "gkh"):
+            line = re.search(r"^function %s \{.*\}\s*$" % re.escape(name), text, re.M).group(0)
+            self.assertIn("@args", line)
+        self.assertNotIn("function gk-opus", text)
+        self.assertNotIn("function gk-sonnet", text)
+        self.assertIn("$env:GK_HARNESS_ROOT/install.py", text)
 
-    def test_rc_block_sources_the_aliases_in_bash_with_a_space_in_the_path(self):
+    def bash_rc(self, root: Path) -> tuple:
         bash = shutil.which("bash")
         if bash is None:
             self.skipTest("no bash on PATH")
         if os.name == "nt" and "system32" in bash.lower():
             self.skipTest("the WSL launcher is not the bash Claude Code uses")
+        (root / "shell").mkdir(parents=True)
+        shutil.copyfile(str(ALIASES_SH), str(root / "shell" / "aliases.sh"))
+        rc = root.parent / ".bashrc"
+        rc.write_bytes(shell.apply(BASHRC, shell.render_block(root, windows=False))[0].encode())
+        return bash, rc
+
+    def test_rc_block_sources_the_functions_in_bash_with_a_space_in_the_path(self):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
         root = tmp / "Carl Selby" / ".gk-harness"
-        (root / "shell").mkdir(parents=True)
-        shutil.copyfile(str(ALIASES_SH), str(root / "shell" / "aliases.sh"))
-        rc = tmp / "Carl Selby" / ".bashrc"
-        rc.write_bytes(shell.apply(BASHRC, shell.render_block(root, windows=False))[0].encode())
+        bash, rc = self.bash_rc(root)
+        # The rc still holds the three old aliases; sourcing the block after them must work.
+        (root / "install.py").write_text("import sys\nprint('GKH:' + ' '.join(sys.argv[1:]))\n")
         script = ('shopt -s expand_aliases\nclaude() { echo "ARGS:$*"; }\n. "$1"\n'
-                  'gk -p hi\ngk-opus -p hi\ngk-sonnet -p hi\n')
+                  'gk -p hi\ngk-fable -p hi\ngk-ultra -p hi\ngkh fable status\n'
+                  'echo "ROOT:$GK_HARNESS_ROOT"\n'
+                  'if type gk-opus >/dev/null 2>&1; then echo "gk-opus still defined"; fi\n'
+                  '. "$1"\ngk -p again\n')
+        env = dict(os.environ)
+        env.pop("GK_HARNESS_ROOT", None)
         proc = subprocess.run([bash, "-c", script, "bash", Path(rc).as_posix()],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=env)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.splitlines(),
-                         ["ARGS:--model %s -p hi" % m for _, m in SEATS])
+                         ["ARGS:%s -p hi" % a for _, a in SHORTCUTS]
+                         + ["GKH:fable status", "ROOT:%s" % root.as_posix(),
+                            "ARGS:--model opus --effort medium -p again"])
+
+    def test_resourcing_over_the_old_aliases_in_an_interactive_bash(self):
+        # A shell that loaded the old file has alias gk=...; re-sourcing the new one would
+        # expand it inside "gk() {" and fail to parse without the unalias line.
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = tmp / "h"
+        bash, _ = self.bash_rc(root)
+        script = ("shopt -s expand_aliases\nalias gk='claude --model fable'\n"
+                  "alias gk-opus='claude --model opus'\nalias gk-sonnet='claude --model sonnet'\n"
+                  'claude() { echo "ARGS:$*"; }\n. "$1"\ngk x\n'
+                  "if alias gk-opus >/dev/null 2>&1; then echo stale; fi\n")
+        proc = subprocess.run([bash, "-c", script, "bash",
+                               (root / "shell" / "aliases.sh").as_posix()],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.splitlines(), ["ARGS:--model opus --effort medium x"])
 
     def test_rc_block_dot_sources_the_functions_in_powershell(self):
         exe = shutil.which("pwsh") or (shutil.which("powershell") if os.name == "nt" else None)
@@ -189,12 +257,14 @@ class AliasFileTests(unittest.TestCase):
         profile = tmp / "Carl Selby" / "profile.ps1"
         profile.write_bytes(shell.render_block(root, windows=True).encode())
         command = ("function claude { 'ARGS:' + ($args -join ' ') }; . '%s'; "
-                   "gk -p hi; gk-opus -p hi; gk-sonnet -p hi" % profile.as_posix())
+                   "gk -p hi; gk-fable -p hi; gk-ultra -p hi" % profile.as_posix())
         proc = subprocess.run([exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
                               capture_output=True, text=True, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr)
+        # gk-ultra names a settings file in PowerShell (see aliases.ps1) rather than inline JSON.
+        ultra = "--model opus --effort medium --settings %s/shell/gk-ultra.json" % root.as_posix()
         self.assertEqual(proc.stdout.splitlines(),
-                         ["ARGS:--model %s -p hi" % m for _, m in SEATS])
+                         ["ARGS:%s -p hi" % a for a in (SHORTCUTS[0][1], SHORTCUTS[1][1], ultra)])
 
     def test_utf16_profile_still_loads_in_powershell(self):
         exe = shutil.which("pwsh") or (shutil.which("powershell") if os.name == "nt" else None)
@@ -215,7 +285,7 @@ class AliasFileTests(unittest.TestCase):
         proc = subprocess.run([exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
                               capture_output=True, text=True, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout.splitlines(), ["kept", "ARGS:--model fable -p hi"])
+        self.assertEqual(proc.stdout.splitlines(), ["kept", "ARGS:--model opus --effort medium -p hi"])
 
     def test_created_profile_with_a_non_ascii_root_loads_in_powershell(self):
         # Windows PowerShell 5.1 (powershell.exe) is the reader that needs the mark; pwsh too.
@@ -239,7 +309,7 @@ class AliasFileTests(unittest.TestCase):
                 proc = subprocess.run([exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
                                        command], capture_output=True, text=True, timeout=60)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertEqual(proc.stdout.splitlines(), ["ARGS:--model fable -p hi"])
+                self.assertEqual(proc.stdout.splitlines(), ["ARGS:--model opus --effort medium -p hi"])
 
 
 class EncodedProfileTests(unittest.TestCase):
