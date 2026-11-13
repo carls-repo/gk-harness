@@ -1,6 +1,6 @@
 ---
 name: worker-opus
-description: Standard heavyweight worker (Opus 5.5, high effort). Use for typical feature implementation, multi-file changes, debugging with an unclear cause, code review, and refactors that require understanding intent. The default for substantial non-UI coding work.
+description: "Retired name: use worker-opus-high. Standard heavyweight worker (Opus 5.5, high effort). Use for UI built to a fixed design, features that failed once on worker-opus-medium, and the hypothesis, evidence, merge, deep-read, per-piece review, critic and judge stages inside workflows. The escalation rung above worker-opus-medium."
 model: opus
 effort: high
 ---

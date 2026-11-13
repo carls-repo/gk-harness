@@ -32,13 +32,14 @@ CHECK = "--check"
 OPTIONS = {"install": (RETIRE,), "update": (RETIRE,), "gen": (CHECK,)}
 USAGE = ("usage: install [install [%s] | uninstall | update [%s] | status | gen [%s]]\n"
          % (RETIRE, RETIRE, CHECK))
-# Sources install will not run without. It deploys every hooks/*.py, agents/worker-*.md and
-# workflows/gk-*.js present; there may be no workflows yet.
+# Sources install will not run without. It deploys every hooks/*.py, agents/worker-*.md,
+# agents/Explore.md and workflows/gk-*.js present; there may be no workflows yet.
 HOOK_SUPPORT = ("gk_common.py", "gk_model.py", "gk-remote-skip.py")
 OTHER_SOURCES = ("policy.md", "shell/aliases.sh", "shell/aliases.ps1")
 DEPLOYED = (("hooks", "*.py", ("hooks", "gk-harness")),
             (".", "routes.json", ("hooks", "gk-harness")),
             ("agents", "worker-*.md", ("agents",)),
+            ("agents", "Explore.md", ("agents",)),
             ("workflows", "gk-*.js", ("workflows",)))
 EXECUTION_POLICY_NOTICE = (
     "gk-harness: the gk, gk-opus and gk-sonnet functions load from your PowerShell profile only "

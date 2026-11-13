@@ -30,7 +30,7 @@ BACKUPS = ".claude/backups/gk-harness"
 POLICY_BLOCK = claude_md.render_block(
     (Path(ROOT) / "policy.md").read_text(encoding="utf-8"), VERSION)
 REPO_HOOKS = sorted(p.name for p in (Path(ROOT) / "hooks").glob("*.py"))
-REPO_AGENTS = sorted(p.name for p in (Path(ROOT) / "agents").glob("worker-*.md"))
+REPO_AGENTS = sorted([p.name for p in (Path(ROOT) / "agents").glob("worker-*.md")] + ["Explore.md"])
 OLD_POLICY = ("# Model orchestration policy\n\nThe main session plans and judges; workers do the "
               "muscle.\n\n## Routing\n\n- chores go to the cheapest tier\n")
 NOTES = "# This machine\n\n- the NAS answers at nas.local\n- run backups on Fridays\n"

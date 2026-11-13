@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "priceSource": "/tmp/claude-1000/bundled-skills/2.1.321/b65716ee1119fb9975c64126fa926707/claude-api/shared/models.md (lines 78-91); cache writes are the 5-minute rate, 1.25x input, from shared/cost-optimization.md line 25; prices per million tokens",
   "efforts": [
     "low",
@@ -70,62 +70,351 @@
       "priceDate": "2026-11-13"
     }
   },
+  "finishingWork": "Please avoid stopping while you still owe work the user asked for. Be persistent and do not stop unless needed. While status notes are welcome, as is clarifying with the user on open decisions, carry on with work that does not depend on the user's answer without unnecessary stops. If you notice yourself inviting the user to redirect you or offering to wait, instead proceed on the next part of the task. You may meet ordinary obstacles like errors, timeouts, locked files, empty results or failing tools. Diagnose them first, and when they are not real blockers, work through them with the access you have (wait and retry, fix the request, use another tool or source) rather than stopping unnecessarily. If someone clearly decided something is a hard blocker, such as a file marked not to be touched, access that was intentionally withheld, or a safety guardrail, leave it alone, say plainly what you found, and look for another safe way to finish the task. Stopping before the task is complete is very rarely merited - as in when the task can't move forward without user input, or where the blocker is deliberate and should not be worked past. This does not override the need for confirmation on risky or destructive actions.",
   "tiers": {
     "haiku-low": {
       "model": "haiku",
       "effort": "low",
       "agent": "worker-haiku-low",
-      "description": "Cheapest worker (Haiku 5.5, low effort). Use for run-and-report chores — running tests, builds or audits and reporting the output, renames, formatting, find-and-replace, dependency bumps, generating boilerplate from an exact specification. The brief must fit well inside 100k tokens (a handful of named files, never a sweep). Not for anything requiring judgement.",
+      "description": "Cheapest worker (Haiku 5.5, low effort). Use for run-and-report chores — running tests, builds, audits or log reads and reporting the output, decided by exit code. The brief must fit well inside 100k tokens (a handful of named files, never a sweep). Not for anything requiring judgement.",
       "body": "\nYou are a mechanical-task worker receiving a self-contained brief from an orchestrator.\n\n- Do exactly what the brief says; do not expand scope or \"improve\" things beyond it.\n- Read only the files the brief names. If you would need to read more than that to proceed, stop and report it — do not sweep the tree.\n- If the brief is ambiguous or you hit a blocker, stop and report it — do not guess.\n- Match the conventions of the surrounding code.\n- Your final message is consumed by the orchestrator, not a human: report what you did, files touched, and command output (including failures, verbatim, piped through `tail` if long). No pleasantries.\n"
     },
-    "haiku-high": {
+    "haiku-medium": {
       "model": "haiku",
-      "effort": "high",
-      "agent": "worker-haiku",
-      "description": "Cheap worker (Haiku 5.5, high effort). Use for simple tasks that fit inside ~100k tokens of context — boilerplate from an exact spec, changelog entries, doc touch-ups, bounded recon with a named file list returning a structured answer, multi-file mechanical chores, and the reader / classifier / dedup / cheap-refuter stages inside workflows. The brief names the files; a worker that would need to sweep, or that stalls, is escalated to worker-sonnet rather than retried here.",
+      "effort": "medium",
+      "agent": "worker-haiku-medium",
+      "description": "Cheap worker (Haiku 5.5, medium effort). Use for bounded recon with a named file list returning a structured answer, and the reader, scope and sweep stages inside workflows. The brief names the files and fits inside 100k tokens; a worker that would need to sweep, or that stalls, is escalated to worker-sonnet-medium rather than retried here. The first rung of the escalation ladder.",
       "body": "\nYou are a cost-efficient worker receiving a self-contained brief from an orchestrator.\n\n- Follow the brief exactly; do not expand scope. If something is ambiguous or blocked, stop and report rather than guessing.\n- Read only the files the brief names, plus what is strictly necessary to make the change compile. If the task turns out to need a wider read or real design judgement, stop and say so — the orchestrator will escalate; do not push on.\n- Match the conventions, naming and idiom of the surrounding code.\n- Verify your work before reporting: run the check the brief names (or the obvious project check if none is named).\n- Your final message is consumed by the orchestrator: what changed, files touched, verification output (honestly, including failures), and anything the orchestrator must know. Keep it to ~20 lines; no file dumps.\n"
     },
     "sonnet-medium": {
       "model": "sonnet",
       "effort": "medium",
-      "agent": "worker-sonnet",
-      "description": "Routine implementation worker (Sonnet 5.5, medium effort). Use for well-specified work — bug fixes with a known cause, CRUD endpoints, tests for existing behaviour, bounded refactors, and the finder and refuter stages inside review workflows. The escalation rung above worker-haiku. Not for design decisions or unclear problems.",
+      "agent": "worker-sonnet-medium",
+      "description": "Routine implementation worker (Sonnet 5.5, medium effort). Use for well-specified work — mechanical chores (renames, find-and-replace, boilerplate from an exact spec, dependency bumps, changelog and doc touch-ups), bug fixes with a known cause, scoped features from a spec, CRUD, tests for existing behaviour — and the finder and refuter stages inside review workflows. The escalation rung above worker-haiku-medium. Not for design decisions or unclear problems.",
       "body": "\nYou are an implementation worker receiving a self-contained brief from an orchestrator.\n\n- Follow the brief exactly; do not expand scope. If something is ambiguous or blocked, stop and report rather than guessing.\n- Match the conventions, naming and idiom of the surrounding code.\n- Verify your work before reporting: run the tests/build the brief names (or the obvious project check if none named).\n- Your final message is consumed by the orchestrator: state what changed, files touched, verification results (honestly, including failures), and anything the orchestrator must know.\n"
+    },
+    "sonnet-high": {
+      "model": "sonnet",
+      "effort": "high",
+      "agent": "worker-sonnet-high",
+      "description": "Routine implementation worker (Sonnet 5.5, high effort). The escalation rung above worker-sonnet-medium, for well-specified work that failed once on the rung below, retried with the failure in the brief. Not for design decisions or unclear problems; the next rung is worker-opus-medium.",
+      "body": "\nYou are an implementation worker receiving a self-contained brief from an orchestrator.\n\n- Follow the brief exactly; do not expand scope. If something is ambiguous or blocked, stop and report rather than guessing.\n- Match the conventions, naming and idiom of the surrounding code.\n- Verify your work before reporting: run the tests/build the brief names (or the obvious project check if none named).\n- Your final message is consumed by the orchestrator: state what changed, files touched, verification results (honestly, including failures), and anything the orchestrator must know.\n"
+    },
+    "opus-medium": {
+      "model": "opus",
+      "effort": "medium",
+      "agent": "worker-opus-medium",
+      "description": "Heavyweight worker (Opus 5.5, medium effort). The first try for a feature, a multi-file change, a bug with an unclear cause, a refactor that needs intent, and code review. The escalation rung above worker-sonnet-high, with worker-opus-high next.",
+      "body": "\nYou are a senior implementation worker receiving a self-contained brief from an orchestrator.\n\n- Deliver the brief's goal; surface (don't silently absorb) anything you discover that changes the picture.\n- Read enough surrounding code to fit the existing architecture; match its conventions.\n- Verify your work before reporting: run the relevant tests/build and confirm behaviour.\n- Your final message is consumed by the orchestrator: what changed and why, files touched, verification evidence (honest, including failures), open risks or follow-ups.\n"
     },
     "opus-high": {
       "model": "opus",
       "effort": "high",
-      "agent": "worker-opus",
-      "description": "Standard heavyweight worker (Opus 5.5, high effort). Use for typical feature implementation, multi-file changes, debugging with an unclear cause, code review, and refactors that require understanding intent. The default for substantial non-UI coding work.",
+      "agent": "worker-opus-high",
+      "description": "Standard heavyweight worker (Opus 5.5, high effort). Use for UI built to a fixed design, features that failed once on worker-opus-medium, and the hypothesis, evidence, merge, deep-read, per-piece review, critic and judge stages inside workflows. The escalation rung above worker-opus-medium.",
       "body": "\nYou are a senior implementation worker receiving a self-contained brief from an orchestrator.\n\n- Deliver the brief's goal; surface (don't silently absorb) anything you discover that changes the picture.\n- Read enough surrounding code to fit the existing architecture; match its conventions.\n- Verify your work before reporting: run the relevant tests/build and confirm behaviour.\n- Your final message is consumed by the orchestrator: what changed and why, files touched, verification evidence (honest, including failures), open risks or follow-ups.\n"
     },
     "opus-xhigh": {
       "model": "opus",
       "effort": "xhigh",
       "agent": "worker-opus-xhigh",
-      "description": "Deep heavyweight worker (Opus 5.5, xhigh effort). Use for complex multi-file implementation, tricky debugging, performance investigation, and intricate refactors — work that needs sustained reasoning but not the absolute top tier.",
+      "description": "Deep heavyweight worker (Opus 5.5, xhigh effort). The fallback when Fable is off — judge stages, plan checks and design judges run here instead. Not on the escalation ladder and not a first choice for routine work.",
       "body": "\nYou are a senior implementation worker on a hard task, receiving a self-contained brief from an orchestrator.\n\n- Reason carefully before editing: trace the actual code paths involved; do not pattern-match to a plausible fix.\n- Deliver the brief's goal; surface anything you discover that changes the picture.\n- Verify with evidence before reporting: failing case reproduced, then shown fixed; tests/build run.\n- Your final message is consumed by the orchestrator: root cause / design rationale, what changed, files touched, verification evidence (honest, including failures), open risks.\n"
     },
-    "opus-max": {
-      "model": "opus",
-      "effort": "max",
-      "agent": "worker-opus-max",
-      "description": "Maximum-effort Opus worker (Opus 5.5, max effort). Escalation option when a failed xhigh attempt warrants max effort at Opus cost rather than the Fable tier — deep correctness work, hostile debugging with no leads, subtle state/concurrency bugs, security-sensitive design. Expensive; never the first choice.",
-      "body": "\nYou are a maximum-effort reasoning tier (Opus 5.5 at maximum effort), receiving a self-contained brief from an orchestrator. A previous attempt has often failed — the brief should include what was tried and how it failed; weigh that evidence rather than repeating it.\n\n- Build a precise model of the problem before acting: reproduce it, instrument it, prove the mechanism.\n- Question the premises in the brief if the evidence contradicts them, and say so.\n- Verify with evidence before reporting; your final message is consumed by the orchestrator: the mechanism found / decision made, what changed, files touched, verification evidence (honest, including failures), residual uncertainty.\n"
-    },
-    "fable-xhigh": {
+    "fable-medium": {
       "model": "fable",
-      "effort": "xhigh",
-      "agent": "worker-fable",
-      "description": "Apex worker (Fable 5.2, xhigh effort). Use for the hardest reasoning — architecture, gnarly concurrency/correctness bugs, security-sensitive code — for ALL UI/UX build and design-review work (visual design, styling, component polish, UX flows), and for judge stages that must outrank an Opus-xhigh implementer. Runs in parallel to the seat; when the question is the very thing under discussion, the seat does it inline.",
+      "effort": "medium",
+      "agent": "worker-fable-medium",
+      "description": "Apex worker (Fable 5.2, medium effort). Use for hard work — migrations, performance, concurrency, architecture, security-sensitive code, a new visual direction — and for plan checks, design proposals for UI, and judge stages over Opus output. The escalation rung above worker-opus-high, with worker-fable-high next.",
       "body": "\nYou are a top-tier worker receiving a self-contained brief from an orchestrator.\n\n- For design/architecture briefs: weigh real alternatives, then commit to a recommendation with rationale — not a survey.\n- For UI/UX briefs: production-grade polish; match the project's existing design language and tokens unless the brief says otherwise.\n- For bugs: find the root cause with evidence before changing anything.\n- Verify before reporting; your final message is consumed by the orchestrator: decision/diagnosis, what changed, files touched, verification evidence (honest, including failures), open risks.\n"
     },
-    "fable-max": {
+    "fable-high": {
       "model": "fable",
-      "effort": "max",
-      "agent": "worker-fable-max",
-      "description": "Maximum-effort worker (Fable 5.2, max effort). Last resort — use only when an xhigh-effort attempt has failed or the problem is exceptionally hard (deep correctness proofs, hostile debugging with no leads, subtle distributed/state bugs). Expensive; never the first choice.",
-      "body": "\nYou are the escalation tier. A previous attempt has usually failed — the brief should include what was tried and how it failed; weigh that evidence rather than repeating it.\n\n- Build a precise model of the problem before acting: reproduce it, instrument it, prove the mechanism.\n- Question the premises in the brief if the evidence contradicts them, and say so.\n- Verify with evidence before reporting; your final message is consumed by the orchestrator: the mechanism found, what changed, files touched, verification evidence (honest, including failures), residual uncertainty.\n"
+      "effort": "high",
+      "agent": "worker-fable-high",
+      "description": "Top worker (Fable 5.2, high effort). The top of the escalation ladder — hard work that failed once on worker-fable-medium, judges for UI, client-facing wording and security-sensitive work, design judge panels, and UI sign-off. Nothing routes above it.",
+      "body": "\nYou are a top-tier worker receiving a self-contained brief from an orchestrator.\n\n- For design/architecture briefs: weigh real alternatives, then commit to a recommendation with rationale — not a survey.\n- For UI/UX briefs: production-grade polish; match the project's existing design language and tokens unless the brief says otherwise.\n- For bugs: find the root cause with evidence before changing anything.\n- Verify before reporting; your final message is consumed by the orchestrator: decision/diagnosis, what changed, files touched, verification evidence (honest, including failures), open risks.\n"
     }
+  },
+  "retired": {
+    "worker-haiku": "haiku-medium",
+    "worker-sonnet": "sonnet-medium",
+    "worker-opus": "opus-high",
+    "worker-opus-max": "opus-xhigh",
+    "worker-fable": "fable-high",
+    "worker-fable-max": "fable-high"
+  },
+  "agents": {
+    "Explore": {
+      "tier": "haiku-medium",
+      "tools": "Read, Grep, Glob, Bash",
+      "description": "Read-only search agent (Haiku 5.5, medium effort) for codebase search with no file list. It finds where things live and returns paths with short excerpts and a conclusion, not file dumps; it locates code and does not review, audit or change it.",
+      "body": "\nYou are a read-only search agent receiving a search question from an orchestrator.\n\n- Find where the answer lives: search names, paths and contents with Grep and Glob, and read excerpts rather than whole files.\n- Never change anything. Use Bash only for read-only commands (ls, find, git log, git grep, git show); never write, move or delete files, and never run builds, installs or commands that change git state.\n- Stop when the question is answered. A search that keeps coming back empty is reported as not found, with what you tried.\n- Your final message is consumed by the orchestrator: the answer, the file paths (with line numbers) that support it, and anything you could not find. No file dumps.\n"
+    }
+  },
+  "ladder": [
+    "haiku-medium",
+    "sonnet-medium",
+    "sonnet-high",
+    "opus-medium",
+    "opus-high",
+    "fable-medium",
+    "fable-high"
+  ],
+  "classes": {
+    "chat": {
+      "tier": "seat",
+      "who": "seat",
+      "check": "none"
+    },
+    "lookup": {
+      "tier": "seat",
+      "who": "seat",
+      "check": "none"
+    },
+    "search": {
+      "tier": "haiku-medium",
+      "who": "worker",
+      "check": "the paths exist"
+    },
+    "run-report": {
+      "tier": "haiku-low",
+      "who": "worker",
+      "check": "exit code"
+    },
+    "mechanical": {
+      "tier": "sonnet-medium",
+      "who": "worker",
+      "check": "tests or a build"
+    },
+    "known-cause": {
+      "tier": "sonnet-medium",
+      "who": "worker",
+      "check": "a reproduction shown fixed, then tests"
+    },
+    "feature": {
+      "tier": "opus-medium",
+      "next": "opus-high",
+      "who": "worker",
+      "check": "tests and a build"
+    },
+    "ui-build": {
+      "tier": "opus-high",
+      "who": "worker",
+      "check": "tests and a build"
+    },
+    "hard": {
+      "tier": "fable-medium",
+      "next": "fable-high",
+      "who": "worker",
+      "check": "tests, a build or a reproduction"
+    },
+    "plan-check": {
+      "tier": "fable-medium",
+      "who": "workflow",
+      "check": "judge sheet"
+    },
+    "design-panel": {
+      "tier": "fable-medium",
+      "who": "workflow",
+      "check": "judge sheet"
+    },
+    "judge-opus": {
+      "tier": "fable-medium",
+      "who": "workflow",
+      "check": "judge sheet"
+    },
+    "judge-sensitive": {
+      "tier": "fable-high",
+      "who": "workflow",
+      "check": "judge sheet"
+    },
+    "ui-signoff": {
+      "tier": "fable-high",
+      "who": "workflow",
+      "check": "judge sheet"
+    },
+    "legal-doc": {
+      "tier": "seat",
+      "floor": "opus-medium",
+      "who": "seat",
+      "check": "quote check, then an opus-high check"
+    }
+  },
+  "stages": {
+    "gk-review.scope": {
+      "tier": "haiku-medium"
+    },
+    "gk-review.find": {
+      "tier": "sonnet-medium"
+    },
+    "gk-review.refute": {
+      "tier": "sonnet-medium"
+    },
+    "gk-review.judge": {
+      "tier": "opus-high",
+      "when": {
+        "sensitive": "fable-high"
+      },
+      "authorFloor": true,
+      "noFable": "opus-xhigh",
+      "onFail": "rerun",
+      "apex": true
+    },
+    "gk-build.plan-check": {
+      "tier": "fable-medium",
+      "noFable": "opus-xhigh",
+      "onFail": "rerun",
+      "apex": true
+    },
+    "gk-build.implement": {
+      "tier": "byClass",
+      "byClass": {
+        "spec": "sonnet-medium",
+        "judgement": "opus-medium",
+        "hard": "fable-medium",
+        "security": "fable-medium"
+      },
+      "noFable": {
+        "hard": "opus-high",
+        "security": "opus-high"
+      },
+      "onFail": "unfinished"
+    },
+    "gk-build.check": {
+      "tier": "haiku-low"
+    },
+    "gk-build.review": {
+      "tier": "opus-high",
+      "atLeast": "implementer",
+      "noFable": "opus-xhigh",
+      "onFail": "rerun"
+    },
+    "gk-build.judge": {
+      "tier": "fable-medium",
+      "when": {
+        "ui": "fable-high"
+      },
+      "noFable": "opus-xhigh",
+      "onFail": "rerun",
+      "apex": true
+    },
+    "gk-diagnose.hypothesise": {
+      "tier": "opus-high"
+    },
+    "gk-diagnose.test": {
+      "tier": "opus-high"
+    },
+    "gk-diagnose.adjudicate": {
+      "tier": "fable-medium",
+      "noFable": "opus-xhigh",
+      "onFail": "rerun",
+      "apex": true
+    },
+    "gk-research.sweep": {
+      "tier": "haiku-medium"
+    },
+    "gk-research.merge": {
+      "tier": "opus-high"
+    },
+    "gk-research.deep-read": {
+      "tier": "opus-high"
+    },
+    "gk-research.critic": {
+      "tier": "opus-high",
+      "apex": true
+    },
+    "gk-design.propose": {
+      "tier": "opus-high",
+      "when": {
+        "ui": "fable-medium"
+      },
+      "noFable": "opus-high",
+      "onFail": "rerun"
+    },
+    "gk-design.judge": {
+      "tier": "fable-high",
+      "noFable": "opus-xhigh",
+      "onFail": "rerun",
+      "apex": true
+    },
+    "gk-design.sign-off": {
+      "tier": "fable-high",
+      "noFable": "none",
+      "onFail": "hold"
+    }
+  },
+  "judges": {
+    "gk-review.judge": [
+      "gk-review.find",
+      "gk-review.refute"
+    ],
+    "gk-build.review": [
+      "gk-build.implement"
+    ],
+    "gk-build.judge": [
+      "gk-build.review"
+    ],
+    "gk-diagnose.adjudicate": [
+      "gk-diagnose.test"
+    ],
+    "gk-research.critic": [
+      "gk-research.merge",
+      "gk-research.deep-read"
+    ],
+    "gk-design.judge": [
+      "gk-design.propose"
+    ]
+  },
+  "seat": {
+    "default": "opus-medium",
+    "effort": {
+      "opus": "medium",
+      "fable": "medium",
+      "sonnet": "medium"
+    },
+    "launchers": {
+      "gk": "opus-medium",
+      "gk-fable": "fable-medium",
+      "gk-ultra": "opus-medium+ultracode"
+    },
+    "subagentDefault": "opus"
+  },
+  "evidence": {
+    "seat": "guide",
+    "chat": "guide",
+    "lookup": "guide",
+    "search": "guide",
+    "run-report": "guide",
+    "mechanical": "guide",
+    "known-cause": "guide",
+    "feature": "guide",
+    "ui-build": "guide",
+    "hard": "guide",
+    "plan-check": "guide",
+    "design-panel": "guide",
+    "judge-opus": "guide",
+    "judge-sensitive": "guide",
+    "ui-signoff": "guide",
+    "legal-doc": "guide",
+    "gk-review.scope": "guide",
+    "gk-review.find": "guide",
+    "gk-review.refute": "guide",
+    "gk-review.judge": "guide",
+    "gk-build.plan-check": "guide",
+    "gk-build.implement": "guide",
+    "gk-build.check": "guide",
+    "gk-build.review": "guide",
+    "gk-build.judge": "guide",
+    "gk-diagnose.hypothesise": "guide",
+    "gk-diagnose.test": "guide",
+    "gk-diagnose.adjudicate": "guide",
+    "gk-research.sweep": "guide",
+    "gk-research.merge": "guide",
+    "gk-research.deep-read": "guide",
+    "gk-research.critic": "guide",
+    "gk-design.propose": "guide",
+    "gk-design.judge": "guide",
+    "gk-design.sign-off": "guide"
   }
 }

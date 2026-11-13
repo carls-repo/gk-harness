@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -34,18 +35,24 @@ def fixture() -> dict:
     }
 
 
+def repo() -> dict:
+    return copy.deepcopy(rt.load(Path(ROOT) / "routes.json"))
+
+
 class RoutesTests(unittest.TestCase):
     def test_agent_names_sorted_with_retired(self):
         r = {"tiers": {"a": {"agent": "worker-z"}, "b": {"agent": "worker-a"}},
              "retired": {"worker-m": {}}}
         self.assertEqual(rt.agent_names(r), ["worker-a", "worker-m", "worker-z"])
         self.assertEqual(rt.agent_names({"tiers": {"a": {"agent": "worker-z"}}}), ["worker-z"])
+        r["agents"] = {"Explore": {}}
+        self.assertEqual(rt.agent_names(r), ["Explore", "worker-a", "worker-m", "worker-z"])
 
     def test_repo_routes_valid(self):
         r = rt.load(Path(ROOT) / "routes.json")
         self.assertEqual(rt.problems(r), [])
-        self.assertEqual(len(r["tiers"]), 8)
-        self.assertEqual(rt.judge_violations(r), [])
+        self.assertEqual(r["version"], 2)
+        self.assertEqual(len(r["tiers"]), 9)
 
     def test_capability_order(self):
         r = fixture()
@@ -103,6 +110,212 @@ class RoutesTests(unittest.TestCase):
                 rt.load(p)
             with self.assertRaises(rt.RoutesError):
                 rt.load(Path(d) / "missing.json")
+
+    # --- hardening: wrong shapes are reported, never raised --------------------------------
+
+    def assertProblem(self, r, needle):
+        ps = rt.problems(r)
+        self.assertTrue(any(needle in p for p in ps), "no problem naming %r in %r" % (needle, ps))
+
+    def test_non_object_model_is_a_problem(self):
+        r = fixture()
+        r["models"]["opus"] = "opus"
+        self.assertProblem(r, "model opus")
+
+    def test_non_object_tier_is_a_problem(self):
+        r = fixture()
+        r["tiers"]["opus-high"] = 3
+        self.assertProblem(r, "tier opus-high")
+
+    def test_non_object_price_is_a_problem(self):
+        r = fixture()
+        r["models"]["opus"]["price"] = [1, 2]
+        self.assertProblem(r, "model opus")
+
+    def test_non_object_class_is_a_problem(self):
+        r = repo()
+        r["classes"]["chat"] = "seat"
+        self.assertProblem(r, "class chat")
+
+    def test_non_object_stage_is_a_problem(self):
+        r = repo()
+        r["stages"]["gk-review.scope"] = ["haiku-medium"]
+        self.assertProblem(r, "stage gk-review.scope")
+
+    def test_non_object_tiers_or_stages_is_a_problem(self):
+        for key in ("tiers", "stages", "models", "classes"):
+            with self.subTest(key=key):
+                r = repo()
+                r[key] = ["not", "an", "object"]
+                self.assertProblem(r, key)
+
+    def test_missing_or_empty_description_or_body_is_a_problem(self):
+        for field in ("description", "body"):
+            for value in (None, "", "   "):
+                with self.subTest(field=field, value=value):
+                    r = repo()
+                    if value is None:
+                        del r["tiers"]["opus-high"][field]
+                    else:
+                        r["tiers"]["opus-high"][field] = value
+                    self.assertProblem(r, "tier opus-high: %s" % field)
+                    r = repo()
+                    if value is None:
+                        del r["agents"]["Explore"][field]
+                    else:
+                        r["agents"]["Explore"][field] = value
+                    self.assertProblem(r, "agent Explore: %s" % field)
+
+    def test_problems_and_judge_violations_never_raise(self):
+        """Every node of the repo file, swapped for each wrong JSON type, gives strings, not a raise."""
+        base = repo()
+        paths = []
+
+        def walk(node, path):
+            paths.append(path)
+            items = node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ()
+            for k, v in items:
+                walk(v, path + (k,))
+
+        walk(base, ())
+        for path in paths[1:]:
+            for bad in ([1], 3, None, {}, {"x": [1]}, "nope"):
+                r = copy.deepcopy(base)
+                node = r
+                for k in path[:-1]:
+                    node = node[k]
+                node[path[-1]] = bad
+                try:
+                    self.assertIsInstance(rt.problems(r), list)
+                    self.assertIsInstance(rt.judge_violations(r), list)
+                except Exception as e:  # pragma: no cover - the failure message is the point
+                    self.fail("%r = %r raised %s: %s" % (path, bad, type(e).__name__, e))
+
+    # --- v2 sections ------------------------------------------------------------------------
+
+    def test_judges_hold(self):
+        self.assertEqual(rt.judge_violations(rt.load(Path(ROOT) / "routes.json")), [])
+
+    def test_judge_violation_detected(self):
+        r = repo()
+        r["stages"]["gk-build.judge"]["tier"] = "sonnet-medium"
+        vs = rt.judge_violations(r)
+        self.assertEqual(len(vs), 1, vs)
+        self.assertIn("gk-build.judge", vs[0])
+        self.assertIn("gk-build.review", vs[0])
+
+    def test_judge_violation_with_fable_off(self):
+        r = repo()
+        r["stages"]["gk-design.judge"]["noFable"] = "sonnet-high"
+        vs = rt.judge_violations(r)
+        self.assertEqual(len(vs), 1, vs)
+        self.assertIn("Fable off", vs[0])
+
+    def test_judge_conditional_tier_counts_only_on_its_condition(self):
+        r = repo()
+        # gk-design.judge: base below the proposals' UI tier, but a ui-only lift covers it.
+        r["stages"]["gk-design.judge"]["tier"] = "opus-high"
+        self.assertEqual(len(rt.judge_violations(r)), 1)
+        r["stages"]["gk-design.judge"]["when"] = {"ui": "fable-medium"}
+        r["stages"]["gk-design.judge"]["noFable"] = "opus-xhigh"
+        self.assertEqual(rt.judge_violations(r), [])
+
+    def test_at_least_floor_checked_against_every_class(self):
+        r = repo()
+        self.assertEqual(rt.stage_variants(r, "gk-build.review"),
+                         {"": "opus-high", "class:spec": "opus-high", "class:judgement": "opus-high",
+                          "class:hard": "fable-medium", "class:security": "fable-medium"})
+        self.assertEqual(rt.stage_variants(r, "gk-build.review", fable=False)["class:hard"],
+                         "opus-xhigh")
+        r["stages"]["gk-build.review"]["tier"] = "nope"
+        self.assertTrue(rt.judge_violations(r))
+
+    def test_every_fable_stage_has_nofable_and_onfail(self):
+        r = repo()
+        tiers = set(r["tiers"])
+        reach = [k for k in r["stages"] if rt.reaches_fable(r, k)]
+        self.assertIn("gk-build.implement", reach)
+        self.assertIn("gk-build.review", reach)
+        self.assertIn("gk-design.propose", reach)
+        self.assertIn("gk-design.sign-off", reach)
+        self.assertNotIn("gk-research.critic", reach)
+        for key in reach:
+            with self.subTest(stage=key):
+                s = r["stages"][key]
+                nf = s.get("noFable")
+                self.assertIsNotNone(nf)
+                if isinstance(nf, dict):
+                    fable_classes = {c for c, t in s["byClass"].items()
+                                     if r["tiers"][t]["model"] == "fable"}
+                    self.assertEqual(set(nf), fable_classes)
+                    self.assertTrue(set(nf.values()) <= tiers)
+                else:
+                    self.assertTrue(nf == "none" or nf in tiers, nf)
+                    if nf != "none":
+                        self.assertNotEqual(r["tiers"][nf]["model"], "fable")
+                self.assertIn(s.get("onFail"), {"rerun", "unfinished", "hold"})
+        self.assertEqual(r["stages"]["gk-design.sign-off"]["noFable"], "none")
+        self.assertEqual(r["stages"]["gk-design.sign-off"]["onFail"], "hold")
+        self.assertEqual(r["stages"]["gk-build.implement"]["noFable"],
+                         {"hard": "opus-high", "security": "opus-high"})
+
+    def test_fable_stage_without_nofable_is_a_problem(self):
+        r = repo()
+        del r["stages"]["gk-diagnose.adjudicate"]["noFable"]
+        self.assertProblem(r, "stage gk-diagnose.adjudicate")
+        r = repo()
+        r["stages"]["gk-diagnose.adjudicate"]["onFail"] = "retry"
+        self.assertProblem(r, "stage gk-diagnose.adjudicate")
+
+    def test_ladder_strictly_increases(self):
+        r = repo()
+        caps = [rt.capability(r, t) for t in r["ladder"]]
+        self.assertEqual(caps, sorted(set(caps)))
+        self.assertEqual(r["ladder"], ["haiku-medium", "sonnet-medium", "sonnet-high", "opus-medium",
+                                       "opus-high", "fable-medium", "fable-high"])
+        r["ladder"] = ["opus-high", "opus-medium"]
+        self.assertProblem(r, "ladder")
+
+    def test_every_route_has_evidence(self):
+        r = repo()
+        ev = r["evidence"]
+        for key in list(r["classes"]) + list(r["stages"]) + ["seat"]:
+            with self.subTest(route=key):
+                self.assertIsInstance(ev.get(key), str)
+                self.assertTrue(ev[key])
+        del ev["gk-review.find"]
+        self.assertProblem(r, "evidence")
+
+    def test_class_tiers_exist(self):
+        r = repo()
+        tiers = set(r["tiers"])
+        for name, c in r["classes"].items():
+            with self.subTest(cls=name):
+                self.assertTrue(c["tier"] == "seat" or c["tier"] in tiers)
+                for k in ("next", "floor"):
+                    if k in c:
+                        self.assertIn(c[k], tiers)
+                self.assertIn(c["who"], {"seat", "worker", "workflow"})
+                self.assertTrue(c["check"])
+        r["classes"]["feature"]["tier"] = "opus-ultra"
+        self.assertProblem(r, "class feature")
+
+    def test_v2_values(self):
+        r = repo()
+        self.assertEqual(r["stages"]["gk-build.plan-check"]["tier"], "fable-medium")
+        self.assertEqual(r["stages"]["gk-review.judge"]["when"]["sensitive"], "fable-high")
+        self.assertEqual(r["seat"]["default"], "opus-medium")
+
+    def test_retired_and_extra_agents_validated(self):
+        r = repo()
+        r["retired"]["worker-old"] = "opus-ultra"
+        self.assertProblem(r, "retired worker-old")
+        r = repo()
+        r["retired"]["worker-opus-high"] = "opus-high"
+        self.assertProblem(r, "worker-opus-high")
+        r = repo()
+        r["agents"]["Explore"]["tier"] = "nope"
+        self.assertProblem(r, "agent Explore")
 
 
 if __name__ == "__main__":

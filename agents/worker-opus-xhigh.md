@@ -1,6 +1,6 @@
 ---
 name: worker-opus-xhigh
-description: Deep heavyweight worker (Opus 5.5, xhigh effort). Use for complex multi-file implementation, tricky debugging, performance investigation, and intricate refactors — work that needs sustained reasoning but not the absolute top tier.
+description: Deep heavyweight worker (Opus 5.5, xhigh effort). The fallback when Fable is off — judge stages, plan checks and design judges run here instead. Not on the escalation ladder and not a first choice for routine work.
 model: opus
 effort: xhigh
 ---

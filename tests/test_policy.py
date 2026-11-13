@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import sys
 import unittest
@@ -13,7 +14,11 @@ from gkh.routes import agent_names, load  # noqa: E402
 POLICY = ROOT / "policy.md"
 AGENTS = ROOT / "agents"
 
-EIGHT = {n + ".md" for n in agent_names(load(ROOT / "routes.json"))}
+ROUTES = load(ROOT / "routes.json")
+AGENT_FILES = {n + ".md" for n in agent_names(ROUTES)}
+DISPLAY = {alias: m["display"] for alias, m in ROUTES["models"].items()}
+FINISHING_START = "Please avoid stopping while you still owe work the user asked for."
+FINISHING_END = "This does not override the need for confirmation on risky or destructive actions."
 # Box paths and Goodricke-only rules that must not reach a policy installed on every machine.
 # CHANGELOG is the file name (generic "changelog entries" work stays in the routing table).
 BANNED_EXACT = ("/home/carls", "mike-dev", ":8080", "CHANGELOG")
@@ -42,7 +47,9 @@ def frontmatter(text: str) -> dict:
             return out
         key, sep, value = line.partition(":")
         if sep:
-            out[key.strip()] = value.strip()
+            value = value.strip()
+            # gen writes a scalar that YAML could misread as a JSON (YAML double-quoted) string.
+            out[key.strip()] = json.loads(value) if value.startswith('"') else value
     return {}
 
 
@@ -67,15 +74,83 @@ class PolicyTest(unittest.TestCase):
                       "develop appears outside the sentence that names sharedBranch")
         self.assertIn("shared branch", found[0].lower())
 
-    def test_agents_are_the_eight(self):
+    def test_agent_set_is_tiers_retired_and_extras(self):
+        expected = ({t["agent"] for t in ROUTES["tiers"].values()} | set(ROUTES["retired"])
+                    | set(ROUTES.get("agents", {})))
+        self.assertIn("Explore", expected)
+        self.assertEqual(AGENT_FILES, {n + ".md" for n in expected})
         names = {p.name for p in AGENTS.iterdir()}
-        self.assertEqual(names, EIGHT)
-        for name in sorted(EIGHT):
+        self.assertEqual(names, AGENT_FILES)
+        for name in sorted(AGENT_FILES):
             with self.subTest(agent=name):
                 meta = frontmatter((AGENTS / name).read_text(encoding="utf-8"))
                 self.assertEqual(meta.get("name"), name[:-3])
                 self.assertIn(meta.get("model"), {"haiku", "sonnet", "opus", "fable"})
 
+    def _target(self, name: str) -> str:
+        """The tier an agent file runs on."""
+        for tier_name, t in ROUTES["tiers"].items():
+            if t["agent"] == name:
+                return tier_name
+        if name in ROUTES["retired"]:
+            return ROUTES["retired"][name]
+        return ROUTES["agents"][name]["tier"]
+
+    def test_agent_text_matches_tier(self):
+        for name in sorted(AGENT_FILES):
+            with self.subTest(agent=name):
+                text = (AGENTS / name).read_text(encoding="utf-8")
+                meta = frontmatter(text)
+                t = ROUTES["tiers"][self._target(name[:-3])]
+                self.assertEqual(meta["model"], t["model"])
+                self.assertEqual(meta["effort"], t["effort"])
+                desc = meta["description"]
+                self.assertIn(DISPLAY[t["model"]], desc)
+                self.assertIn("%s effort" % t["effort"], desc)
+                for alias, display in DISPLAY.items():
+                    if alias != t["model"]:
+                        self.assertNotIn(display, desc)
+                self.assertNotIn("This codebase is yours", text)
+                body = text.split("\n---\n", 1)[1]
+                if name[:-3] in ROUTES.get("agents", {}):
+                    continue
+                if t["effort"] in ("low", "medium"):
+                    self.assertIn("\n# Finishing work\n", body)
+                    tail = body[body.index("# Finishing work"):]
+                    self.assertIn(FINISHING_START, tail)
+                    self.assertIn(FINISHING_END, tail)
+                else:
+                    self.assertNotIn("Finishing work", body)
+
+    def test_explore_is_read_only_haiku_medium(self):
+        text = (AGENTS / "Explore.md").read_text(encoding="utf-8")
+        lines = text.split("\n---\n", 1)[0].splitlines()[1:]
+        self.assertEqual([ln.split(":", 1)[0] for ln in lines],
+                         ["name", "description", "model", "effort", "tools"])
+        meta = frontmatter(text)
+        self.assertEqual((meta["model"], meta["effort"]), ("haiku", "medium"))
+        self.assertEqual(meta["tools"], "Read, Grep, Glob, Bash")
+        self.assertIn("read-only", meta["description"].lower())
+
+    def test_retired_names_point_to_live_tiers(self):
+        retired = ROUTES["retired"]
+        self.assertEqual(retired, {
+            "worker-haiku": "haiku-medium", "worker-sonnet": "sonnet-medium",
+            "worker-opus": "opus-high", "worker-opus-max": "opus-xhigh",
+            "worker-fable": "fable-high", "worker-fable-max": "fable-high"})
+        live = {t["agent"] for t in ROUTES["tiers"].values()}
+        for old, tier_name in sorted(retired.items()):
+            with self.subTest(retired=old):
+                self.assertIn(tier_name, ROUTES["tiers"])
+                self.assertNotIn(old, live)
+                t = ROUTES["tiers"][tier_name]
+                text = (AGENTS / (old + ".md")).read_text(encoding="utf-8")
+                meta = frontmatter(text)
+                self.assertTrue(meta["description"].startswith(
+                    "Retired name: use worker-%s. " % tier_name), meta["description"])
+                self.assertEqual((meta["model"], meta["effort"]), (t["model"], t["effort"]))
+                live_text = (AGENTS / (t["agent"] + ".md")).read_text(encoding="utf-8")
+                self.assertEqual(text.split("\n---\n", 1)[1], live_text.split("\n---\n", 1)[1])
 
 if __name__ == "__main__":
     unittest.main()
