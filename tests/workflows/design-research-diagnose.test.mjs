@@ -186,58 +186,17 @@ test('routing equivalence, gk-design: golden and neutral+Goodricke make the same
   assert.deepEqual([...seen].sort(), ['Judge fable xhigh', 'Judge opus xhigh', 'Propose fable xhigh', 'Propose opus xhigh', 'Sign-off fable xhigh'])
 })
 
-test('routing equivalence, gk-research: golden and neutral+Goodricke make the same calls on the same (model, effort)', async () => {
-  const cases = []
-  for (const { profile, escalate } of GRID.filter((g) => !g.ui)) {
-    for (const depth of ['quick', 'thorough']) {
-      for (const sources of [undefined, SOURCES, { paths: ['src/a.ts'] }]) {
-        const flags = { profile, escalate, depth, ...(sources ? { sources } : {}) }
-        cases.push([JSON.stringify(flags), flags, {}])
-      }
-    }
-    cases.push(
-      [`${profile} custom angles`, { profile, escalate, angles: ['by-test (what the tests pin)'] }, {}],
-      [`${profile} thorough, the first merger dies`, { profile, depth: 'thorough' }, { dead: /^merge r1$/ }],
-      [`${profile} thorough, a deep-read dies`, { profile, depth: 'thorough' }, { dead: /^deep-read 1:/ }],
-      [`${profile} thorough, the critic dies`, { profile, depth: 'thorough' }, { dead: /^critic$/ }],
-      [`${profile} a reader dies`, { profile }, { dead: /^sweep r1: 2 / }],
-    )
-  }
-  const seen = new Set()
-  for (const [name, flags, opts] of cases) {
-    const old = await assertSameRouting('gk-research', name, researchArgs(flags), () => researchResponders(opts))
-    for (const c of old.calls) seen.add(`${c.phase} ${c.model} ${c.effort}`)
-  }
-  assert.deepEqual([...seen].sort(), ['Critic opus xhigh', 'Deep-read opus high', 'Merge opus high', 'Sweep haiku high'])
-  // gk-research takes no ui argument: both scripts reject it, true or false, before any agent.
-  for (const { profile, ui, escalate } of GRID) {
+// gk-research takes no ui argument: both scripts reject it, true or false, before any agent.
+// (Routing for gk-research and gk-diagnose is checked against routes.json in routes.test.mjs.)
+test('gk-research rejects ui: golden and neutral stop on args.ui before any agent', async () => {
+  for (const ui of [true, false]) {
     for (const file of [golden('gk-research.js'), neutral('gk-research.js')]) {
       const seenLabels = []
       const spy = [{ match: /.*/, reply: (prompt, opts) => { seenLabels.push(opts.label); return null } }]
-      await assert.rejects(runWorkflow(file, researchArgs({ profile, ui, escalate }), spy), /^Error: gk-research: args\.ui is not a recognised field/, file)
+      await assert.rejects(runWorkflow(file, researchArgs({ ui }), spy), /^Error: gk-research: args\.ui is not a recognised field/, file)
       assert.deepEqual(seenLabels, [])
     }
   }
-})
-
-test('routing equivalence, gk-diagnose: golden and neutral+Goodricke make the same calls on the same (model, effort)', async () => {
-  const cases = GRID.map((flags) => [JSON.stringify(flags), flags, {}])
-  for (const profile of PROFILES) {
-    cases.push(
-      [`${profile} reproduce, evidence, files and a scratchpad`, { profile, ...WORKFLOWS['gk-diagnose'].full }, {}],
-      [`${profile} custom lenses`, { profile, lenses: ['state', ' timing ', 'state'] }, {}],
-      [`${profile} no hypotheses`, { profile }, { none: true }],
-      [`${profile} a lens dies`, { profile }, { dead: /^hypothesise:environment-and-config$/ }],
-      [`${profile} a test dies`, { profile }, { dead: /^test:H2$/ }],
-      [`${profile} the adjudicator dies`, { profile }, { dead: /^adjudicate$/ }],
-    )
-  }
-  const seen = new Set()
-  for (const [name, flags, opts] of cases) {
-    const old = await assertSameRouting('gk-diagnose', name, diagnoseArgs(flags), () => diagnoseResponders(opts))
-    for (const c of old.calls) seen.add(`${c.phase} ${c.model} ${c.effort}`)
-  }
-  assert.deepEqual([...seen].sort(), ['Adjudicate opus xhigh', 'Hypothesise opus high', 'Test opus high'])
 })
 
 // ---------------- Goodricke sentences ----------------

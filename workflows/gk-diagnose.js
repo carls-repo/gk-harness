@@ -2,14 +2,14 @@ export const meta = {
   name: 'gk-diagnose',
   description: 'Diagnose a bug whose cause is unclear: per-lens hypotheses, one evidence test per hypothesis, one adjudication',
   whenToUse:
-    'Use when a bug or unexpected behaviour has no known cause. Args: { symptom: string (REQUIRED); evidence?: string[] — log lines, stack traces, observations; files?: string[] — starting points; reproduce?: string — a shell command that reproduces the symptom, if one exists; lenses?: string[] — default [\'data-and-state\',\'control-flow-and-concurrency\',\'environment-and-config\']; scratchpad?: string — absolute dir outside the repository for temporary instrumentation, normally the session\'s scratchpad, which the gk-harness hook adds; without one, each agent that needs a folder makes a temporary one outside the repository with mktemp -d and deletes it when done; profile?: \'fable\'|\'opus\'|\'sonnet\' — the seat\'s orchestration profile, default \'fable\' (routing is identical in every profile); escalate?: boolean — Carl\'s word to route the apex judge to fable (no effect here); project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases); without a root the agents work in the git repository containing their working directory; {} runs the generic rules }. Returns structured JSON {hypotheses, verdicts, adjudication}; the calling session writes the synthesis. Nothing is fixed and nothing is committed.',
+    'Use when a bug or unexpected behaviour has no known cause. Args: { symptom: string (REQUIRED); evidence?: string[] — log lines, stack traces, observations; files?: string[] — starting points; reproduce?: string — a shell command that reproduces the symptom, if one exists; lenses?: string[] — default [\'data-and-state\',\'control-flow-and-concurrency\',\'environment-and-config\']; scratchpad?: string — absolute dir outside the repository for temporary instrumentation, normally the session\'s scratchpad, which the gk-harness hook adds; without one, each agent that needs a folder makes a temporary one outside the repository with mktemp -d and deletes it when done; dials?: string[] — routing dials: \'fable\' lifts the adjudicator to fable high, \'nofable\' moves it off fable to opus (each stage\'s model and effort come from routes.json); project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases); without a root the agents work in the git repository containing their working directory; {} runs the generic rules }. Returns structured JSON {hypotheses, verdicts, adjudication, routing}; the calling session writes the synthesis. Nothing is fixed and nothing is committed.',
   phases: [
     { title: 'Hypothesise', detail: 'one read-only agent per lens, at most 4 ranked hypotheses each; merged across lenses by normalised mechanism', model: 'opus' },
     { title: 'Test', detail: 'one agent per merged hypothesis tries to confirm or refute it with evidence', model: 'opus' },
     { title: 'Adjudicate', detail: 'one agent reconciles every verdict into a mechanism, contradictions and open questions', model: 'fable' },
   ],
 }
-// gk-harness:args-v1
+// gk-harness:args-v2
 
 // `args` may arrive as a raw JSON string; normalise so both shapes work.
 const ARGS = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch (e) { return args } })() : args
@@ -20,7 +20,7 @@ const SCRATCHPAD_ERROR = 'gk-diagnose: args.scratchpad must be an absolute direc
 
 const isStrArray = v => Array.isArray(v) && v.every(s => typeof s === 'string')
 if (!ARGS || typeof ARGS !== 'object') {
-  throw new Error('gk-diagnose requires args: { symptom: string, evidence?: string[], files?: string[], reproduce?: string, lenses?: string[], scratchpad?: string, profile?: \'fable\'|\'opus\'|\'sonnet\', escalate?: boolean, project?: object }')
+  throw new Error('gk-diagnose requires args: { symptom: string, evidence?: string[], files?: string[], reproduce?: string, lenses?: string[], scratchpad?: string, dials?: string[], project?: object }')
 }
 if (typeof ARGS.symptom !== 'string' || !ARGS.symptom.trim()) {
   throw new Error('gk-diagnose: args.symptom is required and must be a non-empty string describing the bug')
@@ -38,17 +38,6 @@ if (ARGS.lenses !== undefined && (!isStrArray(ARGS.lenses) || ARGS.lenses.length
 if (ARGS.scratchpad !== undefined && (typeof ARGS.scratchpad !== 'string' || !/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(ARGS.scratchpad))) {
   throw new Error(SCRATCHPAD_ERROR)
 }
-
-// ---------------- Profile (three-seat policy, 2026-10-13) ----------------
-// 'fable' = Mode A (default, unchanged behaviour); 'opus' = Mode B; 'sonnet' = Mode C.
-// Routing here is the same in every profile (opus high / opus high / opus xhigh); the contract is
-// present so the profile argument is accepted and reported.
-const PROFILE = ARGS.profile === undefined ? 'fable' : ARGS.profile
-if (!['fable', 'opus', 'sonnet'].includes(PROFILE)) throw new Error(`gk-diagnose: args.profile must be one of fable|opus|sonnet (got ${JSON.stringify(ARGS.profile)})`)
-if (ARGS.escalate !== undefined && typeof ARGS.escalate !== 'boolean') throw new Error('gk-diagnose: args.escalate, when given, must be a boolean')
-const ESCALATE = ARGS.escalate === true  // Carl's word: route the apex judge to fable under a non-fable profile
-const APEX = PROFILE === 'fable' ? 'fable' : 'opus'   // the top of the ladder for this profile
-log(`Profile: ${PROFILE} (apex ${APEX}${ESCALATE ? ', escalate noted' : ''}; no fable stage in this workflow — routing is the same in every profile)`)
 
 // ================= gk-project block: BEGIN (copy verbatim; only WF and PHASES differ) =================
 // Every gk-* workflow carries this same block (scripts cannot import): the args.project
@@ -285,6 +274,8 @@ async function runStage(stage, ctx, prompt, opts = {}) {
 }
 const routingResult = () => ({ routes: ROUTES.version, dials: DIALS.slice(), offTier: offTier.slice() })
 // </gk-routes>
+// profile and escalate are retired: every stage takes its model and effort from ROUTES.
+if (ARGS.profile !== undefined || ARGS.escalate !== undefined) log(`profile is retired; routes come from routes.json v${ROUTES.version}`)
 
 // ---------------- Scratchpad ----------------
 // The scratchpad is args.scratchpad: the gk-harness hook passes the session's. It must lie
@@ -379,7 +370,7 @@ phase('Hypothesise')
 log(`Hypothesising across ${lenses.length} lenses: ${lenses.join(', ')}`)
 
 const perLens = await pipeline(lenses, (lens, _orig, i) =>
-  agent(
+  runStage('gk-diagnose.hypothesise', {},
     `You are diagnosing a bug through ONE lens: "${lens}" (lens ${i + 1} of ${lenses.length}). Other agents cover the other lenses (${lenses.filter(l => l !== lens).join(', ') || 'none'}); stay inside yours.
 
 ${CONTEXT}
@@ -388,7 +379,7 @@ TASK: read the relevant code paths (read-only) and propose at most ${MAX_PER_LEN
 
 ${RULES}
 - Read-only: no instrumentation, no commands beyond read-only inspection (grep, cat, git log).${projectRules('Hypothesise')}`,
-    { label: `hypothesise:${lens}`, phase: 'Hypothesise', model: 'opus', effort: 'high', schema: HYP_SCHEMA },
+    { label: `hypothesise:${lens}`, phase: 'Hypothesise', schema: HYP_SCHEMA },
   ).then(r => (r ? { lens, hypotheses: r.hypotheses || [] } : null)),
 )
 
@@ -433,7 +424,7 @@ log(`Hypothesise done: ${rawCount} hypotheses merged to ${hypotheses.length} dis
 
 if (!hypotheses.length) {
   log('No hypotheses to test; skipping Test and Adjudicate')
-  return { hypotheses, verdicts: [], adjudication: null }
+  return { hypotheses, verdicts: [], adjudication: null, routing: routingResult() }
 }
 
 // ---- Test: one agent per merged hypothesis --------------------------------
@@ -444,7 +435,7 @@ const instrumentIn = h => (SCRATCHPAD
   ? `put it ONLY in ${SCRATCHPAD}/gk-diagnose-${h.id} (mkdir -p it; other test agents share the scratchpad)`
   : `${MKTEMP}; put it ONLY there (each test agent makes its own)`)
 const verdictsRaw = await pipeline(hypotheses, (h, _orig, i) =>
-  agent(
+  runStage('gk-diagnose.test', {},
     `You are testing ONE hypothesis (${h.id}, ${i + 1} of ${hypotheses.length}) for a bug. Try hard to CONFIRM OR REFUTE it with evidence; do not lean towards confirming it.
 
 ${CONTEXT}
@@ -462,7 +453,7 @@ METHOD:
 Return id "${h.id}".
 
 ${RULES}${projectRules('Test')}`,
-    { label: `test:${h.id}`, phase: 'Test', model: 'opus', effort: 'high', schema: VERDICT_SCHEMA },
+    { label: `test:${h.id}`, phase: 'Test', schema: VERDICT_SCHEMA },
   ).then(r => (r ? { ...r, id: h.id } : null)),
 )
 const verdicts = verdictsRaw.filter(Boolean)
@@ -474,7 +465,7 @@ log(`Test done: ${['confirmed', 'refuted', 'undetermined'].map(k => `${verdicts.
 phase('Adjudicate')
 let adjudication = null
 try {
-  adjudication = await agent(
+  adjudication = await runStage('gk-diagnose.adjudicate', {},
     `You are adjudicating a bug diagnosis. Several independent agents each tested one hypothesis; reconcile their verdicts.
 
 ${CONTEXT}
@@ -495,11 +486,11 @@ TASK:
 
 ${RULES}
 - Read-only: no instrumentation, no commands beyond read-only inspection.${projectRules('Adjudicate')}`,
-    { label: 'adjudicate', phase: 'Adjudicate', model: 'opus', effort: 'xhigh', schema: ADJ_SCHEMA },
+    { label: 'adjudicate', phase: 'Adjudicate', schema: ADJ_SCHEMA },
   )
 } catch (e) {
   log(`Adjudicate agent threw (${e && e.message}); returning hypotheses and verdicts without an adjudication`)
 }
 log(adjudication ? `Adjudicate done: mechanism ${adjudication.mechanism ? 'named' : 'not established'}` : 'Adjudicate agent returned nothing')
 
-return { hypotheses, verdicts, adjudication: adjudication || null }
+return { hypotheses, verdicts, adjudication: adjudication || null, routing: routingResult() }

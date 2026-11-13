@@ -1,7 +1,7 @@
 export const meta = {
   name: 'gk-research',
   description: 'Answer a question from the codebase, docs or the web with cited facts: multi-angle sweep, merge, deep-read of contradictions and gaps, completeness critic',
-  whenToUse: 'Use when a question about the repository (or the web) needs cited evidence rather than recall. Requires args {question: string (REQUIRED); sources?: {paths?: string[], docs?: string[], urls?: string[]}; angles?: string[] — default ["by-container (where it lives)", "by-content (what it says)", "by-entity (who/what it names)", "by-history (git log / changelog)"]; depth?: "quick" | "thorough" — default "quick"; profile?: "fable" | "opus" | "sonnet" — default "fable", the seat\'s profile (routing is the same in every profile); escalate?: boolean; project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. One reader runs per angle (and per source group when sources are given; with no sources the readers search the repo, docs and git history, and the web only where the question points outside the repo). depth "thorough" adds ONE more Sweep + Merge round on what the critic finds missing (max 2 rounds). Returns structured JSON {facts, contradictions, resolutions, unresolved, critic}; the calling session writes the prose answer.',
+  whenToUse: 'Use when a question about the repository (or the web) needs cited evidence rather than recall. Requires args {question: string (REQUIRED); sources?: {paths?: string[], docs?: string[], urls?: string[]}; angles?: string[] — default ["by-container (where it lives)", "by-content (what it says)", "by-entity (who/what it names)", "by-history (git log / changelog)"]; depth?: "quick" | "thorough" — default "quick"; dials?: string[] — routing dials: "fable" puts the critic on fable, "nofable" keeps every stage off fable (each stage\'s model and effort come from routes.json); project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. One reader runs per angle (and per source group when sources are given; with no sources the readers search the repo, docs and git history, and the web only where the question points outside the repo). depth "thorough" adds ONE more Sweep + Merge round on what the critic finds missing (max 2 rounds). Returns structured JSON {facts, contradictions, resolutions, unresolved, critic, routing}; the calling session writes the prose answer.',
   phases: [
     { title: 'Sweep', detail: 'one reader per angle x source group; cite or drop; at most 25 facts each', model: 'haiku' },
     { title: 'Merge', detail: 'one merger: dedup facts, flag contradictions, list gaps', model: 'opus' },
@@ -9,7 +9,7 @@ export const meta = {
     { title: 'Critic', detail: 'one completeness critic: angle not run, claim unverified, source unread', model: 'opus' },
   ],
 }
-// gk-harness:args-v1
+// gk-harness:args-v2
 
 // `args` may arrive as a raw JSON string depending on the invoking runtime.
 const ARGS = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch (e) { return args } })() : args
@@ -24,11 +24,12 @@ const DEFAULT_DEPTH = 'quick'
 const MAX_FACTS = 25
 const MAX_ROUNDS = 2
 const SOURCE_KEYS = ['paths', 'docs', 'urls']
-const USAGE = 'gk-research requires args {question: string, sources?: {paths?, docs?, urls?: string[]}, angles?: string[], depth?: "quick"|"thorough", profile?: "fable"|"opus"|"sonnet", escalate?: boolean, project?: object}'
+const USAGE = 'gk-research requires args {question: string, sources?: {paths?, docs?, urls?: string[]}, angles?: string[], depth?: "quick"|"thorough", dials?: string[], project?: object}'
 const CITE_RE = /^`?(https?:\/\/\S+|commit[:\s]+`?[0-9a-f]{7,40}|[^\s:`]+:L?\d+)/i // file:line | URL | 'commit <sha>'
 const isStrArr = v => Array.isArray(v) && v.every(s => typeof s === 'string' && s.trim().length > 0)
 if (!ARGS || typeof ARGS !== 'object' || Array.isArray(ARGS)) throw new Error(`${USAGE} — got ${JSON.stringify(ARGS)}`)
-for (const k of Object.keys(ARGS)) if (!['question', 'sources', 'angles', 'depth', 'profile', 'escalate', 'project'].includes(k)) throw new Error(`gk-research: args.${k} is not a recognised field — use question, sources, angles, depth, profile, escalate or project. ${USAGE}`)
+// profile and escalate are retired (routes come from routes.json); accepted for one version and ignored.
+for (const k of Object.keys(ARGS)) if (!['question', 'sources', 'angles', 'depth', 'dials', 'seat', 'changedPaths', 'project', 'profile', 'escalate'].includes(k)) throw new Error(`gk-research: args.${k} is not a recognised field — use question, sources, angles, depth, dials or project. ${USAGE}`)
 if (typeof ARGS.question !== 'string' || !ARGS.question.trim()) throw new Error(`gk-research: args.question is REQUIRED and must be a non-empty string. ${USAGE}`)
 if (ARGS.sources !== undefined) {
   if (!ARGS.sources || typeof ARGS.sources !== 'object' || Array.isArray(ARGS.sources)) throw new Error(`gk-research: args.sources must be an object {paths?, docs?, urls?}. ${USAGE}`)
@@ -39,16 +40,6 @@ if (ARGS.sources !== undefined) {
 }
 if (ARGS.angles !== undefined && (!isStrArr(ARGS.angles) || ARGS.angles.length === 0)) throw new Error(`gk-research: args.angles must be a non-empty array of non-empty strings. ${USAGE}`)
 if (ARGS.depth !== undefined && !['quick', 'thorough'].includes(ARGS.depth)) throw new Error(`gk-research: args.depth must be "quick" or "thorough", got ${JSON.stringify(ARGS.depth)}`)
-
-// ---------------- Profile (three-seat policy, 2026-10-13) ----------------
-// 'fable' = Mode A (default, unchanged behaviour); 'opus' = Mode B; 'sonnet' = Mode C.
-// Routing is the same in every profile (haiku high sweep, opus high merge/deep-read, opus xhigh critic).
-const PROFILE = ARGS.profile === undefined ? 'fable' : ARGS.profile
-if (!['fable', 'opus', 'sonnet'].includes(PROFILE)) throw new Error(`gk-research: args.profile must be one of fable|opus|sonnet (got ${JSON.stringify(ARGS.profile)})`)
-if (ARGS.escalate !== undefined && typeof ARGS.escalate !== 'boolean') throw new Error('gk-research: args.escalate, when given, must be a boolean')
-const ESCALATE = ARGS.escalate === true  // Carl's word: route the apex judge to fable under a non-fable profile
-const APEX = PROFILE === 'fable' ? 'fable' : 'opus'   // the top of the ladder for this profile
-log(`Profile: ${PROFILE} (apex ${APEX}${ESCALATE ? ', escalate noted' : ''}; no fable stage in this workflow — routing is the same in every profile)`)
 
 // ================= gk-project block: BEGIN (copy verbatim; only WF and PHASES differ) =================
 // Every gk-* workflow carries this same block (scripts cannot import): the args.project
@@ -285,6 +276,8 @@ async function runStage(stage, ctx, prompt, opts = {}) {
 }
 const routingResult = () => ({ routes: ROUTES.version, dials: DIALS.slice(), offTier: offTier.slice() })
 // </gk-routes>
+// profile and escalate are retired: every stage takes its model and effort from ROUTES.
+if (ARGS.profile !== undefined || ARGS.escalate !== undefined) log(`profile is retired; routes come from routes.json v${ROUTES.version}`)
 
 const QUESTION = ARGS.question.trim()
 const ANGLES = ARGS.angles || DEFAULT_ANGLES
@@ -376,7 +369,7 @@ ${RULES}${projectRules('Sweep')}`
 async function sweep(tasks, round) {
   log(`Sweep round ${round}/${MAX_ROUNDS}: ${tasks.length} reader(s)`)
   const out = (await parallel(tasks.map(t => () =>
-    agent(t.prompt, { label: `sweep r${round}: ${t.label}`, phase: 'Sweep', model: 'haiku', effort: 'high', schema: SWEEP_SCHEMA })
+    runStage('gk-research.sweep', {}, t.prompt, { label: `sweep r${round}: ${t.label}`, phase: 'Sweep', schema: SWEEP_SCHEMA })
       .then(r => (r ? { ...r, label: t.label } : null))))).filter(Boolean)
   if (out.length < tasks.length) log(`Sweep round ${round}: ${tasks.length - out.length} reader(s) returned nothing (skipped or errored)`)
   const facts = []
@@ -396,7 +389,7 @@ async function merge(facts, round, prior) {
   const priorBlock = prior
     ? `\nEarlier rounds already settled or attempted these; list ONLY contradictions and gaps the resolutions below do not already settle:\n${JSON.stringify(prior)}\n`
     : ''
-  const r = await agent(`Merge the facts gathered for this research question. Question:
+  const r = await runStage('gk-research.merge', {}, `Merge the facts gathered for this research question. Question:
 """${QUESTION}"""
 
 Facts (JSON, each with the reader that found it):
@@ -406,7 +399,7 @@ ${priorBlock}
 2. Contradictions: pairs of facts that cannot both be true (a and b are the two claims as stated, each ending with its citation in [brackets]; why says what conflicts).
 3. Gaps: parts of the question these facts still do not answer, each one sentence.
 You may open a cited place to judge a duplicate or a conflict, but do not research beyond that.
-${RULES}${projectRules('Merge')}`, { label: `merge r${round}`, phase: 'Merge', model: 'opus', effort: 'high', schema: MERGE_SCHEMA })
+${RULES}${projectRules('Merge')}`, { label: `merge r${round}`, phase: 'Merge', schema: MERGE_SCHEMA })
   if (!r) { log(`Merge round ${round}: merger returned nothing (skipped or errored) — ${facts.length} fact(s) pass through UNMERGED; no contradictions or gaps flagged`); return { facts, contradictions: [], gaps: [] } }
   log(`Merge round ${round}: ${facts.length} -> ${r.facts.length} fact(s), ${r.contradictions.length} contradiction(s), ${r.gaps.length} gap(s)`)
   return r
@@ -430,7 +423,7 @@ const items = [
 ]
 log(`Deep-read: ${items.length} item(s)`)
 const resolutions = (await pipeline(items, (it, _o, i) =>
-  agent(`Resolve one open item in a research answer, with evidence. Question:
+  runStage('gk-research.deep-read', {}, `Resolve one open item in a research answer, with evidence. Question:
 """${QUESTION}"""
 
 Item (${it.kind}): ${it.item}
@@ -439,7 +432,7 @@ Facts gathered so far (claim [citation]); start from the places they cite where 
 ${merged1.facts.map(f => `- ${f.claim} [${f.citation}]`).join('\n')}
 
 Read the cited places, follow the references they make (imports, callers, linked docs, the commits that changed the lines), and settle the item. resolved=true only when the evidence settles it; otherwise resolved=false and say what is missing. Every point in answer must carry a citation (file:line, URL or 'commit <sha>'). Set item to the item text exactly as given.
-${RULES}${projectRules('Deep-read')}`, { label: `deep-read ${i + 1}: ${it.kind}`, phase: 'Deep-read', model: 'opus', effort: 'high', schema: DEEP_SCHEMA })
+${RULES}${projectRules('Deep-read')}`, { label: `deep-read ${i + 1}: ${it.kind}`, phase: 'Deep-read', schema: DEEP_SCHEMA })
     .then(r => (r ? { ...r, item: it.item, kind: it.kind } : null)))).filter(Boolean)
 if (resolutions.length < items.length) log(`Deep-read: ${items.length - resolutions.length} item(s) returned nothing — reported as unresolved`)
 const answered = new Set(resolutions.map(r => r.item))
@@ -450,7 +443,7 @@ const unresolved = [
 
 // ---- Critic: needs every fact and resolution at once (awaited above) ----
 phase('Critic')
-const critic = await agent(`You are the completeness critic for a research answer. Ask what is missing before it is believed. Question:
+const critic = await runStage('gk-research.critic', {}, `You are the completeness critic for a research answer. Ask what is missing before it is believed. Question:
 """${QUESTION}"""
 
 Angles run: ${JSON.stringify(ANGLES)}
@@ -464,7 +457,7 @@ Report:
 - missing: an angle not run, a source unread, a part of the question nobody addressed. Each entry is a one-sentence search brief naming what to look for and where.
 - unverifiedClaims: claims (as stated in the facts) whose citation is weak, low-confidence, or does not support them. Spot-check citations by opening them where you doubt one.
 Return empty arrays where nothing is missing; do not pad.
-${RULES}${projectRules('Critic')}`, { label: 'critic', phase: 'Critic', model: 'opus', effort: 'xhigh', schema: CRITIC_SCHEMA })
+${RULES}${projectRules('Critic')}`, { label: 'critic', phase: 'Critic', schema: CRITIC_SCHEMA })
 const criticOut = critic || { missing: [], unverifiedClaims: [] }
 if (!critic) log('Critic returned nothing (skipped or errored) — completeness unchecked')
 log(`Critic: ${criticOut.missing.length} missing item(s), ${criticOut.unverifiedClaims.length} unverified claim(s)`)
@@ -499,4 +492,5 @@ return {
   resolutions,
   unresolved,
   critic: { ...criticOut, rounds },
+  routing: routingResult(),
 }

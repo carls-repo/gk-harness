@@ -31,7 +31,7 @@ import gk_model
 
 _NAME_RE = re.compile(r"gk-[a-z0-9-]+")
 _SCRIPT_RE = re.compile(r"(gk-[a-z0-9-]+?)(?:-wf_[0-9a-z]+(?:-[0-9a-z]+)*)?\.js")
-MARKER = b"gk-harness:args-v1"  # the scripts that take profile, project and scratchpad
+MARKERS = (b"gk-harness:args-v1", b"gk-harness:args-v2")  # the scripts that take profile, project and scratchpad
 MARKER_SCAN = 16384  # bytes read from the head of a script when looking for the marker
 
 HIGHER = ("gk-harness: this Workflow call asks for profile '{p}' above the seat ('{seat}') "
@@ -123,7 +123,8 @@ def _marked(path: Path) -> bool:
         with os.fdopen(fd, "rb") as f:
             if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
                 return False
-            return MARKER in f.read(MARKER_SCAN)
+            head = f.read(MARKER_SCAN)
+            return any(m in head for m in MARKERS)
     except (OSError, ValueError):
         return False
 

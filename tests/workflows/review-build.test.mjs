@@ -1632,15 +1632,19 @@ test('static guard: no workflow script names a Node API, the clock or randomness
 // stays a pure literal and the first statement.
 test('marker, every script: one gk-harness marker line, directly after meta, inside the hook\'s scan window', () => {
   const hook = readFileSync(join(here, '..', '..', 'hooks', 'gk-profile.py'), 'utf8')
-  const marker = /^MARKER = b"([^"]+)"/m.exec(hook)[1]
+  // The hook accepts any of its MARKERS (v1 until each script moves to v2, Task 9 on).
+  const markers = [.../^MARKERS = \(([^)]*)\)/m.exec(hook)[1].matchAll(/b"([^"]+)"/g)].map((m) => m[1])
   const scan = Number(/^MARKER_SCAN = (\d+)/m.exec(hook)[1])
-  assert.equal(marker, 'gk-harness:args-v1')
-  const line = `// ${marker}\n`
+  assert.deepEqual(markers, ['gk-harness:args-v1', 'gk-harness:args-v2'])
   const prefix = 'export const meta = '
   const files = readdirSync(workflowsDir).filter((f) => f.endsWith('.js')).sort()
   assert.equal(files.length, 6)
   for (const f of files) {
     const src = readFileSync(join(workflowsDir, f), 'utf8')
+    const carried = markers.filter((m) => src.includes(m))
+    assert.equal(carried.length, 1, `${f}: the script carries exactly one of the hook's markers (got ${JSON.stringify(carried)})`)
+    const marker = carried[0]
+    const line = `// ${marker}\n`
     assert.equal(src.split(marker).length, 2, `${f}: the marker appears exactly once`)
     const at = src.indexOf(line)
     assert.ok(at > 0 && src[at - 1] === '\n', `${f}: the marker is a line of its own`)
