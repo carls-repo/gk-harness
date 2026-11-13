@@ -11,6 +11,8 @@ Version 2 holds:
   "stages": {"<workflow>.<role>": {tier ("byClass" with "byClass": {class: tier}),
              when?: {condition: tier}, atLeast?: "implementer", authorFloor?, apex?,
              noFable?: tier | "none" | {class: tier}, onFail?: rerun | unfinished | hold}},
+  "phases": {workflow: {meta.phases title: stage of that workflow}}, every phase that runs an
+             agent; gen.py writes the phase's model label from the stage,
   "judges": {judge stage: [judged stage, ...]},
   "seat": {default, effort: {alias: effort}, launchers: {name: tier[+flag]}, subagentDefault},
   "evidence": {class, stage or "seat": record id or "guide"}.
@@ -105,6 +107,7 @@ def problems(routes: dict) -> list:
     judges = _section(routes, "judges", out)
     out += _stage_problems(routes, stages, tiers, judges)
     out += _judges_problems(judges, stages)
+    out += _phases_problems(_section(routes, "phases", out), stages)
     seat = _section(routes, "seat", out)
     out += _seat_problems(seat, tiers, models, efforts)
     out += _evidence_problems(routes, classes, stages, seat)
@@ -302,6 +305,18 @@ def _judges_problems(judges: dict, stages: dict) -> list:
         for s in judged:
             if not _has(stages, s):
                 out.append("judges %s: unknown judged stage %r" % (judge, s))
+    return out
+
+
+def _phases_problems(phases: dict, stages: dict) -> list:
+    out = []
+    for wf, mapping in phases.items():
+        if not isinstance(mapping, dict) or not mapping:
+            out.append("phases %s: must map phase titles to stages" % wf)
+            continue
+        for title, stage in mapping.items():
+            if not _has(stages, stage) or not stage.startswith(wf + "."):
+                out.append("phases %s: phase %s names %r, not a stage of %s" % (wf, title, stage, wf))
     return out
 
 

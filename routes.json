@@ -344,6 +344,37 @@
       "onFail": "hold"
     }
   },
+  "phases": {
+    "gk-review": {
+      "Scope": "gk-review.scope",
+      "Find": "gk-review.find",
+      "Verify": "gk-review.refute",
+      "Judge": "gk-review.judge"
+    },
+    "gk-build": {
+      "Plan check": "gk-build.plan-check",
+      "Implement": "gk-build.implement",
+      "Check": "gk-build.check",
+      "Review": "gk-build.review",
+      "Judge": "gk-build.judge"
+    },
+    "gk-diagnose": {
+      "Hypothesise": "gk-diagnose.hypothesise",
+      "Test": "gk-diagnose.test",
+      "Adjudicate": "gk-diagnose.adjudicate"
+    },
+    "gk-research": {
+      "Sweep": "gk-research.sweep",
+      "Merge": "gk-research.merge",
+      "Deep-read": "gk-research.deep-read",
+      "Critic": "gk-research.critic"
+    },
+    "gk-design": {
+      "Propose": "gk-design.propose",
+      "Judge": "gk-design.judge",
+      "Sign-off": "gk-design.sign-off"
+    }
+  },
   "judges": {
     "gk-review.judge": [
       "gk-review.find",

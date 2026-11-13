@@ -306,6 +306,19 @@ class RoutesTests(unittest.TestCase):
         self.assertEqual(r["stages"]["gk-review.judge"]["when"]["sensitive"], "fable-high")
         self.assertEqual(r["seat"]["default"], "opus-medium")
 
+    def test_phases_validated(self):
+        r = repo()
+        self.assertEqual(r["phases"]["gk-review"]["Verify"], "gk-review.refute")
+        self.assertEqual(rt.problems(r), [])
+        r["phases"]["gk-review"]["Scope"] = "gk-review.nope"
+        self.assertProblem(r, "phases gk-review")
+        r = repo()
+        r["phases"]["gk-review"]["Scope"] = "gk-build.check"
+        self.assertProblem(r, "phases gk-review")
+        r = repo()
+        r["phases"]["gk-review"] = ["Scope"]
+        self.assertProblem(r, "phases gk-review")
+
     def test_retired_and_extra_agents_validated(self):
         r = repo()
         r["retired"]["worker-old"] = "opus-ultra"
