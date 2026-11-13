@@ -46,6 +46,10 @@ EXECUTION_POLICY_NOTICE = (
     "when PowerShell may run profile scripts. If a new PowerShell window does not know them, "
     "run: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned")
 _GIT_REPO_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+# Either one overrides every agent's own model, so the routing in routes.json would not hold.
+FORCING_VARS = ("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL")
+SETTINGS_NOTE = ("settings.json: hooks registered; model, efforts, subagent default and ultracode "
+                 "owned")
 
 
 class Stop(Exception):
@@ -254,17 +258,67 @@ def _config_step(root: Path, cdir: Path, python: str) -> _Step | None:
                  functools.partial(manifest.file_action, path), "gk-harness.json: written")
 
 
-def _settings_step(cdir: Path, python: str) -> _Step | None:
+def _owned_desired(root: Path) -> dict:
+    """The settings keys install owns, from the checkout's routes.json (Stop when unusable)."""
+    try:
+        return sm.owned_desired(load_routes(root / "routes.json"))
+    except RoutesError as e:
+        raise Stop("the gk-harness checkout's routes.json is unusable (%s)" % e) from None
+
+
+def _write_happened(a: dict) -> bool:
+    """Whether a settings action's write was made: an install stopped between journalling it
+    and writing leaves its file absent or equal to its backup (the test uninstall uses to pass
+    such an action over), and then what it records was never written."""
+    path = a.get("path")
+    current = _sha(Path(path)) if isinstance(path, str) else None
+    prior = a.get("prior") if isinstance(a.get("prior"), dict) else {}
+    return current is not None and current != _backup_sha(prior)
+
+
+def _owned_last(journal: dict) -> tuple:
+    """(last, priors) for settings_merge.merge: for each owned key, the value install last wrote
+    and the prior recorded with it, from the newest settings action that records the key and
+    whose write was made.
+
+    Versions before the owned keys forced ultracode to true and recorded, in undo["ultracode"],
+    the value before that. With no owned record of ultracode, the oldest such record holds the
+    value from before any install touched it: install is then taken to have written true, with
+    that prior, so that uninstall puts back the original value, not the true."""
+    last: dict = {}
+    priors: dict = {}
+    old_ultracode = None
+    for a in manifest.actions_newest_first(journal):
+        undo = a.get("undo") if isinstance(a, dict) and a.get("type") == "settings" else None
+        if not isinstance(undo, dict) or not _write_happened(a):
+            continue
+        owned = undo.get("owned")
+        for key, record in (owned.items() if isinstance(owned, dict) else ()):
+            if key not in last and isinstance(record, dict) and "wrote" in record:
+                last[key] = record["wrote"]
+                priors[key] = record.get("prior")
+        if isinstance(undo.get("ultracode"), dict):
+            old_ultracode = undo["ultracode"]
+    if "ultracode" not in last and old_ultracode is not None:
+        last["ultracode"] = True
+        priors["ultracode"] = old_ultracode
+    return last, priors
+
+
+def _settings_step(root: Path, cdir: Path, python: str, journal: dict) -> _Step | None:
     path = cdir / "settings.json"
+    desired = _owned_desired(root)
+    last, priors = _owned_last(journal)
     try:
         current = sm.load_strict(path)
-        new, undo = sm.merge({} if current is None else current, python, cdir)
+        new, undo = sm.merge({} if current is None else current, python, cdir, desired, last,
+                             priors)
     except ValueError as e:
         raise Stop(e) from None
     text = sm.dumps(new)
     if current is not None and text == sm.dumps(current):
         return None
-    note = "settings.json: hook entries registered, ultracode on"
+    note = SETTINGS_NOTE
     n = len(undo["removed"])
     if n:
         note += ", %d old gk hook %s removed" % (n, "entry" if n == 1 else "entries")
@@ -315,14 +369,14 @@ def _rc_step(root: Path, notices: list) -> _Step | None:
     return None
 
 
-def _plan(root: Path, cdir: Path, python: str, retire: bool) -> dict:
+def _plan(root: Path, cdir: Path, python: str, retire: bool, journal: dict) -> dict:
     _check_sources(root)
     notices: list = []
     steps = _copy_steps(root, cdir)
     # The hooks are in place before settings.json names them, and the old entries leave
     # settings.json before --retire-legacy moves their files.
     for step in (_policy_step(root, cdir), _config_step(root, cdir, python),
-                 _settings_step(cdir, python), _rc_step(root, notices)):
+                 _settings_step(root, cdir, python, journal), _rc_step(root, notices)):
         if step is not None:
             steps.append(step)
     backup = paths.new_backup_dir()
@@ -439,7 +493,7 @@ def install(retire: bool) -> int:
     try:
         root, cdir, python = _preflight()
         journal = manifest.load(paths.manifest_path())
-        plan = _plan(root, cdir, python, retire)
+        plan = _plan(root, cdir, python, retire, journal)
     except (Stop, manifest.ManifestError) as e:
         return _stopped(e)
     for notice in plan["notices"]:
@@ -581,7 +635,23 @@ def _not_back_yet(settings: dict, removed: list) -> list:
     return out
 
 
-def _surgical_settings(path: Path, a: dict, keep: _Keep) -> None:
+def _not_superseded(undo: dict, done: set) -> dict:
+    """undo without its records of the owned keys in done. A newer record of a key carries the
+    first prior forward, and its reversal has already put that prior back or left a hand change
+    in place, so an older record of the key must not act on it (by restoring its own prior over
+    a hand change that happens to equal what it once wrote). An old "ultracode" record goes too
+    once a newer one owns ultracode, since that newer one carries its prior."""
+    owned = undo.get("owned")
+    if isinstance(owned, dict):
+        undo = dict(undo, owned={k: v for k, v in owned.items() if k not in done})
+    if "ultracode" in done and "ultracode" in undo:
+        undo = {k: v for k, v in undo.items() if k != "ultracode"}
+    return undo
+
+
+def _surgical_settings(path: Path, a: dict, keep: _Keep, done: set) -> None:
+    """Reverse a settings action on a file changed since, then add the owned keys it records to
+    done (the keys reversed so far in this uninstall, newest record first)."""
     try:
         current = sm.load_strict(paths.posix(path))  # posix, so messages name it as the journal
     except sm.SettingsError as e:
@@ -590,12 +660,15 @@ def _surgical_settings(path: Path, a: dict, keep: _Keep) -> None:
     if current is None:
         return
     undo = a.get("undo")
-    if isinstance(undo, dict) and isinstance(undo.get("removed"), list):
-        undo = dict(undo, removed=_not_back_yet(current, undo["removed"]))
+    if isinstance(undo, dict):
+        if isinstance(undo.get("removed"), list):
+            undo = dict(undo, removed=_not_back_yet(current, undo["removed"]))
+        undo = _not_superseded(undo, done)
     new = sm.unmerge(current, undo)
     if sm.dumps(new) != sm.dumps(current):
         keep.save(path, a["type"])
         manifest.write_text_atomic(path, sm.dumps(new))
+    done.update(sm.owned_paths(a.get("undo")))
 
 
 def _surgical_claude_md(path: Path, a: dict, keep: _Keep) -> None:
@@ -697,7 +770,7 @@ def _undo_move(a: dict) -> None:
         shutil.move(str(dst), str(src))
 
 
-def _undo(a: Any, keep: _Keep) -> None:
+def _undo(a: Any, keep: _Keep, done: set) -> None:
     kind = a.get("type") if isinstance(a, dict) else None
     keys = {"legacy_move": ("src", "dst"), "folder": ("path",)}.get(kind, ("path", "sha256"))
     if kind not in manifest.ACTION_TYPES or not all(isinstance(a.get(k), str) for k in keys):
@@ -705,7 +778,7 @@ def _undo(a: Any, keep: _Keep) -> None:
     elif kind == "file":
         _undo_file(a, False, _changed_copy, keep)
     elif kind == "settings":
-        _undo_file(a, True, _surgical_settings, keep)
+        _undo_file(a, True, functools.partial(_surgical_settings, done=done), keep)
     elif kind == "claude_md":
         _undo_file(a, False, _surgical_claude_md, keep)
     elif kind == "shell_rc":
@@ -727,13 +800,14 @@ def uninstall() -> int:
               % paths.posix(path))
         return 0
     keep = _Keep()
+    done: set = set()  # the owned settings keys reversed so far (see _not_superseded)
     try:
         # The journal is saved after each action is reversed, so a kill leaves at most that one
         # action recorded but done; replayed, it finds its file already as it was.
         while journal["installs"]:
             actions = journal["installs"][-1]["actions"]
             if actions:
-                _undo(actions[-1], keep)
+                _undo(actions[-1], keep, done)
                 actions.pop()
             if not actions:
                 journal["installs"].pop()
@@ -800,7 +874,7 @@ def update(options: list) -> int:
 
 # --- status ---------------------------------------------------------------------------------
 
-def _status_drift(root: Path, cdir: Path, settings: Any, python: Any) -> list:
+def _status_drift(root: Path, cdir: Path, settings: Any, python: Any, owned: tuple) -> list:
     drift = []
     for _, src, dst in _deployed(root, cdir):
         current = _sha(dst)
@@ -818,14 +892,16 @@ def _status_drift(root: Path, cdir: Path, settings: Any, python: Any) -> list:
             drift.append("changed: %s (policy block)" % paths.posix(md))
     except (OSError, ValueError) as e:
         drift.append("unreadable: %s" % e)
-    drift.extend(_hook_entry_drift(cdir, settings, python))
+    drift.extend(_hook_entry_drift(cdir, settings, python, owned))
     return drift
 
 
-def _hook_entry_drift(cdir: Path, settings: Any, python: Any) -> list:
+def _hook_entry_drift(cdir: Path, settings: Any, python: Any, owned: tuple) -> list:
     """Each hook entry install registers that settings lacks, as "missing: …"; settings is None
     when settings.json is absent or unreadable, so then every entry is missing. With none
-    missing, "changed: …" when install would still change the hook entries or ultracode."""
+    missing, "changed: …" when install would still change the hook entries or the owned keys.
+    owned is merge's (desired, last, priors); desired is None when routes.json is unusable, so
+    then only the hook entries count. A key changed by hand is not drift: install leaves it."""
     label = paths.posix(cdir / "settings.json")
     try:
         have = sm.owned_entries(settings)
@@ -842,11 +918,24 @@ def _hook_entry_drift(cdir: Path, settings: Any, python: Any) -> list:
                     % (label, event, " [%s]" % matcher if matcher else "", command)
                     for event, matcher, command in missing]
         if isinstance(settings, dict) \
-                and sm.dumps(sm.merge(settings, python, cdir)[0]) != sm.dumps(settings):
-            return ["changed: %s (hook entries)" % label]
+                and sm.dumps(sm.merge(settings, python, cdir, *owned)[0]) != sm.dumps(settings):
+            return ["changed: %s (hook entries or owned keys)" % label]
     except (ValueError, TypeError) as e:
         return ["unreadable: %s" % e]
     return []
+
+
+def _forcing_warnings(settings: Any) -> list:
+    """A warning for each of FORCING_VARS set in settings.json's env or in this environment."""
+    env = settings.get("env") if isinstance(settings, dict) else None
+    out = []
+    for name in FORCING_VARS:
+        for where, found in (("settings.json env", isinstance(env, dict) and name in env),
+                             ("the environment", name in os.environ)):
+            if found:
+                out.append("warning: %s is set in %s; it overrides every agent's own model"
+                           % (name, where))
+    return out
 
 
 def status() -> int:
@@ -883,6 +972,18 @@ def status() -> int:
     except manifest.ManifestError as e:
         journal = manifest.empty()
         drift.append("unreadable: %s" % e)
+    last, priors = _owned_last(journal)
+    try:
+        desired = _owned_desired(root)
+    except Stop:
+        desired = None  # routes.json is unusable: status still reports the rest
+    # An absent or unreadable settings.json is drift already, not a hand change of every key.
+    changed = sm.hand_changed(settings, last) if isinstance(settings, dict) else []
+    if changed:
+        print("settings.json keys changed by hand (install leaves them): %s"
+              % ", ".join(changed))
+    for line in _forcing_warnings(settings):
+        print(line)
     rcs = [a.get("path") for inst in journal["installs"] for a in inst["actions"]
            if isinstance(a, dict) and a.get("type") == "shell_rc"]
     if rcs:
@@ -900,7 +1001,7 @@ def status() -> int:
     if retired:
         print("legacy: %s still in place (install %s moves them to the backups)"
               % (_plural(len(retired), "old file or folder", "old files or folders"), RETIRE))
-    drift.extend(_status_drift(root, cdir, settings, python))
+    drift.extend(_status_drift(root, cdir, settings, python, (desired, last, priors)))
     if drift:
         print("drift:\n%s" % "\n".join("  " + d for d in drift))
         print("run %s to bring it back in line" % _command_line(root, "install"))

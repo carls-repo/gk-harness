@@ -13,23 +13,41 @@ from pathlib import Path, PureWindowsPath
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from gkh import legacy, settings_merge as sm  # noqa: E402
+from gkh import legacy, routes as routes_mod, settings_merge as sm  # noqa: E402
 
 BOX_HOOKS = Path(ROOT) / "tests" / "fixtures" / "settings" / "box-hooks.json"
 PY = "/usr/bin/python3"
 CDIR = "/home/carl/.claude"
 EDIT = "Edit|Write|MultiEdit|NotebookEdit"
 DOCS = "mcp__.*__(batch|update|create)|Artifact|SendUserFile"
+ROUTES = routes_mod.load(Path(ROOT) / "routes.json")
+# The per-model effort entries on Carl's box (Stage 0 proof 5: Claude Code reads
+# modelSettings.<model id>.effortLevel), each "high".
+BOX_MODEL_IDS = ("claude-fable-5-1", "claude-opus-5", "claude-sonnet-5-5", "claude-opus-5-5",
+                 "claude-fable-5-2")
+# The four keys the installer owns, spelled out from routes.json's models and seat.
+OWNED = {
+    ("model",): "opus",
+    ("modelSettings", "claude-opus-5-5", "effortLevel"): "medium",
+    ("modelSettings", "claude-fable-5-2", "effortLevel"): "medium",
+    ("modelSettings", "claude-sonnet-5-5", "effortLevel"): "medium",
+    ("env", "CLAUDE_CODE_SUBAGENT_MODEL"): "opus",
+    ("ultracode",): False,
+}
+OWNED_KEYS = ["model", "modelSettings.claude-opus-5-5.effortLevel",
+              "modelSettings.claude-fable-5-2.effortLevel",
+              "modelSettings.claude-sonnet-5-5.effortLevel", "env.CLAUDE_CODE_SUBAGENT_MODEL",
+              "ultracode"]
 
 
 def box_settings():
     """Today's box: its hooks section verbatim, wrapped in the keys the installer must not touch."""
     return {
         "permissions": {"defaultMode": "auto", "allow": ["Bash(git status:*)"]},
-        "model": "opus",
+        "model": "fable",
         "hooks": json.loads(BOX_HOOKS.read_text(encoding="utf-8")),
-        "effortLevel": "high",
-        "modelSettings": {"fable": {"effort": "high"}},
+        "effortLevel": "medium",
+        "modelSettings": {m: {"effortLevel": "high"} for m in BOX_MODEL_IDS},
         "ultracode": True,
         "autoMode": {"rules": ["no prod psql"]},
     }
@@ -106,9 +124,11 @@ class RegistrationTests(unittest.TestCase):
 class MergeTests(unittest.TestCase):
     def test_empty_settings(self):
         new, undo = sm.merge({}, PY, CDIR)
-        self.assertEqual(undo, {"removed": [], "ultracode": {"present": False}, "events": None,
-                                "created_events": list(sm.REGISTERED_EVENTS)})
-        self.assertIs(new["ultracode"], True)
+        # With no desired keys the merge touches the hooks only; ultracode is no longer forced.
+        self.assertEqual(undo, {"removed": [], "events": None,
+                                "created_events": list(sm.REGISTERED_EVENTS),
+                                "owned": {}, "created_objects": []})
+        self.assertNotIn("ultracode", new)
         self.assertEqual(new["hooks"], {
             "SessionStart": [{"hooks": [entry("gk-seat.py"), entry("gk-peers.py")]}],
             "PostModelSwitch": [{"hooks": [entry("gk-seat.py")]}],
@@ -130,11 +150,13 @@ class MergeTests(unittest.TestCase):
         new, undo = sm.merge(before, PY, CDIR)
         removed = undo["removed"]
         self.assertEqual(before, frozen, "merge must not change its input")
-        self.assertEqual(undo["ultracode"], {"present": True, "value": True})
+        self.assertNotIn("ultracode", undo)
+        self.assertEqual(undo["owned"], {})
         self.assertEqual(undo["events"], list(before["hooks"]))
         # Untouched keys: same values, same order.
         self.assertEqual(list(new), list(before))
-        for key in ("permissions", "model", "effortLevel", "modelSettings", "autoMode"):
+        for key in ("permissions", "model", "effortLevel", "modelSettings", "ultracode",
+                    "autoMode"):
             self.assertEqual(json.dumps(new[key]), json.dumps(before[key]), key)
         # The two project hooks stay where they were, in their own group.
         self.assertEqual(new["hooks"]["PostToolUse"][0], before["hooks"]["PostToolUse"][0])
@@ -158,7 +180,7 @@ class MergeTests(unittest.TestCase):
         twice, undo = sm.merge(once, PY, CDIR)
         self.assertEqual(sm.dumps(twice), sm.dumps(once))
         self.assertEqual(undo["removed"], [])
-        self.assertEqual(undo["ultracode"], {"present": True, "value": True})
+        self.assertEqual(undo["owned"], {})
 
     def test_new_python_path_replaces_commands_in_place(self):
         once, _ = sm.merge(box_settings(), PY, CDIR)
@@ -207,10 +229,15 @@ class MergeTests(unittest.TestCase):
         # An event list that was already empty is not the merge's to remove.
         self.assertEqual(new["hooks"]["Stop"], [{"hooks": [entry("gk-remote-stop.py")]}])
 
-    def test_ultracode_false_is_recorded_and_set(self):
-        new, undo = sm.merge({"ultracode": False}, PY, CDIR)
-        self.assertEqual(undo["ultracode"], {"present": True, "value": False})
+    def test_ultracode_is_owned_only_when_desired(self):
+        new, undo = sm.merge({"ultracode": True}, PY, CDIR)
         self.assertIs(new["ultracode"], True)
+        self.assertNotIn("ultracode", undo)
+        for prior in (True, False):
+            new, undo = sm.merge({"ultracode": prior}, PY, CDIR, OWNED)
+            self.assertIs(new["ultracode"], False)
+            self.assertEqual(undo["owned"]["ultracode"],
+                             {"prior": {"present": True, "value": prior}, "wrote": False})
 
 
 class UnmergeTests(unittest.TestCase):
@@ -389,7 +416,8 @@ class UnmergeTests(unittest.TestCase):
             self.assertEqual(back["hooks"], {})
 
     def test_prior_absent_ultracode_is_removed(self):
-        new, undo = sm.merge({"model": "x"}, PY, CDIR)
+        new, undo = sm.merge({"model": "x"}, PY, CDIR, OWNED)
+        self.assertIs(new["ultracode"], False)
         self.assertNotIn("ultracode", sm.unmerge(new, undo))
 
     def test_strip_owned_only_drops_owned(self):
@@ -402,7 +430,7 @@ class UnmergeTests(unittest.TestCase):
 
     def test_strip_owned_removes_only_containers_it_emptied(self):
         new, _ = sm.merge({}, PY, CDIR)
-        self.assertEqual(sm.strip_owned(new), {"ultracode": True})
+        self.assertEqual(sm.strip_owned(new), {})
         self.assertEqual(sm.strip_owned({"hooks": {"Stop": []}}), {"hooks": {"Stop": []}})
         self.assertEqual(sm.strip_owned({"hooks": {}}), {"hooks": {}})
 
@@ -413,6 +441,245 @@ class UnmergeTests(unittest.TestCase):
         self.assertEqual(got[7], ("PostToolUse", DOCS, cmd("gk-remote-clear.py")))
         self.assertEqual(len(got), 10)
         self.assertEqual(sm.owned_entries({}), [])
+
+
+def wrote_of(undo):
+    """`last` for the next merge: what this merge wrote, by dotted path."""
+    return {k: r["wrote"] for k, r in undo["owned"].items()}
+
+
+def priors_of(undo):
+    return {k: r["prior"] for k, r in undo["owned"].items()}
+
+
+class OwnedKeyTests(unittest.TestCase):
+    """The four settings keys the installer owns: written on first adoption, rewritten only
+    while they still hold what the installer last wrote, restored on unmerge only where they
+    still hold it."""
+
+    def test_owned_desired_reads_routes(self):
+        got = sm.owned_desired(ROUTES)
+        self.assertEqual(got, OWNED)
+        self.assertEqual(list(got), list(OWNED))
+        # Nothing is hard-coded but ultracode: change routes.json and the keys follow.
+        routes = copy.deepcopy(ROUTES)
+        routes["models"]["fable"]["id"] = "claude-fable-9"
+        routes["seat"]["effort"] = {"fable": "high", "sonnet": "low"}
+        routes["seat"]["subagentDefault"] = "sonnet"
+        routes["seat"]["default"] = "sonnet-medium"
+        routes["tiers"]["sonnet-medium"] = {"model": "sonnet", "effort": "medium"}
+        self.assertEqual(sm.owned_desired(routes), {
+            ("model",): "sonnet",
+            ("modelSettings", "claude-fable-9", "effortLevel"): "high",
+            ("modelSettings", "claude-sonnet-5-5", "effortLevel"): "low",
+            ("env", "CLAUDE_CODE_SUBAGENT_MODEL"): "sonnet",
+            ("ultracode",): False,
+        })
+
+    def test_owned_desired_refuses_routes_it_cannot_read(self):
+        for breakage in (lambda r: r.pop("seat"),
+                         lambda r: r["seat"].pop("effort"),
+                         lambda r: r["seat"]["effort"].update(ghost="high"),
+                         lambda r: r["models"]["opus"].update(id="claude.opus"),
+                         lambda r: r["seat"].update(default="no-such-tier"),
+                         lambda r: r["seat"].update(subagentDefault=7)):
+            routes = copy.deepcopy(ROUTES)
+            breakage(routes)
+            with self.assertRaises(routes_mod.RoutesError):
+                sm.owned_desired(routes)
+
+    def test_fresh_install_writes_all_four(self):
+        new, undo = sm.merge({}, PY, CDIR, OWNED)
+        self.assertEqual({k: v for k, v in new.items() if k != "hooks"}, {
+            "model": "opus",
+            "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"},
+                              "claude-fable-5-2": {"effortLevel": "medium"},
+                              "claude-sonnet-5-5": {"effortLevel": "medium"}},
+            "env": {"CLAUDE_CODE_SUBAGENT_MODEL": "opus"},
+            "ultracode": False,
+        })
+        self.assertEqual(list(undo["owned"]), OWNED_KEYS)
+        for key, record in undo["owned"].items():
+            self.assertEqual(record["prior"], {"present": False}, key)
+        self.assertEqual(wrote_of(undo), {sm.dotted(p): v for p, v in OWNED.items()})
+        self.assertEqual(undo["created_objects"], [
+            "modelSettings", "modelSettings.claude-opus-5-5", "modelSettings.claude-fable-5-2",
+            "modelSettings.claude-sonnet-5-5", "env"])
+        self.assertEqual(json.loads(json.dumps(undo)), undo)
+
+    def test_box_install(self):
+        before = box_settings()
+        frozen = copy.deepcopy(before)
+        new, undo = sm.merge(before, PY, CDIR, OWNED)
+        self.assertEqual(before, frozen, "merge must not change its input")
+        self.assertEqual(new["model"], "opus")
+        self.assertEqual(undo["owned"]["model"],
+                         {"prior": {"present": True, "value": "fable"}, "wrote": "opus"})
+        for mid in ("claude-opus-5-5", "claude-fable-5-2", "claude-sonnet-5-5"):
+            self.assertEqual(new["modelSettings"][mid], {"effortLevel": "medium"}, mid)
+            self.assertEqual(undo["owned"]["modelSettings.%s.effortLevel" % mid],
+                             {"prior": {"present": True, "value": "high"}, "wrote": "medium"})
+        for mid in ("claude-fable-5-1", "claude-opus-5"):
+            self.assertEqual(new["modelSettings"][mid], {"effortLevel": "high"}, mid)
+        self.assertEqual(list(new["modelSettings"]), list(BOX_MODEL_IDS))
+        self.assertEqual(new["effortLevel"], "medium")
+        self.assertIs(new["ultracode"], False)
+        self.assertEqual(undo["owned"]["ultracode"],
+                         {"prior": {"present": True, "value": True}, "wrote": False})
+        self.assertEqual(new["env"], {"CLAUDE_CODE_SUBAGENT_MODEL": "opus"})
+        self.assertEqual(undo["created_objects"], ["env"])
+        # The keys already there keep their places; env, which was absent, comes last.
+        self.assertEqual(list(new), list(before) + ["env"])
+
+    def test_no_op_second_install(self):
+        for start in ({}, box_settings()):
+            once, undo = sm.merge(start, PY, CDIR, OWNED)
+            twice, undo2 = sm.merge(once, PY, CDIR, OWNED, wrote_of(undo), priors_of(undo))
+            self.assertEqual(sm.dumps(twice), sm.dumps(once))
+            # The priors are carried, not replaced by what the first install wrote.
+            self.assertEqual(undo2["owned"], undo["owned"])
+            self.assertEqual(undo2["created_objects"], [])
+
+    def test_hand_change_survives(self):
+        once, undo = sm.merge(box_settings(), PY, CDIR, OWNED)
+        once["model"] = "fable"
+        once["modelSettings"]["claude-sonnet-5-5"]["effortLevel"] = "low"
+        last = wrote_of(undo)
+        self.assertEqual(sm.hand_changed(once, last),
+                         ["model", "modelSettings.claude-sonnet-5-5.effortLevel"])
+        twice, undo2 = sm.merge(once, PY, CDIR, OWNED, last, priors_of(undo))
+        self.assertEqual(sm.dumps(twice), sm.dumps(once))
+        self.assertEqual(twice["model"], "fable")
+        # The hand-changed records go forward unchanged, so uninstall still knows them.
+        self.assertEqual(undo2["owned"], undo["owned"])
+        self.assertEqual(sm.hand_changed(twice, last),
+                         ["model", "modelSettings.claude-sonnet-5-5.effortLevel"])
+
+    def test_a_removed_key_counts_as_a_hand_change(self):
+        once, undo = sm.merge({}, PY, CDIR, OWNED)
+        del once["model"]
+        del once["env"]
+        last = wrote_of(undo)
+        self.assertEqual(sm.hand_changed(once, last), ["model", "env.CLAUDE_CODE_SUBAGENT_MODEL"])
+        twice, _ = sm.merge(once, PY, CDIR, OWNED, last, priors_of(undo))
+        self.assertNotIn("model", twice)
+        self.assertNotIn("env", twice)
+
+    def test_a_new_desired_value_replaces_an_unchanged_one(self):
+        once, undo = sm.merge({"model": "fable"}, PY, CDIR, OWNED)
+        desired = dict(OWNED)
+        desired[("model",)] = "sonnet"
+        twice, undo2 = sm.merge(once, PY, CDIR, desired, wrote_of(undo), priors_of(undo))
+        self.assertEqual(twice["model"], "sonnet")
+        self.assertEqual(undo2["owned"]["model"],
+                         {"prior": {"present": True, "value": "fable"}, "wrote": "sonnet"})
+        self.assertEqual(sm.unmerge(twice, undo2)["model"], "fable")
+
+    def test_a_record_without_a_prior_takes_the_value_found(self):
+        once, undo = sm.merge({"model": "fable"}, PY, CDIR, OWNED)
+        _, undo2 = sm.merge(once, PY, CDIR, OWNED, wrote_of(undo), {"model": "junk"})
+        self.assertEqual(undo2["owned"]["model"],
+                         {"prior": {"present": True, "value": "opus"}, "wrote": "opus"})
+
+    def test_values_compare_strictly(self):
+        # JSON true is not 1, and 1 is not 1.0: either would be a hand change.
+        s = {"ultracode": 1, "model": "opus"}
+        self.assertEqual(sm.hand_changed(s, {"ultracode": True, "model": "opus"}), ["ultracode"])
+        new, _ = sm.merge(s, PY, CDIR, OWNED, {"ultracode": True})
+        self.assertEqual(new["ultracode"], 1)
+        self.assertEqual(sm.hand_changed({"a": {"b": 1}}, {"a.b": 1.0}), ["a.b"])
+
+    def test_hand_changed_reads_only_what_it_can(self):
+        self.assertEqual(sm.hand_changed({}, {}), [])
+        self.assertEqual(sm.hand_changed(None, {"model": "opus"}), ["model"])
+        self.assertEqual(sm.hand_changed({"modelSettings": "x"},
+                                         {"modelSettings.claude-opus-5-5.effortLevel": "medium"}),
+                         ["modelSettings.claude-opus-5-5.effortLevel"])
+        self.assertEqual(sm.hand_changed({"model": "opus"}, {"": 1, "a..b": 2, "model": "opus"}),
+                         [])
+
+    def test_a_container_that_is_not_an_object_raises(self):
+        for bad in ({"modelSettings": "x"}, {"modelSettings": {"claude-opus-5-5": []}},
+                    {"env": 3}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(sm.SettingsError):
+                    sm.merge(bad, PY, CDIR, OWNED)
+
+    def test_unmerge_restores_priors_and_leaves_hand_changes(self):
+        before = box_settings()
+        new, undo = sm.merge(before, PY, CDIR, OWNED)
+        new["modelSettings"]["claude-opus-5-5"]["effortLevel"] = "xhigh"
+        new["env"]["MINE"] = "1"
+        back = sm.unmerge(new, undo)
+        expected = copy.deepcopy(before)
+        expected["modelSettings"]["claude-opus-5-5"]["effortLevel"] = "xhigh"
+        expected["env"] = {"MINE": "1"}
+        self.assertEqual(sm.dumps(back), sm.dumps(expected))
+
+    def test_ultracode_prior_comes_back(self):
+        for start in ({"ultracode": False}, {"ultracode": True}, {}):
+            with self.subTest(start=start):
+                new, undo = sm.merge(start, PY, CDIR, OWNED)
+                self.assertIs(new["ultracode"], False)
+                self.assertEqual(sm.dumps(sm.unmerge(new, undo)), sm.dumps(start))
+
+    def test_unmerge_removes_only_the_objects_it_created_once_empty(self):
+        for start in ({"modelSettings": {}}, {"modelSettings": {"claude-opus-5-5": {}}},
+                      {"env": {}},
+                      {"env": {"FOO": "1"}, "modelSettings": {"x": {"effortLevel": "low"}}}):
+            with self.subTest(start=start):
+                new, undo = sm.merge(start, PY, CDIR, OWNED)
+                self.assertEqual(sm.dumps(sm.unmerge(new, undo)), sm.dumps(start))
+        # A key Carl added inside an object the merge created keeps that object.
+        new, undo = sm.merge({}, PY, CDIR, OWNED)
+        new["modelSettings"]["claude-opus-5-5"]["fastMode"] = True
+        back = sm.unmerge(new, undo)
+        self.assertEqual(back["modelSettings"], {"claude-opus-5-5": {"fastMode": True}})
+        self.assertNotIn("env", back)
+
+    def test_round_trips_with_owned_keys(self):
+        for start in ({}, box_settings(), {"ultracode": False, "model": "sonnet"},
+                      {"theme": "dark", "env": {"A": "b"}, "model": "opus"}):
+            with self.subTest(start=json.dumps(start)[:60]):
+                new, undo = sm.merge(start, PY, CDIR, OWNED)
+                self.assertEqual(sm.dumps(sm.unmerge(new, undo)), sm.dumps(start))
+
+    def test_two_installs_unwind_in_reverse(self):
+        for start in ({}, box_settings()):
+            with self.subTest(start=json.dumps(start)[:60]):
+                s1, undo1 = sm.merge(start, PY, CDIR, OWNED)
+                s2, undo2 = sm.merge(s1, "/opt/py3.13/bin/python3", CDIR, OWNED,
+                                     wrote_of(undo1), priors_of(undo1))
+                back = sm.unmerge(sm.unmerge(s2, undo2), undo1)
+                self.assertEqual(sm.dumps(back), sm.dumps(start))
+
+    def test_malformed_owned_records_are_skipped(self):
+        new, _ = sm.merge({}, PY, CDIR, OWNED)
+        undo = {"owned": {"model": {"prior": {"present": "yes"}, "wrote": "opus"},
+                          "ultracode": {"wrote": False},
+                          "": {"prior": {"present": False}, "wrote": 1},
+                          "env.CLAUDE_CODE_SUBAGENT_MODEL": "x"},
+                "created_objects": [3, "env"]}
+        back = sm.unmerge(new, undo)
+        self.assertEqual(back["model"], "opus")
+        self.assertIs(back["ultracode"], False)
+        self.assertEqual(back["env"], {"CLAUDE_CODE_SUBAGENT_MODEL": "opus"})
+
+    def test_old_ultracode_record_restores_only_the_true_it_wrote(self):
+        # An undo from before the owned keys: it set ultracode to true. Its prior comes back
+        # while ultracode still holds that true, and a value changed since is left alone.
+        old = {"removed": [], "ultracode": {"present": False}, "events": None,
+               "created_events": []}
+        self.assertNotIn("ultracode", sm.unmerge({"ultracode": True}, old))
+        self.assertEqual(sm.unmerge({"ultracode": False}, old), {"ultracode": False})
+        old["ultracode"] = {"present": True, "value": False}
+        self.assertEqual(sm.unmerge({"ultracode": True}, old), {"ultracode": False})
+
+    def test_owned_paths(self):
+        _, undo = sm.merge({}, PY, CDIR, OWNED)
+        self.assertEqual(sm.owned_paths(undo), OWNED_KEYS)
+        self.assertEqual(sm.owned_paths({"ultracode": {"present": False}}), [])
+        self.assertEqual(sm.owned_paths(None), [])
 
 
 class LoadStrictTests(unittest.TestCase):

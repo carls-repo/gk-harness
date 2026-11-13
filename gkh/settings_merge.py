@@ -1,10 +1,18 @@
-"""settings.json: the hook registrations the installer owns, a strict loader, and a merge whose
-`undo` record lets uninstall reverse it surgically.
+"""settings.json: the hook registrations the installer owns, the settings keys it owns, a strict
+loader, and a merge whose `undo` record lets uninstall reverse it surgically.
 
 The installer owns a hook entry exactly when its command contains hooks/gk-harness/ (with "\\"
-read as "/"). Besides those it changes only `ultracode` (set to true) and the fixed legacy
-entries in gkh.legacy; every other key and entry is left as it was. All functions here are pure:
-they take a settings dict and return a new one, never changing their input.
+read as "/"). Besides those it changes only the fixed legacy entries in gkh.legacy and the owned
+keys, which owned_desired() reads from routes.json: the default `model`, each seat model's
+`modelSettings.<model id>.effortLevel`, `env.CLAUDE_CODE_SUBAGENT_MODEL` and `ultracode`. An
+owned key is written when the installer first adopts it, and after that only while it still
+holds what the installer last wrote: a value changed by hand is never overwritten. Every other
+key and entry is left as it was. All functions here are pure: they take a settings dict and
+return a new one, never changing their input.
+
+An owned key's path is a tuple of object keys; the journal holds it dotted ("model",
+"modelSettings.claude-opus-5-5.effortLevel"). owned_desired() refuses a key holding ".", so the
+dotted form always parses back to the same tuple.
 """
 from __future__ import annotations
 
@@ -16,6 +24,7 @@ from typing import Any
 
 from . import legacy
 from .paths import OWNED_MARKER, quotable
+from .routes import RoutesError, tier as routes_tier
 
 HOOK_TIMEOUT = 10
 
@@ -184,51 +193,204 @@ def _sweep(groups: list, event: str, event_index: int, records: list | None) -> 
     return kept, anchor, removed_any
 
 
-def _ultracode_state(settings: dict) -> dict:
-    if "ultracode" in settings:
-        return {"present": True, "value": copy.deepcopy(settings["ultracode"])}
-    return {"present": False}
+# --- owned keys -----------------------------------------------------------------------------
+
+def owned_desired(routes: dict) -> dict:
+    """{path tuple: value} for the keys the installer owns, read from routes.json:
+      ("model",)                                   the seat default tier's model alias;
+      ("modelSettings", <model id>, "effortLevel") seat.effort[alias], for each alias there,
+                                                   keyed by models[alias].id (Stage 0 proof 5:
+                                                   Claude Code reads effortLevel, not effort);
+      ("env", "CLAUDE_CODE_SUBAGENT_MODEL")        seat.subagentDefault;
+      ("ultracode",)                               False.
+    Raises RoutesError when routes.json lacks any of them or names a model id holding "."."""
+    try:
+        seat = routes["seat"]
+        models = routes["models"]
+        out: dict = {("model",): routes_tier(routes, seat["default"])["model"]}
+        for alias, effort in seat["effort"].items():
+            out[("modelSettings", models[alias]["id"], "effortLevel")] = effort
+        out[("env", "CLAUDE_CODE_SUBAGENT_MODEL")] = seat["subagentDefault"]
+    except (KeyError, TypeError, AttributeError) as e:
+        raise RoutesError("routes.json has no usable seat settings (%s)" % e) from None
+    for path, value in out.items():
+        if not all(isinstance(k, str) and k and "." not in k for k in path) \
+                or not isinstance(value, str) or not value:
+            raise RoutesError("routes.json gives an unusable settings key %r = %r"
+                              % (path, value))
+    out[("ultracode",)] = False
+    return out
 
 
-def merge(settings: dict, python: Any, claude_dir: Any) -> tuple:
+def dotted(path: tuple) -> str:
+    return ".".join(path)
+
+
+def _path(key: Any) -> tuple | None:
+    """The path tuple of a dotted key read from the journal, or None when it is not one."""
+    if not isinstance(key, str):
+        return None
+    path = tuple(key.split("."))
+    return path if all(path) else None
+
+
+def _get(settings: Any, path: tuple) -> Any:
+    """The value at path, or _MISSING when it, or an object on the way to it, is absent."""
+    node = settings
+    for key in path:
+        if not isinstance(node, dict) or key not in node:
+            return _MISSING
+        node = node[key]
+    return node
+
+
+def _state(settings: dict, path: tuple) -> dict:
+    value = _get(settings, path)
+    if value is _MISSING:
+        return {"present": False}
+    return {"present": True, "value": copy.deepcopy(value)}
+
+
+def _same(value: Any, other: Any) -> bool:
+    """Equal as JSON: true is not 1 and 1 is not 1.0, as they would be to Python's ==."""
+    if value is _MISSING or other is _MISSING:
+        return value is other
+    return json.dumps(value, sort_keys=True) == json.dumps(other, sort_keys=True)
+
+
+def _valid_prior(prior: Any) -> bool:
+    return isinstance(prior, dict) and (prior.get("present") is False or (
+        prior.get("present") is True and "value" in prior))
+
+
+def _put(settings: dict, path: tuple, value: Any, created: list) -> None:
+    """Set path to value, making each missing object on the way (recorded, dotted, in created).
+    Raises SettingsError when something on the way is not an object."""
+    node = settings
+    for i, key in enumerate(path[:-1]):
+        if key not in node:
+            node[key] = {}
+            created.append(dotted(path[:i + 1]))
+        elif not isinstance(node[key], dict):
+            raise SettingsError('settings.json: "%s" is not an object' % dotted(path[:i + 1]))
+        node = node[key]
+    node[path[-1]] = copy.deepcopy(value)
+
+
+def _own(new: dict, desired: dict, last: dict, priors: dict, undo: dict) -> None:
+    """Write the desired keys into new, recording each in undo["owned"]: first adoption (no
+    `last` entry) writes and records the value found as the prior; after that a key is written
+    only while it still holds last[key], carrying its first prior forward, and a key changed by
+    hand is left as it is, its record carried forward unchanged."""
+    for path, value in desired.items():
+        key = dotted(path)
+        found = _state(new, path)
+        prior = found
+        if key in last:
+            if _valid_prior(priors.get(key)):
+                prior = priors[key]
+            if not (found["present"] and _same(found["value"], last[key])):
+                undo["owned"][key] = {"prior": copy.deepcopy(prior),
+                                      "wrote": copy.deepcopy(last[key])}
+                continue
+        _put(new, path, value, undo["created_objects"])
+        undo["owned"][key] = {"prior": copy.deepcopy(prior), "wrote": copy.deepcopy(value)}
+
+
+def hand_changed(settings: Any, last: Any) -> list:
+    """The dotted keys of last ({dotted key: the value the installer last wrote}) whose value in
+    settings is now different, or absent, in last's order."""
+    out = []
+    for key, wrote in (last.items() if isinstance(last, dict) else ()):
+        path = _path(key)
+        if path is not None and not _same(_get(settings, path), wrote):
+            out.append(key)
+    return out
+
+
+def owned_paths(undo: Any) -> list:
+    """The dotted keys undo["owned"] records, in its order."""
+    owned = undo.get("owned") if isinstance(undo, dict) else None
+    return [k for k in owned if _path(k) is not None] if isinstance(owned, dict) else []
+
+
+def _unown(new: dict, undo: dict) -> None:
+    """Put back each owned key's prior where the key still holds what the merge wrote (a prior
+    of {"present": False} removes it), then remove each object the merge created that is now
+    empty, innermost first."""
+    owned = undo.get("owned")
+    for key, record in (owned.items() if isinstance(owned, dict) else ()):
+        path = _path(key)
+        if path is None or not isinstance(record, dict) or "wrote" not in record \
+                or not _valid_prior(record.get("prior")):
+            continue
+        if not _same(_get(new, path), record["wrote"]):
+            continue
+        parent = _get(new, path[:-1]) if len(path) > 1 else new
+        if record["prior"]["present"]:
+            parent[path[-1]] = copy.deepcopy(record["prior"]["value"])
+        else:
+            del parent[path[-1]]
+    created = undo.get("created_objects")
+    for key in reversed(created if isinstance(created, list) else []):
+        path = _path(key)
+        if path is None:
+            continue
+        parent = _get(new, path[:-1]) if len(path) > 1 else new
+        if isinstance(parent, dict) and parent.get(path[-1]) == {} \
+                and isinstance(parent[path[-1]], dict):
+            del parent[path[-1]]
+
+
+def merge(settings: dict, python: Any, claude_dir: Any, desired: dict | None = None,
+          last: dict | None = None, priors: dict | None = None) -> tuple:
     """(new_settings, undo).
 
     new_settings has every legacy entry removed, any previously owned entries replaced by the
     REGISTRATIONS groups (in place of the first group the sweep emptied, else at the end of the
-    event's list; events not yet present are added at the end of `hooks`) and `ultracode: true`.
-    Running merge on its own output changes nothing.
+    event's list; events not yet present are added at the end of `hooks`), and the owned keys
+    of desired ({path tuple: value}, from owned_desired) written as _own() says, using last
+    ({dotted key: the value the installer last wrote}) and priors ({dotted key: the prior
+    recorded then}), both from the newest journal record of each key. A key in desired that a
+    new object must hold is added at the end of its parent; one on its way that is not an
+    object raises SettingsError. Running merge on its own output changes nothing.
 
     undo is JSON-ready, for the journal and unmerge():
       {"removed":   [{"event", "event_index", "group_index", "group", "group_removed",
                       "kept_index", "entry_index", "entry"}, ...]  # each legacy entry taken
                                                                # out, in order
-       "ultracode": {"present": False} or {"present": True, "value": <prior value>},
        "events":    [event names in `hooks` before the merge], or None when `hooks` was absent,
-       "created_events": [the event lists this merge added to `hooks`, in order]}
+       "created_events": [the event lists this merge added to `hooks`, in order],
+       "owned":     {dotted key: {"prior": {"present": False} or {"present": True,
+                                            "value": <value before the installer owned it>},
+                                  "wrote": <the value the installer wrote, or last wrote>}},
+       "created_objects": [dotted keys of the objects this merge made for owned keys, in order]}
+    Versions before the owned keys recorded "ultracode" ({"present", "value"?}) instead: the
+    value before they set it to true. unmerge() still reads it.
     """
     check_shape(settings)
     new = copy.deepcopy(settings)
-    undo = {"removed": [], "ultracode": _ultracode_state(new),
-            "events": list(new["hooks"]) if "hooks" in new else None, "created_events": []}
+    undo = {"removed": [], "events": list(new["hooks"]) if "hooks" in new else None,
+            "created_events": [], "owned": {}, "created_objects": []}
     hooks = new.setdefault("hooks", {})
-    desired = desired_groups(python, claude_dir)
+    groups_wanted = desired_groups(python, claude_dir)
     for event_index, event in enumerate(list(hooks)):
         groups = hooks[event]
         if not isinstance(groups, list):
             continue
         kept, anchor, removed_any = _sweep(groups, event, event_index, undo["removed"])
-        if event in desired:
+        if event in groups_wanted:
             at = len(kept) if anchor is None else anchor
-            kept[at:at] = copy.deepcopy(desired[event])
+            kept[at:at] = copy.deepcopy(groups_wanted[event])
         if removed_any and not kept:
             del hooks[event]
         else:
             hooks[event] = kept
-    for event, groups in desired.items():
+    for event, groups in groups_wanted.items():
         if event not in hooks:
             hooks[event] = copy.deepcopy(groups)
             undo["created_events"].append(event)
-    new["ultracode"] = True
+    _own(new, desired or {}, last or {}, priors or {}, undo)
     return new, undo
 
 
@@ -327,11 +489,15 @@ def _names(value: Any) -> bool:
 
 def unmerge(settings: dict, undo: Any) -> dict:
     """Reverse merge() surgically, keeping whatever else changed since: drop the owned entries,
-    put the recorded legacy entries back, restore `ultracode`, and remove an event list only
-    when the merge created it (undo["created_events"]) and it is now empty, and the `hooks` key
-    only when the merge created it and it is now empty. Every other key, an empty event list
-    the user added since included, is left as it is. Malformed parts of undo are ignored; with
-    no usable created_events, only the event lists that held nothing but owned entries go."""
+    put the recorded legacy entries back, remove an event list only when the merge created it
+    (undo["created_events"]) and it is now empty, and the `hooks` key only when the merge
+    created it and it is now empty. Put each owned key's prior back only where the key still
+    holds what the merge wrote, then remove the objects the merge created for them
+    (undo["created_objects"]) that are now empty. An old record's "ultracode" prior comes back
+    only while ultracode is still the true those versions wrote. Every other key, an empty
+    event list the user added since included, is left as it is. Malformed parts of undo are
+    ignored; with no usable created_events, only the event lists that held nothing but owned
+    entries go."""
     undo = undo if isinstance(undo, dict) else {}
     new = copy.deepcopy(settings)
     hooks = new.get("hooks")
@@ -355,11 +521,13 @@ def unmerge(settings: dict, undo: Any) -> dict:
         if undo.get("events", _MISSING) is None and not hooks:
             del new["hooks"]
 
+    _unown(new, undo)
     prior = undo.get("ultracode")
-    if isinstance(prior, dict) and prior.get("present") is True and "value" in prior:
-        new["ultracode"] = copy.deepcopy(prior["value"])
-    elif isinstance(prior, dict) and prior.get("present") is False:
-        new.pop("ultracode", None)
+    if _valid_prior(prior) and new.get("ultracode") is True:
+        if prior["present"]:
+            new["ultracode"] = copy.deepcopy(prior["value"])
+        else:
+            del new["ultracode"]
     return new
 
 

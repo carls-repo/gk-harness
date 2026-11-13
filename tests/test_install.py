@@ -37,17 +37,35 @@ NOTES = "# This machine\n\n- the NAS answers at nas.local\n- run backups on Frid
 BASHRC = ("# ~/.bashrc\nexport PATH=\"$HOME/bin:$PATH\"\n"
           "alias gk='claude --model fable'\nalias gk-opus='claude --model opus'\n"
           "alias gk-sonnet='claude --model sonnet'\nalias ll='ls -l'\n")
-# The rest of today's settings.json keys, with invented values.
+# The rest of today's settings.json keys: the model and effort keys in the box's own shape
+# (Stage 0 proof 5: modelSettings.<full model id>.effortLevel), the others with invented values.
 BOX_OTHER_KEYS = {
     "permissions": {"allow": ["Bash(git status)", "Read(~/notes/**)"],
                     "deny": ["Bash(rm -rf /)"], "defaultMode": "auto"},
     "model": "fable",
-    "effortLevel": "high",
-    "modelSettings": {"fable": {"effort": "high"}, "opus": {"effort": "xhigh"}},
+    "effortLevel": "medium",
+    "modelSettings": {m: {"effortLevel": "high"} for m in (
+        "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5-5", "claude-opus-5-5",
+        "claude-fable-5-2")},
     "autoMode": {"soft_deny": ["psql against the production database"],
                  "allow": ["npm test", "git log"]},
 }
-KEPT_KEYS = ("autoMode", "permissions", "model", "effortLevel", "modelSettings")
+# The keys install leaves alone. model and the seat models' modelSettings entries are owned.
+KEPT_KEYS = ("autoMode", "permissions", "effortLevel")
+# The model ids whose effort install owns (routes.json seat.effort, by models.<alias>.id), and
+# the box's others, which it leaves alone.
+OWNED_EFFORT_IDS = ("claude-opus-5-5", "claude-fable-5-2", "claude-sonnet-5-5")
+UNOWNED_EFFORT_IDS = ("claude-fable-5-1", "claude-opus-5")
+# settings.json's owned keys after an install into an empty home, spelled out.
+FRESH_OWNED = {
+    "model": "opus",
+    "modelSettings": {m: {"effortLevel": "medium"} for m in OWNED_EFFORT_IDS},
+    "env": {"CLAUDE_CODE_SUBAGENT_MODEL": "opus"},
+    "ultracode": False,
+}
+SETTINGS_NOTE = ("settings.json: hooks registered; model, efforts, subagent default and ultracode "
+                 "owned")
+FORCING_VARS = ("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL")
 EXECUTION_POLICY = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned"
 # The hook registrations, spelled out from the brief's table rather than taken from gkh: each
 # group's event, matcher (None for none) and scripts, in order.
@@ -364,9 +382,11 @@ class RoundTripTests(InstallBase):
                              (Path(ROOT) / "hooks" / name).read_bytes(), name)
         self.assertEqual(sorted(os.listdir(str(self.cdir / "agents"))), REPO_AGENTS)
         self.assertEqual((self.cdir / "CLAUDE.md").read_text(encoding="utf-8"), POLICY_BLOCK)
+        self.assertIn("  %s\n" % SETTINGS_NOTE, out)
         settings = self.settings()
-        self.assertEqual(settings, {"hooks": expected_hooks(runner_python(), self.cdir),
-                                    "ultracode": True})
+        self.assertEqual(settings, dict({"hooks": expected_hooks(runner_python(), self.cdir)},
+                                        **FRESH_OWNED))
+        self.assertEqual(list(settings), ["hooks", "model", "modelSettings", "env", "ultracode"])
         self.assertEqual(list(settings["hooks"]), EXPECTED_EVENTS)
         cfg = json.loads((self.cdir / "gk-harness.json").read_text(encoding="utf-8"))
         self.assertEqual(sorted(cfg), ["installed_at", "python", "root", "version"])
@@ -414,6 +434,26 @@ class RoundTripTests(InstallBase):
                               expected_entries(runner_python(), c))
         for key in KEPT_KEYS:
             self.assertEqual(sm.dumps(after[key]), sm.dumps(before[key]), key)
+        # The owned keys change, each with its prior recorded; the box's other effort entries
+        # stay as they were.
+        self.assertEqual(after["model"], "opus")
+        self.assertEqual(after["env"], {"CLAUDE_CODE_SUBAGENT_MODEL": "opus"})
+        self.assertIs(after["ultracode"], False)
+        for mid in OWNED_EFFORT_IDS:
+            self.assertEqual(after["modelSettings"][mid], {"effortLevel": "medium"}, mid)
+        for mid in UNOWNED_EFFORT_IDS:
+            self.assertEqual(after["modelSettings"][mid], before["modelSettings"][mid], mid)
+        self.assertEqual(list(after["modelSettings"]), list(before["modelSettings"]))
+        owned = [a for a in self.journal()["installs"][-1]["actions"]
+                 if a["type"] == "settings"][0]["undo"]["owned"]
+        self.assertEqual(owned["model"],
+                         {"prior": {"present": True, "value": "fable"}, "wrote": "opus"})
+        for mid in OWNED_EFFORT_IDS:
+            self.assertEqual(owned["modelSettings.%s.effortLevel" % mid],
+                             {"prior": {"present": True, "value": "high"}, "wrote": "medium"})
+        self.assertEqual(owned["ultracode"], {"prior": {"present": False}, "wrote": False})
+        self.assertEqual(owned["env.CLAUDE_CODE_SUBAGENT_MODEL"],
+                         {"prior": {"present": False}, "wrote": "opus"})
         self.assertEqual([g for g in after["hooks"]["PostToolUse"]
                           if g.get("matcher") == "Edit|Write|MultiEdit"],
                          [before["hooks"]["PostToolUse"][0]])
@@ -847,7 +887,7 @@ class LinkTests(InstallBase):
                     self.assertEqual(os.path.realpath(str(link)), os.path.realpath(str(real[k])))
                 self.assertTrue(shell.has_block(real["rc"].read_text(encoding="utf-8")))
                 self.assertIs(json.loads(real["settings"].read_text(encoding="utf-8"))
-                              ["ultracode"], True)
+                              ["ultracode"], False)
                 self.assertIn(claude_md.END_MARKER, real["md"].read_text(encoding="utf-8"))
                 if edited:  # so uninstall takes the surgical path through each link
                     for k in ("rc", "md"):
@@ -1122,6 +1162,175 @@ class CommandTests(InstallBase):
         self.assertTrue((self.cdir / "hooks" / "gk-harness" / "__pycache__").is_dir())
         self.ok("uninstall")
         self.assertFalse((self.cdir / "hooks").exists())
+
+
+class OwnedSettingsTests(InstallBase):
+    """The four settings.json keys install owns (model, the seat efforts, the subagent default
+    and ultracode): written when first adopted, never over a hand change, restored by
+    uninstall only where they still hold what install wrote."""
+
+    def edit_settings(self, change) -> dict:
+        """Apply change to settings.json and write it back re-indented, so that uninstall takes
+        the surgical path rather than putting a backup back."""
+        settings = self.settings()
+        change(settings)
+        write(self.cdir / "settings.json", json.dumps(settings, indent=4))
+        return settings
+
+    def settings_actions(self) -> list:
+        return [a for a in manifest.actions_newest_first(self.journal())
+                if a["type"] == "settings"]
+
+    def test_fresh_install_records_every_prior(self):
+        self.ok("install")
+        owned = self.settings_actions()[0]["undo"]["owned"]
+        self.assertEqual(sorted(owned), sorted([
+            "model", "modelSettings.claude-opus-5-5.effortLevel",
+            "modelSettings.claude-fable-5-2.effortLevel",
+            "modelSettings.claude-sonnet-5-5.effortLevel", "env.CLAUDE_CODE_SUBAGENT_MODEL",
+            "ultracode"]))
+        for key, record in owned.items():
+            self.assertEqual(record["prior"], {"present": False}, key)
+
+    def test_hand_change_survives_install_and_status_names_it(self):
+        self.ok("install")
+        self.edit_settings(lambda s: s.update(model="fable"))
+        before = snapshot(self.home, mtimes=True, skip=())
+        out, _ = self.ok("install")
+        self.assertIn("nothing to change", out)
+        self.assertEqual(snapshot(self.home, mtimes=True, skip=()), before)
+        self.assertEqual(self.settings()["model"], "fable")
+        out, _ = self.ok("status")
+        self.assertIn("settings.json keys changed by hand (install leaves them): model\n", out)
+        self.assertIn("drift: none", out)
+        # A change that makes install write again still leaves the hand change, and carries
+        # its record forward.
+        self.edit_settings(lambda s: s["hooks"].pop("Stop"))
+        out, _ = self.ok("install")
+        self.assertIn(SETTINGS_NOTE, out)
+        self.assertEqual(self.settings()["model"], "fable")
+        newest, oldest = self.settings_actions()
+        self.assertEqual(newest["undo"]["owned"]["model"], oldest["undo"]["owned"]["model"])
+        self.ok("uninstall")
+        self.assertEqual(self.settings(), {"model": "fable"})
+
+    def test_no_op_second_install_writes_nothing(self):
+        self.make_box()
+        self.ok("install")
+        first = snapshot(self.home, mtimes=True, skip=())
+        out, _ = self.ok("install")
+        self.assertIn("nothing to change", out)
+        self.assertEqual(snapshot(self.home, mtimes=True, skip=()), first)
+
+    def test_uninstall_restores_priors_and_leaves_a_hand_change(self):
+        before = self.make_box()
+        self.ok("install")
+        self.edit_settings(lambda s: s["modelSettings"]["claude-sonnet-5-5"].update(
+            effortLevel="low"))
+        self.ok("uninstall")
+        now = self.settings()
+        expected = json.loads(json.dumps(before))
+        expected["modelSettings"]["claude-sonnet-5-5"]["effortLevel"] = "low"
+        expected["hooks"] = now["hooks"]  # the hook entries' round trip is tested elsewhere
+        self.assertEqual(sm.dumps(now), sm.dumps(expected))
+        self.assertNotIn("env", now)
+        self.assertNotIn("ultracode", now)
+
+    def test_ultracode_prior_comes_back(self):
+        for prior in (False, True):
+            with self.subTest(prior=prior):
+                self.fresh_home()
+                write(self.cdir / "settings.json", sm.dumps({"ultracode": prior}))
+                self.ok("install")
+                self.assertIs(self.settings()["ultracode"], False)
+                self.edit_settings(lambda s: s.update(theme="dark"))
+                self.ok("uninstall")
+                self.assertEqual(self.settings(), {"ultracode": prior, "theme": "dark"})
+
+    def old_install(self, start: dict) -> None:
+        """settings.json and a journal as a version before the owned keys left them: its hook
+        entries, ultracode forced to true, and an undo whose ultracode record holds the value
+        before that."""
+        new, undo = sm.merge(start, runner_python(), self.cdir)
+        new["ultracode"] = True
+        undo = {k: v for k, v in undo.items() if k not in ("owned", "created_objects")}
+        undo["ultracode"] = ({"present": True, "value": start["ultracode"]}
+                             if "ultracode" in start else {"present": False})
+        text = sm.dumps(new)
+        path = write(self.cdir / "settings.json", text)
+        journal = manifest.empty()
+        record = manifest.new_install("0.1.0", None)
+        record["actions"].append(manifest.settings_action(
+            path, manifest.prior_absent(), manifest.sha256_bytes(text.encode("utf-8")), undo))
+        journal["installs"].append(record)
+        manifest.save(self.journal_path(), journal)
+
+    def test_old_journal_ultracode_prior_is_carried(self):
+        self.old_install({})
+        self.assertEqual(cli._owned_last(self.journal()),
+                         ({"ultracode": True}, {"ultracode": {"present": False}}))
+        self.ok("install")
+        self.assertIs(self.settings()["ultracode"], False)
+        newest = self.settings_actions()[0]
+        self.assertNotIn("ultracode", {k for k in newest["undo"] if k != "owned"})
+        self.assertEqual(newest["undo"]["owned"]["ultracode"],
+                         {"prior": {"present": False}, "wrote": False})
+        self.edit_settings(lambda s: s.update(theme="dark"))
+        self.ok("uninstall")
+        self.assertEqual(self.settings(), {"theme": "dark"})
+
+    def test_old_journal_ultracode_prior_false_comes_back(self):
+        self.old_install({"ultracode": False})
+        self.ok("install")
+        self.edit_settings(lambda s: s.update(theme="dark"))
+        self.ok("uninstall")
+        self.assertEqual(self.settings(), {"ultracode": False, "theme": "dark"})
+
+    def test_a_newer_record_supersedes_an_older_one(self):
+        # The first install writes model opus over fable; an update makes the seat default
+        # sonnet, so the second writes sonnet, carrying the prior fable. Carl then sets opus by
+        # hand: the second record leaves it (not what it wrote), and the first, superseded,
+        # must not put fable back just because opus is what it once wrote.
+        root = copy_checkout(self.tmp / "checkout")
+        write(self.cdir / "settings.json", sm.dumps({"model": "fable"}))
+        with mock.patch.object(paths, "harness_root", lambda: root):
+            self.ok("install")
+            routes = json.loads((root / "routes.json").read_text(encoding="utf-8"))
+            routes["seat"]["default"] = "sonnet-medium"
+            write(root / "routes.json", json.dumps(routes, indent=2) + "\n")
+            self.ok("install")
+            self.assertEqual(self.settings()["model"], "sonnet")
+            self.assertEqual(self.settings_actions()[0]["undo"]["owned"]["model"],
+                             {"prior": {"present": True, "value": "fable"}, "wrote": "sonnet"})
+            self.edit_settings(lambda s: s.update(model="opus"))
+            self.ok("uninstall")
+        self.assertEqual(self.settings(), {"model": "opus"})
+
+    def test_status_warns_about_forcing_variables(self):
+        self.ok("install")
+        with mock.patch.dict(os.environ):
+            for name in FORCING_VARS:
+                os.environ.pop(name, None)
+            self.assertNotIn("warning:", self.ok("status")[0])
+            self.edit_settings(lambda s: s["env"].update(CLAUDE_CODE_SUBAGENT_MODEL_FORCE="1"))
+            out, _ = self.ok("status")
+            self.assertIn("warning: CLAUDE_CODE_SUBAGENT_MODEL_FORCE is set in settings.json "
+                          "env; it overrides every agent's own model\n", out)
+            self.assertNotIn("CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL", out)
+            os.environ["CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL"] = "haiku"
+            out, _ = self.ok("status")
+            self.assertIn("warning: CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL is set in the "
+                          "environment; it overrides every agent's own model\n", out)
+
+    def test_status_with_unusable_routes_still_lists_hand_changes(self):
+        self.ok("install")
+        self.edit_settings(lambda s: s.update(ultracode=True))
+        root = copy_checkout(self.tmp / "checkout")
+        (root / "routes.json").unlink()
+        with mock.patch.object(paths, "harness_root", lambda: root):
+            out, _ = self.ok("status")
+        self.assertIn("settings.json keys changed by hand (install leaves them): ultracode\n",
+                      out)
 
 
 class StatusTests(InstallBase):

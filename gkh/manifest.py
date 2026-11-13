@@ -93,7 +93,8 @@ def file_action(path: Any, prior: dict, sha256: str) -> dict:
 
 def settings_action(path: Any, prior: dict, sha256: str, undo: dict) -> dict:
     """settings.json; undo is settings_merge.merge's record (removed legacy entries, prior
-    ultracode, prior events), handed back to settings_merge.unmerge."""
+    events, the owned keys' priors and written values), handed back to settings_merge.unmerge.
+    Records from before the owned keys hold a prior ultracode instead."""
     return {"type": "settings", "path": posix(path), "prior": prior, "sha256": sha256,
             "undo": undo}
 
