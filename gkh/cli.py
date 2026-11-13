@@ -22,20 +22,23 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from . import VERSION, claude_md, legacy, manifest, paths, shell
+from . import VERSION, claude_md, gen, legacy, manifest, paths, shell
+from .routes import agent_names, load as load_routes
 from . import settings_merge as sm
 
-COMMANDS = ("install", "uninstall", "update", "status")
+COMMANDS = ("install", "uninstall", "update", "status", "gen")
 RETIRE = "--retire-legacy"
-OPTIONS = {"install": (RETIRE,), "update": (RETIRE,)}
-USAGE = ("usage: install [install [%s] | uninstall | update [%s] | status]\n" % (RETIRE, RETIRE))
+CHECK = "--check"
+OPTIONS = {"install": (RETIRE,), "update": (RETIRE,), "gen": (CHECK,)}
+USAGE = ("usage: install [install [%s] | uninstall | update [%s] | status | gen [%s]]\n"
+         % (RETIRE, RETIRE, CHECK))
 # Sources install will not run without. It deploys every hooks/*.py, agents/worker-*.md and
 # workflows/gk-*.js present; there may be no workflows yet.
-WORKERS = ("worker-haiku-low", "worker-haiku", "worker-sonnet", "worker-opus",
-           "worker-opus-xhigh", "worker-opus-max", "worker-fable", "worker-fable-max")
+WORKERS = tuple(agent_names(load_routes(Path(__file__).resolve().parent.parent / "routes.json")))
 HOOK_SUPPORT = ("gk_common.py", "gk_model.py", "gk-remote-skip.py")
 OTHER_SOURCES = ("policy.md", "shell/aliases.sh", "shell/aliases.ps1")
 DEPLOYED = (("hooks", "*.py", ("hooks", "gk-harness")),
+            (".", "routes.json", ("hooks", "gk-harness")),
             ("agents", "worker-*.md", ("agents",)),
             ("workflows", "gk-*.js", ("workflows",)))
 EXECUTION_POLICY_NOTICE = (
@@ -126,7 +129,7 @@ def _write_problem(path: Path) -> str | None:
 def _required() -> list:
     scripts = sorted({s for _, _, names in sm.REGISTRATIONS for s in names} | set(HOOK_SUPPORT))
     return (["hooks/" + s for s in scripts] + ["agents/%s.md" % w for w in WORKERS]
-            + list(OTHER_SOURCES))
+            + list(OTHER_SOURCES) + ["routes.json"])
 
 
 def _check_sources(root: Path) -> None:
@@ -906,6 +909,18 @@ def _forgiving_output() -> None:
                 pass
 
 
+def _gen(check: bool) -> int:
+    root = Path(__file__).resolve().parent.parent
+    if check:
+        out = gen.stale(root)
+        for rel in out:
+            print(rel)
+        return 1 if out else 0
+    for rel in gen.write(root):
+        print(rel)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     args = list(argv)
     if not args or args[0].startswith("-"):
@@ -919,6 +934,8 @@ def main(argv: list[str]) -> int:
     _forgiving_output()
     if command == "install":
         return install(RETIRE in options)
+    if command == "gen":
+        return _gen(CHECK in options)
     if command == "uninstall":
         return uninstall()
     if command == "update":

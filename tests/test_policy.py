@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import re
+import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from gkh.routes import agent_names, load  # noqa: E402
+
 POLICY = ROOT / "policy.md"
 AGENTS = ROOT / "agents"
 
-EIGHT = {
-    "worker-haiku-low.md", "worker-haiku.md", "worker-sonnet.md", "worker-opus.md",
-    "worker-opus-xhigh.md", "worker-opus-max.md", "worker-fable.md", "worker-fable-max.md",
-}
+EIGHT = {n + ".md" for n in agent_names(load(ROOT / "routes.json"))}
 # Box paths and Goodricke-only rules that must not reach a policy installed on every machine.
 # CHANGELOG is the file name (generic "changelog entries" work stays in the routing table).
 BANNED_EXACT = ("/home/carls", "mike-dev", ":8080", "CHANGELOG")

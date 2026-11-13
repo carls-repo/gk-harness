@@ -86,3 +86,11 @@ def judge_violations(routes: dict) -> list:
     if "judges" not in routes:
         return []
     return []
+
+
+def agent_names(routes: dict) -> list:
+    """Sorted names of every agent file the generator writes: each tier's agent and each key
+    of the optional top-level "retired" map."""
+    names = {t.get("agent") for t in (routes.get("tiers") or {}).values()}
+    names |= set((routes.get("retired") or {}).keys())
+    return sorted(n for n in names if n)

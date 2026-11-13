@@ -35,6 +35,12 @@ def fixture() -> dict:
 
 
 class RoutesTests(unittest.TestCase):
+    def test_agent_names_sorted_with_retired(self):
+        r = {"tiers": {"a": {"agent": "worker-z"}, "b": {"agent": "worker-a"}},
+             "retired": {"worker-m": {}}}
+        self.assertEqual(rt.agent_names(r), ["worker-a", "worker-m", "worker-z"])
+        self.assertEqual(rt.agent_names({"tiers": {"a": {"agent": "worker-z"}}}), ["worker-z"])
+
     def test_repo_routes_valid(self):
         r = rt.load(Path(ROOT) / "routes.json")
         self.assertEqual(rt.problems(r), [])

@@ -357,7 +357,7 @@ class RoundTripTests(InstallBase):
         first = snapshot(self.home, mtimes=True, skip=())
 
         hooks = self.cdir / "hooks" / "gk-harness"
-        self.assertEqual(sorted(os.listdir(str(hooks))), REPO_HOOKS)
+        self.assertEqual(sorted(os.listdir(str(hooks))), sorted(REPO_HOOKS + ["routes.json"]))
         for name in REPO_HOOKS:
             self.assertEqual((hooks / name).read_bytes(),
                              (Path(ROOT) / "hooks" / name).read_bytes(), name)
@@ -385,6 +385,13 @@ class RoundTripTests(InstallBase):
         self.ok("uninstall")
         self.assertTreeEqual(start, snapshot(self.home))
         self.assertEqual(self.journal()["installs"], [])
+
+    def test_routes_deployed(self):
+        self.ok("install")
+        deployed = self.cdir / "hooks" / "gk-harness" / "routes.json"
+        self.assertEqual(deployed.read_bytes(), (Path(ROOT) / "routes.json").read_bytes())
+        self.ok("uninstall")
+        self.assertFalse(deployed.exists())
 
     def test_round_trip_legacy_box(self):
         c = self.cdir
