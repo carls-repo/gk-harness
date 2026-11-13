@@ -318,7 +318,7 @@ test('runStage: under nofable a Fable stage runs on its noFable tier and is reco
   assert.deepEqual(h.routingResult().offTier, [{ stage: 'wf.review', label: 'review:a', tier: 'opus-xhigh', reason: 'nofable' }])
 })
 
-// ---------------- the workflows on the table (Task 9: gk-research, gk-diagnose; Task 10: gk-review) ----------------
+// ---------------- the workflows on the table (Task 9: gk-research, gk-diagnose; Task 10: gk-review; Task 11: gk-build) ----------------
 
 // The six rules, computed from routes.json alone, for a stage run with ctx {} under the given
 // dials: [model, effort], or null when the stage does not run. ctx {} meets no `when`
@@ -364,11 +364,14 @@ const fullReplies = {
   // Scope sees one backend file and flags nothing (so the judge is not sensitive); every finder
   // reports one finding and every refuter upholds it (the minimal reply), so the judge runs.
   'gk-review': () => reviewReplies(),
+  // Two judgement pieces in one wave; the check runs (make check) and every stage replies minimally.
+  'gk-build': () => [{ match: /^plan-check$/, reply: () => ({ ok: true, problems: [], order: [['a', 'b']], classes: [] }) }],
 }
 const fullArgs = {
   'gk-research': () => ({ question: 'Where is the retry limit set?', depth: 'thorough', project: {} }),
   'gk-diagnose': () => ({ symptom: 'The list shows a deleted item until the second reload.', project: {} }),
   'gk-review': () => ({ target: 'main..HEAD', project: {} }),
+  'gk-build': () => ({ plan: 'docs/plan.md', check: 'make check', pieces: [{ name: 'a', files: ['src/a.ts'], brief: 'Add a.' }, { name: 'b', files: ['src/b.ts'], brief: 'Add b.' }], project: {} }),
 }
 function reviewReplies({ detected = {}, scopeDead = false, judge = null } = {}) {
   return [
@@ -386,7 +389,7 @@ function reviewReplies({ detected = {}, scopeDead = false, judge = null } = {}) 
 const runFull = (wf, extra = {}, replies = fullReplies[wf]()) =>
   runWorkflow(join(workflowsDir, `${wf}.js`), { ...fullArgs[wf](), ...extra }, replies)
 
-for (const wf of ['gk-research', 'gk-diagnose', 'gk-review']) {
+for (const wf of ['gk-research', 'gk-diagnose', 'gk-review', 'gk-build']) {
   test(`stage tiers equal routes.json, ${wf}: every call runs on the tier the six rules give, under no dials, nofable and fable`, async () => {
     const phases = routes.phases[wf]
     assert.ok(readFileSync(join(workflowsDir, `${wf}.js`), 'utf8').includes('}\n// gk-harness:args-v2\n'), `${wf}: the args-v2 marker`)
@@ -432,7 +435,7 @@ test('dead critic re-runs on opus high: under the fable dial gk-research\'s crit
 
 test('retired args are accepted: profile and escalate run, are ignored, and log the retired line once; no Profile: line', async () => {
   const retired = `profile is retired; routes come from routes.json v${routes.version}`
-  for (const wf of ['gk-research', 'gk-diagnose', 'gk-review']) {
+  for (const wf of ['gk-research', 'gk-diagnose', 'gk-review', 'gk-build']) {
     const plain = await runFull(wf)
     for (const extra of [{ profile: 'opus', escalate: true }, { profile: 'fable' }, { escalate: false }, { profile: 'nonsense' }]) {
       const { calls, logs, result } = await runFull(wf, extra)
@@ -585,4 +588,207 @@ test('runStage, the real gk-review block: author "constructor" judges as if no a
   assert.deepEqual(await h.runStage('gk-review.judge', { author: 'constructor' }, 'p', { label: 'judge' }), { confirmed: [], rejected: [] })
   assert.deepEqual(calls.map((c) => [c.model, c.effort]), [['opus', 'high']])
   assert.deepEqual(h.logs, ['routes: ctx.author "constructor" is not a tier this workflow knows; ignored'])
+})
+
+// ---------------- gk-build: piece classes, routes.json tiers, the exit-code check (Task 11) ----------------
+
+const buildPlanReply = (order, extra = {}) => ({ match: /^plan-check$/, reply: () => ({ ok: true, problems: [], order, classes: [], ...extra }) })
+const runBuild = (args, replies = []) => runWorkflow(join(workflowsDir, 'gk-build.js'), { plan: 'docs/plan.md', check: 'make check', project: { root: '/tmp/repo' }, ...structuredClone(args) }, replies)
+const BUILD_CLASSES = ['spec', 'judgement', 'hard', 'security']
+// One piece per class, plus one with no class (judgement).
+const CLASS_PIECES = [
+  ...BUILD_CLASSES.map((cls) => ({ name: cls, class: cls, files: [`src/${cls}.ts`], brief: `Add ${cls}.` })),
+  { name: 'none', files: ['src/none.ts'], brief: 'Add none.' },
+]
+const classOf = (name) => (BUILD_CLASSES.includes(name) ? name : 'judgement')
+const IMPLEMENT = routes.stages['gk-build.implement']
+const REVIEW = routes.stages['gk-build.review']
+// A tier under nofable: a Fable tier moves to the stage's noFable (per class for implement).
+const offFable = (tier, nf) => (routes.tiers[tier].model === 'fable' ? nf : tier)
+const tierPair = (tier) => [routes.tiers[tier].model, routes.tiers[tier].effort]
+
+test('implementer tiers, gk-build: each class runs on its routes.json tier, under no dials and nofable', async () => {
+  assert.deepEqual(Object.keys(IMPLEMENT.byClass).sort(), [...BUILD_CLASSES].sort())
+  for (const dials of [[], ['nofable']]) {
+    const { calls, result } = await runBuild({ pieces: CLASS_PIECES, dials }, [buildPlanReply([CLASS_PIECES.map((p) => p.name)])])
+    const moved = []
+    for (const p of CLASS_PIECES) {
+      const cls = classOf(p.name)
+      const base = IMPLEMENT.byClass[cls]
+      const want = dials.length ? offFable(base, IMPLEMENT.noFable[cls]) : base
+      if (want !== base) moved.push({ stage: 'gk-build.implement', label: `impl:${p.name}`, tier: want, reason: 'nofable' })
+      assert.deepEqual(calls.filter((c) => c.label === `impl:${p.name}`).map((c) => [c.model, c.effort]), [tierPair(want)], `${p.name} ${JSON.stringify(dials)}`)
+    }
+    assert.deepEqual(result.routing.offTier.filter((o) => o.stage === 'gk-build.implement'), moved, `${JSON.stringify(dials)}: offTier`)
+  }
+})
+
+test('review tier at least implementer, gk-build: a piece\'s review runs on the higher of opus-high and its class tier; hard on fable-medium, opus-xhigh under nofable', async () => {
+  for (const dials of [[], ['nofable']]) {
+    const { calls } = await runBuild({ pieces: CLASS_PIECES, dials }, [buildPlanReply([CLASS_PIECES.map((p) => p.name)])])
+    for (const p of CLASS_PIECES) {
+      // Ruling R4: the review gets the class tier before any dial.
+      const impl = IMPLEMENT.byClass[classOf(p.name)]
+      let want = higherOf(REVIEW.tier, impl)
+      if (dials.length) want = offFable(want, REVIEW.noFable)
+      assert.deepEqual(calls.filter((c) => c.label === `review:${p.name}`).map((c) => [c.model, c.effort]), [tierPair(want)], `${p.name} ${JSON.stringify(dials)}`)
+    }
+    const hard = calls.find((c) => c.label === 'review:hard')
+    assert.deepEqual([hard.model, hard.effort], dials.length ? ['opus', 'xhigh'] : ['fable', 'medium'])
+  }
+})
+
+test('check passes only on exit code 0, gk-build: prose claiming success counts for nothing; the seat must re-run the check command', async () => {
+  const pieces = [{ name: 'a', files: ['src/a.ts'], brief: 'Add a.' }]
+  const claims = { ran: 'make check', exitCode: 1, tail: 'All checks passed! Everything is green.', passed: true, output: 'passed' }
+  const failed = await runBuild({ pieces }, [buildPlanReply([['a']]), { match: /^check$/, reply: () => claims }])
+  assert.equal(failed.result.check.passed, false)
+  assert.equal(failed.result.check.exitCode, 1)
+  assert.equal(failed.result.check.tail, claims.tail)
+  assert.equal(failed.result.seatMustRerun, 'make check')
+  assert.ok(failed.logs.some((l) => l.startsWith('Check FAILED')), failed.logs.join('\n'))
+  assert.ok(failed.calls.find((c) => c.label === 'judge').prompt.includes('"passed":false'))
+  const ok = await runBuild({ pieces }, [buildPlanReply([['a']]), { match: /^check$/, reply: () => ({ ran: 'make check', exitCode: 0, tail: 'ok' }) }])
+  assert.equal(ok.result.check.passed, true)
+  // An exit code that is not the integer 0 is not a pass.
+  for (const exitCode of ['0', null, 0.5, undefined]) {
+    const odd = await runBuild({ pieces }, [buildPlanReply([['a']]), { match: /^check$/, reply: () => ({ ran: 'make check', exitCode, tail: 'ok' }) }])
+    assert.equal(odd.result.check.passed, false, JSON.stringify(exitCode))
+  }
+  // The schema asks for the command run, its exit code and the tail; the prompt asks for 40 lines verbatim.
+  const schemaOf = async () => {
+    let schema = null
+    await runBuild({ pieces }, [buildPlanReply([['a']]), { match: /^check$/, reply: (p, opts) => { schema = opts.schema; return { ran: 'x', exitCode: 0, tail: '' } } }])
+    return schema
+  }
+  const schema = await schemaOf()
+  assert.deepEqual(schema.properties, { ran: { type: 'string' }, exitCode: { type: 'integer' }, tail: { type: 'string' } })
+  assert.deepEqual(schema.required, ['ran', 'exitCode', 'tail'])
+  const prompt = failed.calls.find((c) => c.label === 'check').prompt
+  assert.ok(prompt.includes('last 40 lines') && prompt.includes('verbatim') && prompt.includes('exitCode'), prompt)
+  // No check ran: nothing for the seat to re-run.
+  const none = await runBuild({ pieces, check: undefined }, [buildPlanReply([['a']])])
+  assert.equal(none.result.seatMustRerun, null)
+  const outside = await runBuild({ pieces, project: { root: '/tmp/repo', packages: ['web'] } }, [buildPlanReply([['a']])])
+  assert.equal(outside.calls.some((c) => c.label === 'check'), false)
+  assert.equal(outside.result.seatMustRerun, null)
+  // With packages, the check command is what the seat re-runs from each affected package.
+  const pk = await runBuild({ pieces: [{ name: 'a', files: ['web/a.ts'], brief: 'Add a.' }], project: { root: '/tmp/repo', packages: ['web'] } }, [buildPlanReply([['a']])])
+  assert.ok(pk.calls.some((c) => c.label === 'check'))
+  assert.equal(pk.result.seatMustRerun, 'make check')
+})
+
+test('dead fable implementer is unfinished, gk-build: no re-run, the piece comes back in result.failed for the seat', async () => {
+  const pieces = [
+    { name: 'h', class: 'hard', files: ['src/h.ts'], brief: 'Add h.' },
+    { name: 's', class: 'spec', files: ['src/s.ts'], brief: 'Add s.' },
+    { name: 'j', files: ['src/j.ts'], brief: 'Add j.' },
+  ]
+  const { calls, logs, result } = await runBuild({ pieces }, [buildPlanReply([['h', 's', 'j']]), { match: /^impl:(h|s)$/, reply: () => null }])
+  assert.deepEqual(calls.filter((c) => c.label === 'impl:h').map((c) => [c.model, c.effort]), [['fable', 'medium']], 'no re-run of the Fable implementer')
+  assert.equal(calls.filter((c) => c.label === 'impl:s').length, 1, 'no re-run of the spec implementer')
+  assert.deepEqual(result.failed, [
+    { name: 'h', class: 'hard', stage: 'implement', tier: 'fable-medium', status: 'unfinished' },
+    { name: 's', class: 'spec', stage: 'implement', tier: 'sonnet-medium', status: 'unfinished' },
+  ])
+  assert.deepEqual(result.pieces.map((p) => p.name), ['j'])
+  assert.ok(logs.includes('Wave 1: no result from h, s — carried to the judge as missing'), logs.join('\n'))
+  assert.ok(calls.find((c) => c.label === 'judge').prompt.includes('Pieces with no implementation result: ["h","s"]'))
+  assert.deepEqual(result.routing.offTier, [], 'an unfinished piece is not an off-tier run')
+  // Under nofable the hard piece ran on opus-high; it is still unfinished, with that tier.
+  const off = await runBuild({ pieces, dials: ['nofable'] }, [buildPlanReply([['h', 's', 'j']]), { match: /^impl:h$/, reply: () => null }])
+  assert.deepEqual(off.result.failed, [{ name: 'h', class: 'hard', stage: 'implement', tier: 'opus-high', status: 'unfinished' }])
+  // Nothing failed: an empty list.
+  const fine = await runBuild({ pieces }, [buildPlanReply([['h', 's', 'j']])])
+  assert.deepEqual(fine.result.failed, [])
+})
+
+test('hard is retired but accepted, gk-build: hard true is class hard and logs the retired line; hard false is the default class', async () => {
+  const pieces = [
+    { name: 'a', files: ['src/a.ts'], brief: 'Add a.' },
+    { name: 'b', hard: true, files: ['src/b.ts'], brief: 'Add b.' },
+    { name: 'c', hard: false, files: ['src/c.ts'], brief: 'Add c.' },
+  ]
+  const { calls, logs } = await runBuild({ pieces }, [buildPlanReply([['a', 'b', 'c']])])
+  assert.deepEqual(logs.filter((l) => / is retired; use class$/.test(l)), ['pieces[1].hard is retired; use class', 'pieces[2].hard is retired; use class'])
+  const tier = (label) => calls.filter((c) => c.label === label).map((c) => [c.model, c.effort])
+  assert.deepEqual(tier('impl:b'), [tierPair(IMPLEMENT.byClass.hard)])
+  assert.deepEqual(tier('impl:c'), [tierPair(IMPLEMENT.byClass.judgement)])
+  assert.deepEqual(tier('impl:a'), [tierPair(IMPLEMENT.byClass.judgement)])
+  // The same as class hard, apart from the retired line.
+  const asClass = await runBuild({ pieces: [pieces[0], { ...pieces[1], hard: undefined, class: 'hard' }, { ...pieces[2], hard: undefined }] }, [buildPlanReply([['a', 'b', 'c']])])
+  assert.deepEqual(asClass.calls.map((c) => [c.label, c.model, c.effort]), calls.map((c) => [c.label, c.model, c.effort]))
+  assert.ok(!asClass.logs.some((l) => / is retired; use class$/.test(l)))
+})
+
+test('hard and class together throw, gk-build: and so does an unknown class or a non-boolean hard, before any agent', async () => {
+  const bad = [
+    [{ hard: true, class: 'hard' }, 'gk-build: pieces[0] (a) gives both hard and class; give class only'],
+    [{ hard: false, class: 'spec' }, 'gk-build: pieces[0] (a) gives both hard and class; give class only'],
+    [{ class: 'easy' }, 'gk-build: pieces[0] (a).class must be one of spec|judgement|hard|security (got "easy")'],
+    [{ class: 'constructor' }, 'gk-build: pieces[0] (a).class must be one of spec|judgement|hard|security (got "constructor")'],
+    [{ class: 3 }, 'gk-build: pieces[0] (a).class must be one of spec|judgement|hard|security (got 3)'],
+    [{ hard: 'yes' }, 'gk-build: pieces[0] (a).hard, when given, must be a boolean'],
+  ]
+  for (const [extra, message] of bad) {
+    const seen = []
+    const spy = [{ match: /.*/, reply: (prompt, opts) => { seen.push(opts.label); return null } }]
+    await assert.rejects(runBuild({ pieces: [{ name: 'a', files: ['src/a.ts'], brief: 'Add a.', ...extra }] }, spy), (e) => e.message === message, JSON.stringify(extra))
+    assert.deepEqual(seen, [], JSON.stringify(extra))
+  }
+})
+
+test('plan check confirms classes, gk-build: it is told each piece\'s class; disagreements come back in the result and are never applied', async () => {
+  const pieces = [
+    { name: 'a', class: 'spec', files: ['src/a.ts'], brief: 'Add a.' },
+    { name: 'b', files: ['src/b.ts'], brief: 'Add b.' },
+  ]
+  const classes = [
+    { name: 'a', class: 'hard', agree: false, reason: 'a touches the scheduler' },
+    { name: 'b', class: 'judgement', agree: true, reason: 'fine' },
+    { name: 'zz', class: 'spec', agree: false, reason: 'not a piece' },
+  ]
+  const { calls, logs, result } = await runBuild({ pieces }, [buildPlanReply([['a', 'b']], { classes })])
+  const plan = calls.find((c) => c.label === 'plan-check')
+  assert.ok(plan.prompt.includes('a: spec') && plan.prompt.includes('b: judgement'), plan.prompt)
+  assert.deepEqual(result.classDisagreements, [{ name: 'a', given: 'spec', proposed: 'hard', reason: 'a touches the scheduler' }])
+  assert.ok(logs.includes('Plan check disputes piece classes (not applied): a spec → hard'), logs.join('\n'))
+  assert.ok(logs.includes('Plan check named unknown pieces in classes (dropped): zz'), logs.join('\n'))
+  // Not applied: a still implements on the spec tier.
+  assert.deepEqual(calls.filter((c) => c.label === 'impl:a').map((c) => [c.model, c.effort]), [tierPair(IMPLEMENT.byClass.spec)])
+  // The schema asks for classes.
+  let schema = null
+  await runBuild({ pieces }, [{ match: /^plan-check$/, reply: (p, opts) => { schema = opts.schema; return { ok: true, problems: [], order: [['a', 'b']], classes: [] } } }])
+  assert.deepEqual(schema.properties.classes.items.required, ['name', 'class', 'agree', 'reason'])
+  assert.deepEqual(schema.properties.classes.items.properties.class.enum, BUILD_CLASSES)
+  assert.ok(schema.required.includes('classes'))
+  // A plan check that gives no classes, or agrees, disputes nothing.
+  const quiet = await runBuild({ pieces }, [{ match: /^plan-check$/, reply: () => ({ ok: true, problems: [], order: [['a', 'b']] }) }])
+  assert.deepEqual(quiet.result.classDisagreements, [])
+})
+
+test('dead plan check and judge, gk-build: each re-runs once on its noFable tier; a plan check dead twice stops the run', async () => {
+  const pieces = [{ name: 'a', files: ['src/a.ts'], brief: 'Add a.' }]
+  const onFable = (live) => (prompt, opts) => (opts.model === 'fable' ? null : live)
+  const { calls, result } = await runBuild({ pieces }, [
+    { match: /^plan-check$/, reply: onFable({ ok: true, problems: [], order: [['a']], classes: [] }) },
+    { match: /^judge$/, reply: onFable({ ship: true, blockers: [], reworkPieces: [] }) },
+  ])
+  const at = (label) => calls.filter((c) => c.label === label).map((c) => [c.model, c.effort])
+  assert.deepEqual(at('plan-check'), [['fable', 'medium'], ['opus', 'xhigh']])
+  assert.deepEqual(at('judge'), [['fable', 'medium'], ['opus', 'xhigh']])
+  assert.equal(result.judge.ship, true, 'the re-run\'s verdict is used')
+  assert.deepEqual(result.routing.offTier, [
+    { stage: 'gk-build.plan-check', label: 'plan-check', tier: 'opus-xhigh', reason: 'onFail' },
+    { stage: 'gk-build.judge', label: 'judge', tier: 'opus-xhigh', reason: 'onFail' },
+  ])
+  await assert.rejects(runBuild({ pieces }, [{ match: /^plan-check$/, reply: () => null }]), /gk-build: plan check agent returned nothing/)
+  // A ui judge runs on fable-high; the judge's ctx is {ui}.
+  const ui = await runBuild({ pieces, ui: true }, [buildPlanReply([['a']])])
+  assert.deepEqual(ui.calls.filter((c) => c.label === 'judge').map((c) => [c.model, c.effort]), [['fable', 'high']])
+  assert.ok(ui.logs.includes('Judge on fable high (ui work)'), ui.logs.join('\n'))
+  const plain = await runBuild({ pieces }, [buildPlanReply([['a']])])
+  assert.ok(plain.logs.includes('Judge on fable medium'), plain.logs.join('\n'))
+  const off = await runBuild({ pieces, ui: true, dials: ['nofable'] }, [buildPlanReply([['a']])])
+  assert.ok(off.logs.includes('Judge on opus xhigh (ui work)'), off.logs.join('\n'))
 })

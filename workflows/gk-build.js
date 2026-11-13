@@ -1,40 +1,25 @@
 export const meta = {
   name: 'gk-build',
   description: 'Build a multi-file change from a plan split into pieces with disjoint file sets: plan check, wave-ordered implement, project check, per-piece review, judge',
-  whenToUse: 'Use when a written plan/spec is already decomposed into pieces that each own a disjoint set of files. Requires args {plan: "<path to the plan/spec file>" (REQUIRED), pieces: [{name: "<unique piece name>", files: ["src/...", "tests/..."], brief: "<what this piece must do>", tests?: "<test file path (the piece owns it, in any language) or test command>", hard?: true|false}] (REQUIRED, non-empty), check?: "<project-wide check command; default the project\'s check, and with neither the check is skipped>", ui?: true|false, profile?: "fable"|"opus"|"sonnet" (default "fable"), escalate?: true|false (route the judge to Fable under a non-fable profile, on Carl\'s word), project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases), check (the default check command), packages (folders relative to the top level: the check runs from each one that holds a file some piece owns, and passes without running when none does; without packages it runs once from the top level; implementers run tests from the owning package, else from the top level) and signOff ([{key, seat, sharedFile?, trigger?, paths?, uiJudge?, implementer?, reviewer?}] — the checks the seat runs before sign-off: each implementer may add its one line to each sharedFile, implementer texts go into the implement brief and reviewer texts onto the reviewers\' list, a trigger names the work that needs its check, paths (regular expressions) meet the trigger for every piece that owns a file whose top-level-relative path matches one, and a check that applies (no trigger, or a met one) and sets uiJudge routes the judge to Fable); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. A hard piece implements on opus xhigh (fable profile), opus high (opus profile) or sonnet high (sonnet profile). Paths are relative to the repository\'s top level. Edits land uncommitted in the working tree; returns {planCheck, pieces, check, reviews, judge, signOff: [{key, seat, pieces}]} — check is {passed: null, skipped: true, output} when there is no check command, a sign-off check with no trigger lists every piece, a triggered one the pieces that met it — and the calling session commits, runs each signOff entry\'s seat check for its pieces, and writes the summary.',
+  whenToUse: 'Use when a written plan/spec is already decomposed into pieces that each own a disjoint set of files. Requires args {plan: "<path to the plan/spec file>" (REQUIRED), pieces: [{name: "<unique piece name>", files: ["src/...", "tests/..."], brief: "<what this piece must do>", tests?: "<test file path (the piece owns it, in any language) or test command>", class?: "spec"|"judgement"|"hard"|"security" (default "judgement": the class picks the implementer\'s tier from routes.json; hard: true is retired, read as class "hard" for one version)}] (REQUIRED, non-empty), check?: "<project-wide check command; default the project\'s check, and with neither the check is skipped>", ui?: true|false, dials?: string[] — routing dials: "fable" puts the plan check and the judge on fable high, "nofable" moves every fable stage to its noFable tier (each stage\'s model and effort come from routes.json; a plan check, review or judge that dies on fable runs once more on opus xhigh; an implementer that dies is returned unfinished, never re-run), project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases), check (the default check command), packages (folders relative to the top level: the check runs from each one that holds a file some piece owns, and passes without running when none does; without packages it runs once from the top level; implementers run tests from the owning package, else from the top level) and signOff ([{key, seat, sharedFile?, trigger?, paths?, uiJudge?, implementer?, reviewer?}] — the checks the seat runs before sign-off: each implementer may add its one line to each sharedFile, implementer texts go into the implement brief and reviewer texts onto the reviewers\' list, a trigger names the work that needs its check, paths (regular expressions) meet the trigger for every piece that owns a file whose top-level-relative path matches one, and a check that applies (no trigger, or a met one) and sets uiJudge routes the judge to Fable); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. The plan check confirms each piece\'s class; a disagreement is returned in classDisagreements, never applied. Paths are relative to the repository\'s top level. Edits land uncommitted in the working tree; returns {planCheck, pieces, failed: [{name, class, stage, tier, status: "unfinished"}], check, seatMustRerun, reviews, judge, classDisagreements: [{name, given, proposed, reason}], signOff: [{key, seat, pieces}], routing: {routes, dials, offTier}} — check is {passed, ran, exitCode, tail} when it ran (passed is exitCode 0, whatever the agent says), {passed: null, skipped: true, output} when there is no check command, {passed: false, output} when its agent returned nothing; seatMustRerun is the check command the seat re-runs itself before sign-off (null when no check ran); a failed piece is re-run by the seat on the next rung; a sign-off check with no trigger lists every piece, a triggered one the pieces that met it — and the calling session commits, runs each signOff entry\'s seat check for its pieces, and writes the summary.',
   phases: [
-    { title: 'Plan check', detail: 'one Fable agent verifies the decomposition, orders pieces into waves, names the pieces that meet each project sign-off trigger (fable; opus under the opus/sonnet profiles)', model: 'fable' },
-    { title: 'Implement', detail: 'waves run in sequence; pieces within a wave run in parallel, one agent per piece (opus high, hard pieces opus xhigh; sonnet medium under the opus/sonnet profiles, hard pieces opus high / sonnet high)', model: 'opus' },
-    { title: 'Check', detail: 'one Haiku agent runs the check command from each affected project package, or once from the top level when the project names no packages; skipped with no command', model: 'haiku' },
-    { title: 'Review', detail: 'one Opus xhigh reviewer per piece over git diff of its files', model: 'opus' },
-    { title: 'Judge', detail: 'one judge over reviews, check and sign-off triggers: Fable if ui or an applying sign-off check (no trigger, or a met one) sets uiJudge (every profile) or escalate, else Opus' },
+    { title: 'Plan check', detail: 'one agent verifies the decomposition, orders pieces into waves, confirms each piece\'s class and names the pieces that meet each project sign-off trigger (fable medium; opus xhigh under nofable)', model: 'fable' },
+    { title: 'Implement', detail: 'waves run in sequence; pieces within a wave run in parallel, one agent per piece on its class tier (spec sonnet medium, judgement opus medium, hard and security fable medium, opus high under nofable); a piece whose agent dies comes back unfinished', model: 'opus' },
+    { title: 'Check', detail: 'one Haiku agent runs the check command from each affected project package, or once from the top level when the project names no packages, and reports the command, its exit code and the last 40 lines; passed is exit code 0; skipped with no command', model: 'haiku' },
+    { title: 'Review', detail: 'one reviewer per piece over git diff of its files: opus high, or the piece\'s class tier when higher (opus xhigh in place of fable under nofable)', model: 'opus' },
+    { title: 'Judge', detail: 'one judge over reviews, check and sign-off triggers: fable medium, fable high if ui or an applying sign-off check (no trigger, or a met one) sets uiJudge; opus xhigh under nofable' },
   ],
 }
-// gk-harness:args-v1
+// gk-harness:args-v2
 
 // args may arrive as a raw JSON string depending on the invoking runtime.
 const ARGS = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch (e) { return args } })() : args
 
-if (!ARGS || typeof ARGS !== 'object') throw new Error('gk-build requires args {plan, pieces:[{name, files, brief, tests?, hard?}], check?, ui?, profile?: fable|opus|sonnet, escalate?, project?}')
+if (!ARGS || typeof ARGS !== 'object') throw new Error('gk-build requires args {plan, pieces:[{name, files, brief, tests?, class?: spec|judgement|hard|security}], check?, ui?, dials?, project?}')
 if (typeof ARGS.plan !== 'string' || !ARGS.plan.trim()) throw new Error('gk-build: args.plan (path to the plan/spec file) is required')
-if (!Array.isArray(ARGS.pieces) || ARGS.pieces.length === 0) throw new Error('gk-build: args.pieces must be a non-empty array of {name, files, brief, tests?, hard?}')
+if (!Array.isArray(ARGS.pieces) || ARGS.pieces.length === 0) throw new Error('gk-build: args.pieces must be a non-empty array of {name, files, brief, tests?, class?}')
 if (ARGS.check !== undefined && (typeof ARGS.check !== 'string' || !ARGS.check.trim())) throw new Error('gk-build: args.check, when given, must be a non-empty command string')
 if (ARGS.ui !== undefined && typeof ARGS.ui !== 'boolean') throw new Error('gk-build: args.ui, when given, must be a boolean')
-
-// ---------------- Profile (three-seat policy, 2026-10-13) ----------------
-// 'fable' = Mode A (default, unchanged behaviour); 'opus' = Mode B; 'sonnet' = Mode C.
-const PROFILE = ARGS.profile === undefined ? 'fable' : ARGS.profile
-if (!['fable', 'opus', 'sonnet'].includes(PROFILE)) throw new Error(`gk-build: args.profile must be one of fable|opus|sonnet (got ${JSON.stringify(ARGS.profile)})`)
-if (ARGS.escalate !== undefined && typeof ARGS.escalate !== 'boolean') throw new Error('gk-build: args.escalate, when given, must be a boolean')
-const ESCALATE = ARGS.escalate === true  // Carl's word: route the apex judge to fable under a non-fable profile
-const APEX = PROFILE === 'fable' ? 'fable' : 'opus'   // the top of the ladder for this profile
-log(`Profile: ${PROFILE} (apex ${APEX}${ESCALATE ? ', escalated to fable on Carl\'s word' : ''})`)
-// Implementer tier per profile; a piece flagged hard goes one step up.
-const IMPL_TIER = {
-  fable: { normal: { model: 'opus', effort: 'high' }, hard: { model: 'opus', effort: 'xhigh' } },
-  opus: { normal: { model: 'sonnet', effort: 'medium' }, hard: { model: 'opus', effort: 'high' } },
-  sonnet: { normal: { model: 'sonnet', effort: 'medium' }, hard: { model: 'sonnet', effort: 'high' } },
-}[PROFILE]
 
 // ================= gk-project block: BEGIN (copy verbatim; only WF and PHASES differ) =================
 // Every gk-* workflow carries this same block (scripts cannot import): the args.project
@@ -284,6 +269,8 @@ async function runStage(stage, ctx, prompt, opts = {}) {
 }
 const routingResult = () => ({ routes: ROUTES.version, dials: DIALS.slice(), offTier: offTier.slice() })
 // </gk-routes>
+// profile and escalate are retired: every stage takes its model and effort from ROUTES.
+if (ARGS.profile !== undefined || ARGS.escalate !== undefined) log(`profile is retired; routes come from routes.json v${ROUTES.version}`)
 
 // ---------------- Paths ----------------
 // Paths are relative to the repository's top level. Backslashes become slashes (git's separator
@@ -356,6 +343,12 @@ const PACKAGES = PROJECT && PROJECT.packages
   : null
 const CHECK = ARGS.check || (PROJECT && PROJECT.check) || null
 
+// A piece's class picks its implementer's tier (routes.json gk-build.implement byClass); with no
+// class a piece is judgement. The review gets the class tier before any dial as its implementer
+// (ruling R4), so a hard piece's review is at least fable medium (opus xhigh under nofable).
+const CLASSES = ['spec', 'judgement', 'hard', 'security']
+const classTier = cls => ROUTES.stages['gk-build.implement'].byClass[cls]
+
 let PLAN
 try { PLAN = normPath(ARGS.plan) } catch (e) { throw new Error(`gk-build: args.plan — ${e.message}`) }
 const PIECES = ARGS.pieces.map((p, i) => {
@@ -364,12 +357,17 @@ const PIECES = ARGS.pieces.map((p, i) => {
   if (typeof p.brief !== 'string' || !p.brief.trim()) throw new Error(`gk-build: pieces[${i}] (${p.name}).brief is required`)
   if (p.tests !== undefined && typeof p.tests !== 'string') throw new Error(`gk-build: pieces[${i}] (${p.name}).tests must be a string`)
   if (p.hard !== undefined && typeof p.hard !== 'boolean') throw new Error(`gk-build: pieces[${i}] (${p.name}).hard, when given, must be a boolean`)
+  if (p.hard !== undefined && p.class !== undefined) throw new Error(`gk-build: pieces[${i}] (${p.name}) gives both hard and class; give class only`)
+  if (p.class !== undefined && !CLASSES.includes(p.class)) throw new Error(`gk-build: pieces[${i}] (${p.name}).class must be one of ${CLASSES.join('|')} (got ${JSON.stringify(p.class)})`)
+  // hard is retired: accepted for one version, read as class hard (hard: false is the default).
+  if (p.hard !== undefined) log(`pieces[${i}].hard is retired; use class`)
+  const cls = p.class !== undefined ? p.class : p.hard === true ? 'hard' : 'judgement'
   const files = p.files.map(normPath)
   // The file a tests value names (testFileOf), in any language, is owned by the piece like its
   // files (and, like them, must lie inside the repository); a folder or a command is not.
   const tf = p.tests ? testFileOf(p.tests) : null
   const owned = tf ? [...new Set([...files, normPath(tf)])] : files
-  return { name: p.name, files, owned, brief: p.brief, tests: p.tests || '', hard: p.hard === true }
+  return { name: p.name, files, owned, brief: p.brief, tests: p.tests || '', cls }
 })
 const byName = Object.fromEntries(PIECES.map(p => [p.name, p]))
 if (Object.keys(byName).length !== PIECES.length) throw new Error('gk-build: piece names must be unique')
@@ -408,26 +406,39 @@ log(`Plan check over ${PIECES.length} pieces; ${PACKAGES ? `affected packages: $
 const SHARED_PLAN = !SHARED_FILES.length ? ''
   : SHARED_FILES.length === 1 ? ` (plus one appended ${SHARED_FILES[0]} line)`
   : ` (plus one appended line in each of ${SHARED_FILES.join(', ')})`
-const planCheck = await agent(
+// The plan check confirms each piece's class; the seat decides on a disagreement, so none is applied.
+const CLASS_TEXT = `Piece classes given (each picks its implementer's tier): ${PIECES.map(p => `${p.name}: ${p.cls}`).join(', ')}. classes = for each piece, {name, class, agree, reason}: class is the class you judge right for it — spec (a scoped change from an exact spec: a known-cause fix, tests for existing behaviour, CRUD), judgement (a feature or change that needs judgement; the default), hard (hard reasoning: a subtle correctness, concurrency or cross-cutting change) or security (security-sensitive code: authentication, access control, secrets, PII); agree = it is the class given; reason = one sentence. A disagreement goes to the seat and changes nothing here.`
+const planCheckRaw = await runStage('gk-build.plan-check', {},
   `Verify the decomposition of a build plan before parallel implementation.
 Plan/spec file: ${inRepo(PLAN)} — read it in full. Pieces:
 ${PIECES.map(describe).join('\n')}
 
-Check: (1) each piece is self-contained — its brief can be implemented editing only its listed files${SHARED_PLAN}; (2) file sets are DISJOINT — if two pieces share a file, or one piece depends on another's output, put them in different waves in dependency order; (3) together the pieces cover the plan. Return ok=false with concrete problems only for real defects (missing files, an unimplementable split, plan coverage gaps); an overlap fixable by ordering is not a problem. order = waves, each a list of piece names; every piece appears exactly once; pieces in one wave run concurrently.${TRIGGERS.length ? ` triggered = for each sign-off trigger below, the pieces whose work meets it, as {key, pieces} (leave out a trigger no piece meets), so the seat runs that check:\n${TRIGGER_LIST}\n` : ' '}Read-only: edit nothing.${RULES}${projectRules('Plan check')}`,
+Check: (1) each piece is self-contained — its brief can be implemented editing only its listed files${SHARED_PLAN}; (2) file sets are DISJOINT — if two pieces share a file, or one piece depends on another's output, put them in different waves in dependency order; (3) together the pieces cover the plan. Return ok=false with concrete problems only for real defects (missing files, an unimplementable split, plan coverage gaps); an overlap fixable by ordering is not a problem. order = waves, each a list of piece names; every piece appears exactly once; pieces in one wave run concurrently. ${CLASS_TEXT}${TRIGGERS.length ? ` triggered = for each sign-off trigger below, the pieces whose work meets it, as {key, pieces} (leave out a trigger no piece meets), so the seat runs that check:\n${TRIGGER_LIST}\n` : ' '}Read-only: edit nothing.${RULES}${projectRules('Plan check')}`,
   {
-    label: 'plan-check', phase: 'Plan check', model: APEX, effort: 'xhigh',
+    label: 'plan-check', phase: 'Plan check',
     schema: {
       type: 'object',
       properties: {
         ok: { type: 'boolean' },
         problems: { type: 'array', items: { type: 'string' } },
         order: { type: 'array', items: { type: 'array', items: { type: 'string' } } },
+        classes: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { name: { type: 'string' }, class: { type: 'string', enum: CLASSES }, agree: { type: 'boolean' }, reason: { type: 'string' } },
+            required: ['name', 'class', 'agree', 'reason'],
+          },
+        },
         ...(TRIGGERS.length ? { triggered: KEYED_PIECES } : {}),
       },
-      required: ['ok', 'problems', 'order', ...(TRIGGERS.length ? ['triggered'] : [])],
+      required: ['ok', 'problems', 'order', 'classes', ...(TRIGGERS.length ? ['triggered'] : [])],
     },
   },
 )
+// The plan check as the seat gets it back: the agent's reply less its classes, which come back
+// as classDisagreements.
+const planCheck = planCheckRaw && (({ classes, ...rest }) => rest)(planCheckRaw)
 if (!planCheck) throw new Error('gk-build: plan check agent returned nothing')
 if (!planCheck.ok) throw new Error(`gk-build: plan check failed:\n- ${planCheck.problems.join('\n- ')}`)
 
@@ -480,6 +491,19 @@ for (const c of PATH_CHECKS) {
   }
 }
 if (pathAdded.length) log(`Sign-off path rules added: ${pathAdded.join(', ')}`)
+// Class disagreements: a piece whose class the plan check disputes (agree false, or another
+// class). Returned for the seat; the given class stays.
+const classDisagreements = []
+const strayClasses = []
+for (const c of Array.isArray(planCheckRaw.classes) ? planCheckRaw.classes : []) {
+  const name = c && c.name
+  if (!NAMES.includes(name)) { strayClasses.push(String(name)); continue }
+  if (classDisagreements.some(d => d.name === name)) continue
+  const given = byName[name].cls
+  if (c.agree === false || c.class !== given) classDisagreements.push({ name, given, proposed: c.class, reason: typeof c.reason === 'string' ? c.reason : '' })
+}
+if (strayClasses.length) log(`Plan check named unknown pieces in classes (dropped): ${strayClasses.join(', ')}`)
+if (classDisagreements.length) log(`Plan check disputes piece classes (not applied): ${classDisagreements.map(d => `${d.name} ${d.given} → ${d.proposed}`).join(', ')}`)
 log(`Plan check ok: ${WAVES.length} wave(s) — ${WAVES.map(w => `[${w.join(', ')}]`).join(' → ')}${TRIGGERS.length ? `; sign-off triggers met: ${metText()}` : ''}`)
 
 // ---------------- Implement ----------------
@@ -509,20 +533,22 @@ const SHARED_EDIT = !SHARED_FILES.length ? ''
 const IMPLEMENTER_TEXT = SIGN_OFF.filter(c => c.implementer).map(c => `${c.implementer}\n`).join('')
 const TRIGGER_IMPL = TRIGGERS.length ? `Sign-off triggers: set triggered to the keys of those your change meets ([] when none):\n${TRIGGER_LIST}\n` : ''
 const implemented = []
+// Each piece's implementer route, by its class (the tier it ran on, for result.failed).
+const IMPL_ROUTE = Object.fromEntries(PIECES.map(p => [p.name, routeOf('gk-build.implement', { cls: p.cls })]))
 // Waves are sequential (later waves build on earlier ones); pieces inside a wave run concurrently.
 for (let w = 0; w < WAVES.length; w++) {
-  log(`Implement wave ${w + 1}/${WAVES.length}: ${WAVES[w].map(n => (byName[n].hard ? `${n} (hard: ${IMPL_TIER.hard.model} ${IMPL_TIER.hard.effort})` : n)).join(', ')}${PROFILE !== 'fable' || WAVES[w].some(n => byName[n].hard) ? ` — default ${IMPL_TIER.normal.model} ${IMPL_TIER.normal.effort}` : ''}`)
+  log(`Implement wave ${w + 1}/${WAVES.length}: ${WAVES[w].map(n => `${n} (${byName[n].cls}: ${IMPL_ROUTE[n].model} ${IMPL_ROUTE[n].effort})`).join(', ')}`)
   const res = await pipeline(WAVES[w], (n, _o, i) => {
     const p = byName[n]
-    const tier = p.hard ? IMPL_TIER.hard : IMPL_TIER.normal
-    return agent(
+    // onFail unfinished: an implementer that dies is never re-run on a half-edited tree.
+    return runStage('gk-build.implement', { cls: p.cls },
       `Implement piece "${p.name}" (wave ${w + 1}, slot ${i + 1}) of the plan at ${inRepo(PLAN)} — read the plan first for context, then implement ONLY this piece.
 Brief: ${p.brief}
 You may edit ONLY these files (create them if missing): ${JSON.stringify(p.owned)}${SHARED_EDIT}. Other pieces are editing other files concurrently; never touch them.
 Tests: ${p.tests ? `write/update and run ${p.tests}` : 'none named — run the existing tests nearest the touched files, if any'}. Run them in the FOREGROUND, ${TESTS_FROM}, ${p.tests ? 'with the test command the piece gives (for a test file, the project\'s own runner)' : 'with the project\'s own test runner'}.
 ${IMPLEMENTER_TEXT}Failures in files you do not own may come from a concurrent piece: report them in notes, do not fix them.
 ${TRIGGER_IMPL}Report anything you could not do in blockers.${RULES}${projectRules('Implement')}`,
-      { label: `impl:${p.name}`, phase: 'Implement', model: tier.model, effort: tier.effort, schema: IMPL_SCHEMA },
+      { label: `impl:${p.name}`, phase: 'Implement', schema: IMPL_SCHEMA },
     ).then(r => (r ? { ...r, name: p.name } : null))
   })
   const done = res.filter(Boolean)
@@ -533,6 +559,9 @@ ${TRIGGER_IMPL}Report anything you could not do in blockers.${RULES}${projectRul
   implemented.push(...done)
 }
 const MISSING_IMPL = PIECES.map(p => p.name).filter(n => !implemented.some(r => r.name === n))
+// A piece with no implementation result comes back unfinished, for the seat to re-run on the
+// next rung; the workflow never retries it.
+const FAILED = MISSING_IMPL.map(n => ({ name: n, class: byName[n].cls, stage: 'implement', tier: IMPL_ROUTE[n].tier, status: 'unfinished' }))
 // A shared file is every piece's to add its line to; any other file outside the piece is not.
 const OUT_OF_SCOPE = implemented.flatMap(r => r.filesTouched.map(normPathSafe).filter(f => f && !SHARED_FILES.includes(f) && !byName[r.name].owned.includes(f)).map(f => `${r.name}: ${f}`))
 if (TRIGGERS.length) {
@@ -557,29 +586,33 @@ phase('Review') // check and reviews run concurrently; each agent names its own 
 const fileOwners = f => PIECES.filter(p => p.owned.includes(f)).map(p => p.name)
 const SHARED_CONFIRM = SHARED_FILES.map(f => `; confirm the reported ${f} line is in \`git diff -- ${shq([f])}\``).join('')
 const REVIEW_ITEMS = SIGN_OFF.filter(c => c.reviewer).map(c => `, ${reviewerItem(c)}`).join('')
+// The check is decided by its exit code alone: passed is exitCode 0, whatever the agent says.
+// The seat re-runs the command itself before sign-off (seatMustRerun).
+const checkOf = r => (r ? { passed: r.exitCode === 0, ran: typeof r.ran === 'string' ? r.ran : '', exitCode: Number.isInteger(r.exitCode) ? r.exitCode : null, tail: typeof r.tail === 'string' ? r.tail : '' } : null)
 const [check, reviewsRaw] = await parallel([
   () => CHECK_SKIPPED
     ? Promise.resolve(CHECK_SKIPPED)
-    : agent(
+    : runStage('gk-build.check', {},
       `Run the project check and report. ${PACKAGES
-        ? `For each package in ${JSON.stringify(AFFECTED)}: cd ${inRepo('<package>')} and run \`set -o pipefail; ${CHECK} 2>&1 | tail -40; echo "EXIT=$?"\` in the FOREGROUND (without pipefail, tail hides the failure). Do not fix anything; edit nothing. passed = every package printed EXIT=0 and showed no errors. output = per package, the command run and its tailed output.`
-        : `From ${ROOT_DIR}, run \`set -o pipefail; ${CHECK} 2>&1 | tail -40; echo "EXIT=$?"\` in the FOREGROUND (without pipefail, tail hides the failure). Do not fix anything; edit nothing. passed = it printed EXIT=0 and showed no errors. output = the command run and its tailed output.`}${RULES}${projectRules('Check')}`,
+        ? `For each package in ${JSON.stringify(AFFECTED)}: cd ${inRepo('<package>')} and run \`set -o pipefail; ${CHECK} 2>&1 | tail -40; echo "EXIT=$?"\` in the FOREGROUND (without pipefail, tail hides the failure). Do not fix anything; edit nothing. ran = each exact command you ran, with its package, one per line. exitCode = the first non-zero number a package printed after EXIT=, else 0. tail = per package, the last 40 lines of its output, verbatim.`
+        : `From ${ROOT_DIR}, run \`set -o pipefail; ${CHECK} 2>&1 | tail -40; echo "EXIT=$?"\` in the FOREGROUND (without pipefail, tail hides the failure). Do not fix anything; edit nothing. ran = the exact command you ran. exitCode = the number it printed after EXIT=. tail = the last 40 lines of its output, verbatim.`} Copy them; do not summarise or judge the output: the exit code alone decides whether the check passed.${RULES}${projectRules('Check')}`,
       {
-        label: 'check', phase: 'Check', model: 'haiku', effort: 'low',
-        schema: { type: 'object', properties: { passed: { type: 'boolean' }, output: { type: 'string' } }, required: ['passed', 'output'] },
+        label: 'check', phase: 'Check',
+        schema: { type: 'object', properties: { ran: { type: 'string' }, exitCode: { type: 'integer' }, tail: { type: 'string' } }, required: ['ran', 'exitCode', 'tail'] },
       },
-    ),
+    ).then(checkOf),
   () => pipeline(implemented, (r, _o, i) => {
     const p = byName[r.name]
     const shared = p.owned.filter(f => fileOwners(f).length > 1)
-    return agent(
+    // The review is at least as capable as the piece's implementer: its class tier, before any dial.
+    return runStage('gk-build.review', { implementer: classTier(p.cls) },
       `Review piece "${p.name}" (reviewer ${i + 1}) of the plan at ${inRepo(PLAN)}. Read the plan, then the change: in ${ROOT_DIR} run \`git diff -- ${shq(p.owned)}\` and \`git status --porcelain -- ${shq(p.owned)}\` (keep the quotes); read any new untracked file in full (git diff omits them)${SHARED_CONFIRM}.
 Brief the implementer had: ${p.brief}
 Implementer's report: ${JSON.stringify({ testResult: r.testResult, notes: r.notes, blockers: r.blockers, ...(SHARED_FILES.length ? { sharedFileLines: r.sharedFileLines || [] } : {}) })}
 ${shared.length ? `Files shared with other pieces (their edits may also appear): ${shared.join(', ')}.` : ''}
 Judge the diff against the brief and the plan: correctness bugs, missed requirements, broken callers, missing/weak tests${REVIEW_ITEMS}. Only real defects; cite file and line. verdict = rework if any finding is high severity or the brief is not met, else accept. Read-only: edit nothing.${RULES}${projectRules('Review')}`,
       {
-        label: `review:${p.name}`, phase: 'Review', model: 'opus', effort: 'xhigh',
+        label: `review:${p.name}`, phase: 'Review',
         schema: {
           type: 'object',
           properties: {
@@ -600,6 +633,7 @@ Judge the diff against the brief and the plan: correctness bugs, missed requirem
     ).then(v => (v ? { ...v, name: p.name } : null))
   }),
 ])
+const SEAT_MUST_RERUN = CHECK && !CHECK_SKIPPED ? CHECK : null
 const reviews = (reviewsRaw || []).filter(Boolean)
 const unreviewed = implemented.map(r => r.name).filter(n => !reviews.some(v => v.name === n))
 if (unreviewed.length) log(`No review returned for: ${unreviewed.join(', ')} — passed to the judge as unreviewed`)
@@ -612,7 +646,10 @@ phase('Judge')
 const UI_CHECKS = SIGN_OFF.filter(c => c.uiJudge && (!c.trigger || MET.some(t => t.key === c.key))).map(c => c.key)
 const FABLE_JUDGE = ARGS.ui === true || UI_CHECKS.length > 0
 const fableWhy = [ARGS.ui === true ? 'ui work' : '', UI_CHECKS.length ? `sign-off ${UI_CHECKS.join(', ')} sets uiJudge` : ''].filter(Boolean).join('; ')
-log(`Judge on ${FABLE_JUDGE ? `fable (${fableWhy})` : ESCALATE ? 'fable (escalated on Carl\'s word)' : 'opus'}`)
+// routes.json puts a ui judge on its `when` tier; the flag must be boolean true.
+const JUDGE_CTX = { ui: FABLE_JUDGE === true }
+const judgeRoute = routeOf('gk-build.judge', JUDGE_CTX)
+log(`Judge on ${judgeRoute.model} ${judgeRoute.effort}${FABLE_JUDGE ? ` (${fableWhy})` : ''}`)
 const SHIP_SHARED = !SHARED_FILES.length ? ', or any confirmed high-severity finding stands'
   : `, any confirmed high-severity finding stands, or a shared-file line a sign-off check needs is missing or wrong (${SIGN_OFF.filter(c => c.sharedFile).map(c => (c.reviewer ? `${c.sharedFile}: ${reviewerItem(c)}` : c.sharedFile)).join('; ')})`
 const TRIGGERS_JUDGE = TRIGGERS.length
@@ -623,7 +660,7 @@ const TRIGGERS_JUDGE = TRIGGERS.length
 const CHECK_JUDGE = NO_COMMAND
   ? `the project-wide check was skipped: ${NO_COMMAND}; judge on the diff and the per-piece tests.`
   : JSON.stringify(check || { passed: false, output: 'check agent returned nothing' })
-const judge = await agent(
+const judge = await runStage('gk-build.judge', JUDGE_CTX,
   `Decide whether this build ships. Plan: ${inRepo(PLAN)} (read it). Pieces:
 ${PIECES.map(describe).join('\n')}
 Implementation reports: ${JSON.stringify(implemented)}
@@ -633,7 +670,7 @@ Project check: ${CHECK_JUDGE}
 Reviews: ${JSON.stringify(reviews)}${TRIGGERS_JUDGE}
 Weigh each review finding yourself — spot-check the diff (\`git diff -- <file>\` in ${ROOT_DIR}) where a finding is disputed or severity is unclear; reviewers can be wrong both ways. ship = false if the check failed, any piece is missing/unreviewed${SHIP_SHARED}. blockers = concrete reasons not to ship. reworkPieces = piece names needing another pass.${TRIGGERS.length ? ' signOffRequired = for each sign-off trigger, the pieces whose work meets it, as {key, pieces} — every piece under "Sign-off triggers met" at minimum.' : ''} Read-only: edit nothing.${RULES}${projectRules('Judge')}`,
   {
-    label: 'judge', phase: 'Judge', model: FABLE_JUDGE || ESCALATE ? 'fable' : 'opus', effort: 'xhigh',
+    label: 'judge', phase: 'Judge',
     schema: {
       type: 'object',
       properties: {
@@ -661,8 +698,12 @@ if (SIGN_OFF.length) log(`Sign-off for the seat: ${SIGN_OFF_RESULT.map(e => `${e
 return {
   planCheck: { ...planCheck, ...(TRIGGERS.length ? { triggered: MET } : {}) },
   pieces: implemented,
+  failed: FAILED,
   check: check || { passed: false, output: 'check agent returned nothing' },
+  seatMustRerun: SEAT_MUST_RERUN,
   reviews,
   judge: judge || { ship: false, blockers: ['judge agent returned nothing'], reworkPieces: [], ...(TRIGGERS.length ? { signOffRequired: MET } : {}) },
+  classDisagreements,
   signOff: SIGN_OFF_RESULT,
+  routing: routingResult(),
 }

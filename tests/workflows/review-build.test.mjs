@@ -17,7 +17,6 @@ const GOODRICKE_ROOT = '/home/carls/apps/mike-dev'
 const goodricke = () => ({ ...structuredClone(fixture), root: GOODRICKE_ROOT })
 
 const PROFILES = ['fable', 'opus', 'sonnet']
-const route = (calls) => calls.map((c) => [c.label, c.phase, c.model, c.effort])
 const ws = (s) => String(s).replace(/\s+/g, ' ').trim()
 
 // ---------------- gk-review ----------------
@@ -683,9 +682,9 @@ function buildResponders(kind, { implTrig = [], planTrig = [], dead = null, orde
   ]
 }
 const buildArgs = (extra = {}) => ({ plan: PLAN, pieces: structuredClone(BUILD_PIECES), ...structuredClone(extra) })
-// The judge's model as its route log states it ("Judge on fable (...)" / "Judge on opus").
-const judgeOnLog = (logs) => logs.filter((l) => l.startsWith('Judge on ')).map((l) => l.split(' ')[2])
-const judgeModel = (calls) => calls.find((c) => c.label === 'judge').model
+// The tier the judge first ran on: fable-medium, or fable-high for ui work or an applying
+// uiJudge sign-off check (routes.json gk-build.judge; routes.test.mjs checks the dials).
+const judgeTier = (calls) => { const c = calls.find((x) => x.label === 'judge'); return `${c.model}-${c.effort}` }
 
 // gk-build has no security or clientFacing argument: the grid passes them to show they change
 // nothing, and adds ui (a gk-build argument) and a project check command.
@@ -710,42 +709,137 @@ const BUILD_REPORTED = [
 // The scroll-audit pieces of a neutral [{key, pieces}] list, in its order.
 const scrollOf = (list) => { const t = (list || []).find((x) => x.key === 'scroll-audit'); return t ? t.pieces : [] }
 
-test('routing equivalence, gk-build: golden and neutral+Goodricke make the same calls on the same (model, effort)', async () => {
+// ---------------- behaviour parity (gk-build) ----------------
+
+// Every stage's model and effort come from routes.json (routes.test.mjs checks them, with the
+// piece classes, the review floor and the exit-code check); everything else is the golden's.
+// Runs the golden and the neutral script with the Goodricke project on the same args and
+// replies, and checks they make the same calls by [label, phase], log the same lines and return
+// the same result. The neutral script renames what the brief renamed (pageRootPieces →
+// triggered, changelogLine → sharedFileLines, pageRootChanged → triggered, scrollAuditRequired →
+// signOffRequired), so the golden's result and log are read in the neutral's words first. Left
+// out: the neutral's additions (result.routing, seatMustRerun, classDisagreements and failed,
+// each checked here against the golden's own facts, and signOff, checked against the golden's
+// page roots), the log lines about the project, the profile, the retired args and the routes
+// (the judge's "Judge on" line, and the tiers on the Implement wave line; its pieces are kept),
+// and the check's reply, whose shape changed: a check that ran is compared by passed alone.
+// `expect(oldCalls)` gives the neutral calls a case expects when they legitimately differ.
+const BUILD_RETIRED = /^(profile is retired; routes come from routes\.json v\d+|pieces\[\d+\]\.hard is retired; use class)$/
+const waveLine = (l) => l.replace(/^(Implement wave \d+\/\d+: )(.*)$/, (m, head, rest) => head + rest.replace(/ — .*$/, '').replace(/ \([^)]*\)/g, ''))
+const asScroll = (names) => names.split(', ').map((n) => `scroll-audit: ${n}`).join(', ')
+const goldenLogInNeutralWords = (l) => l
+  .replace(/^Page-root heuristic added: (.*)$/, (m, xs) => `Sign-off path rules added: ${asScroll(xs)}`)
+  .replace(/; page roots: (.*)$/, (m, xs) => `; sign-off triggers met: ${xs === 'none' ? 'none' : `scroll-audit: ${xs}`}`)
+  .replace(/^Implementers reported page-root changes: (.*) — added to page roots$/, (m, xs) => `Implementers reported sign-off triggers: ${asScroll(xs)} — added`)
+const buildBehaviourLog = (logs) => logs
+  .filter((l) => !l.startsWith('Profile:') && !l.startsWith('Project:') && !BUILD_RETIRED.test(l) && !l.startsWith('Judge on ') && !l.startsWith('Sign-off for the seat: '))
+  .map(waveLine)
+const scrollList = (pieces) => (pieces.length ? [{ key: 'scroll-audit', pieces }] : [])
+const goldenResultInNeutralWords = (r) => {
+  const { pageRootPieces, ...plan } = r.planCheck
+  const { scrollAuditRequired, ...judge } = r.judge
+  return { planCheck: { ...plan, triggered: scrollList(pageRootPieces) }, pieces: r.pieces.map(neutralReport), check: r.check, reviews: r.reviews, judge: { ...judge, signOffRequired: scrollList(scrollAuditRequired) } }
+}
+const buildBehaviour = (r) => {
+  const { routing, seatMustRerun, classDisagreements, failed, signOff, ...rest } = r
+  return { ...rest, check: 'exitCode' in rest.check ? { passed: rest.check.passed } : rest.check }
+}
+const afterLast = (calls, phase, extra) => {
+  const at = calls.map((c) => c[1]).lastIndexOf(phase)
+  return [...calls.slice(0, at + 1), extra, ...calls.slice(at + 1)]
+}
+async function assertSameBuild(name, args, opts, expect = (calls) => step(calls)) {
+  const old = await runWorkflow(golden('gk-build.js'), buildArgs(args), buildResponders('golden', opts))
+  const now = await runWorkflow(neutral('gk-build.js'), { ...buildArgs(args), project: goodricke() }, buildResponders('neutral', opts))
+  assert.deepEqual(step(now.calls), expect(old.calls), `${name}: the calls`)
+  assert.deepEqual(buildBehaviourLog(now.logs), buildBehaviourLog(old.logs.map(goldenLogInNeutralWords)), `${name}: the log`)
+  assert.equal(now.logs.filter((l) => l.startsWith('Judge on ')).length, 1, `${name}: one judge route line`)
+  assert.ok(now.result && now.result.routing, `${name}: the result carries routing`)
+  const want = goldenResultInNeutralWords(old.result)
+  if ('exitCode' in now.result.check) {
+    assert.ok(old.calls.some((c) => c.label === 'check'), `${name}: the golden ran the check too`)
+    want.check = { passed: old.result.check.passed }
+  }
+  assert.deepEqual(buildBehaviour(now.result), want, `${name}: the result`)
+  // The neutral's additions, from the golden's own facts: the seat re-runs the check command
+  // whenever the check ran; failed lists the pieces with no implementation result; signOff is
+  // the changelog check for every piece and the scroll audit for the golden's page roots.
+  const pieces = args.pieces || BUILD_PIECES
+  const names = pieces.map((p) => p.name)
+  assert.equal(now.result.seatMustRerun, old.calls.some((c) => c.label === 'check') ? (args.check || 'npm run typecheck') : null, `${name}: seatMustRerun`)
+  assert.deepEqual(now.result.failed.map((f) => f.name), names.filter((n) => !old.result.pieces.some((p) => p.name === n)), `${name}: failed`)
+  assert.deepEqual(now.result.classDisagreements, [], `${name}: classDisagreements`)
+  const roots = old.result.planCheck.pageRootPieces
+  const signOff = [{ key: 'changelog', seat: CHANGELOG_CHECK.seat, pieces: names }, ...(roots.length ? [{ key: 'scroll-audit', seat: SCROLL_CHECK.seat, pieces: roots }] : [])]
+  assert.deepEqual(now.result.signOff, signOff, `${name}: signOff`)
+  assert.ok(now.logs.includes(`Sign-off for the seat: ${signOff.map((e) => `${e.key} (${e.pieces.join(', ')})`).join('; ')}`), `${name}: the sign-off line`)
+  // Without Goodricke's sign-off trigger and package layout, the generic run runs the same
+  // stages, except that its check runs (once, from the top level) only when args.check gives it
+  // a command: the generic project names no check and no packages.
+  if (!opts.implTrig && !opts.planTrig && !opts.pathTrig) {
+    const generic = await runWorkflow(neutral('gk-build.js'), { ...buildArgs(args), project: { root: '/tmp/repo' } }, buildResponders('neutral', opts))
+    assert.deepEqual(step(generic.calls), expect(old.calls).filter((c) => c[0] !== 'check' || args.check), `${name} (generic): the calls`)
+    assert.ok(generic.result.routing, `${name} (generic): the result carries routing`)
+  }
+  return { old, now }
+}
+
+test('behaviour parity, gk-build: golden and neutral make the same calls, log the same lines and return the same result on every path', async () => {
+  // The old routing-equivalence grid, every profile x every flag and reported trigger, with its
+  // degraded paths (a dead implementer, reviewer, check or judge; waves; signOff), plus more.
   const cases = []
-  for (const profile of PROFILES) {
-    for (const flags of BUILD_FLAGS) cases.push([`${profile} ${JSON.stringify(flags)}`, { ...flags, profile }, {}])
-    for (const [name, extra, opts] of BUILD_REPORTED) cases.push([`${profile} ${name}`, { ...extra, profile }, opts])
+  for (const profile of [...PROFILES, undefined]) {
+    const p = profile ? { profile } : {}
+    for (const flags of BUILD_FLAGS) cases.push([`${profile} ${JSON.stringify(flags)}`, { ...flags, ...p }, {}])
+    for (const [name, extra, opts] of BUILD_REPORTED) cases.push([`${profile} ${name}`, { ...extra, ...p }, opts])
+    cases.push(
+      [`${profile} every implementer dies`, p, { dead: /^impl:/ }],
+      [`${profile} every reviewer of a judgement piece dies`, p, { dead: /^review:(a|c)$/ }],
+      [`${profile} the check dies, with args.check`, { ...p, check: 'npm test' }, { dead: /^check$/ }],
+    )
   }
-  const judges = new Set()
-  const implTiers = new Set()
+  const seen = new Set()
+  let deadJudges = 0
+  let skipped = 0
   for (const [name, flags, opts] of cases) {
-    const old = await runWorkflow(golden('gk-build.js'), buildArgs(flags), buildResponders('golden', opts))
-    const now = await runWorkflow(neutral('gk-build.js'), { ...buildArgs(flags), project: goodricke() }, buildResponders('neutral', opts))
-    assert.ok(old.calls.some((c) => c.label === 'judge'), `${name}: the golden run reaches the judge`)
-    assert.deepEqual(route(now.calls), route(old.calls), name)
-    assert.deepEqual(judgeOnLog(now.logs), judgeOnLog(old.logs), `${name}: the judge route log`)
-    // The same page-root pieces in the same order: the golden's pageRootPieces (the plan
-    // check's first, then the path heuristic's and the implementers') are the scroll-audit
-    // trigger's pieces, in the plan check's result and in what the seat gets back; a dead
-    // judge's stand-in lists them in both.
-    const roots = old.result.planCheck.pageRootPieces
-    assert.deepEqual(scrollOf(now.result.planCheck.triggered), roots, `${name}: the page-root pieces`)
-    assert.deepEqual(scrollOf(now.result.signOff), roots, `${name}: the scroll-audit sign-off`)
-    assert.deepEqual(scrollOf(now.result.judge.signOffRequired), old.result.judge.scrollAuditRequired, `${name}: the judge's list`)
-    // Without Goodricke's sign-off trigger and package layout, the generic run makes the same
-    // calls, except that its check runs (once, from the top level) only when args.check gives it
-    // a command: the generic project names no check and no packages.
-    if (!opts.implTrig && !opts.planTrig && !opts.pathTrig) {
-      const generic = await runWorkflow(neutral('gk-build.js'), { ...buildArgs(flags), project: { root: '/tmp/repo' } }, buildResponders('neutral', opts))
-      assert.deepEqual(route(generic.calls), route(old.calls).filter((c) => c[0] !== 'check' || flags.check), `${name} (generic)`)
-      assert.deepEqual(judgeOnLog(generic.logs), judgeOnLog(old.logs), `${name} (generic): the judge route log`)
+    // The judge dies: the one legitimate difference in the calls. The golden ran it once (opus
+    // or fable by profile and flags); the neutral judge is always on Fable (fable medium, fable
+    // high for ui work) and, when that dies, runs once more on its noFable tier, opus xhigh
+    // (onFail rerun). Both die here, so the results (less routing) and the logs still match.
+    const judgeDies = opts.dead && opts.dead.test('judge')
+    const expect = judgeDies ? (calls) => step(calls).flatMap((c) => (c[0] === 'judge' ? [c, c] : [c])) : undefined
+    const { old, now } = await assertSameBuild(name, flags, opts, expect)
+    for (const c of old.calls) seen.add(c.phase)
+    if (judgeDies) {
+      deadJudges++
+      assert.deepEqual(now.calls.filter((c) => c.label === 'judge').map((c) => c.model), ['fable', 'opus'], name)
+      assert.deepEqual(now.result.routing.offTier, [{ stage: 'gk-build.judge', label: 'judge', tier: 'opus-xhigh', reason: 'onFail' }], name)
     }
-    judges.add(`${judgeModel(old.calls)} ${opts.implTrig || opts.planTrig || opts.pathTrig ? 'triggered' : 'plain'}`)
-    for (const c of old.calls.filter((x) => x.label.startsWith('impl:'))) implTiers.add(`${c.model} ${c.effort}`)
+    if (!old.calls.some((c) => c.label === 'check')) skipped++
   }
-  // The grid reaches the judge on both models, fable through the trigger as well as through ui.
-  assert.deepEqual([...judges].sort(), ['fable plain', 'fable triggered', 'opus plain'])
-  assert.deepEqual([...implTiers].sort(), ['opus high', 'opus xhigh', 'sonnet high', 'sonnet medium'])
+  assert.deepEqual([...seen].sort(), ['Check', 'Implement', 'Judge', 'Plan check', 'Review'])
+  assert.equal(deadJudges, 8, 'the judge re-run is exercised under every profile')
+  assert.ok(skipped > 0 && skipped < cases.length, 'the grid runs the check and skips it')
+  // A reviewer of the hard piece dies: b is class hard, so its review runs on fable medium and,
+  // when that dies, once more on opus xhigh. Both die, so only the calls differ.
+  for (const profile of [...PROFILES, undefined]) {
+    const p = profile ? { profile } : {}
+    const { now } = await assertSameBuild(`${profile} the hard piece's reviewer dies`, p, { dead: /^review:b$/ },
+      (calls) => afterLast(step(calls), 'Review', ['review:b', 'Review']))
+    assert.deepEqual(now.calls.filter((c) => c.label === 'review:b').map((c) => [c.model, c.effort]), [['fable', 'medium'], ['opus', 'xhigh']])
+    assert.deepEqual(now.result.routing.offTier, [{ stage: 'gk-build.review', label: 'review:b', tier: 'opus-xhigh', reason: 'onFail' }])
+  }
+  // The plan check dies: both stop the run with the same error; the neutral one ran it once more
+  // on its noFable tier first.
+  for (const profile of [...PROFILES, undefined]) {
+    const p = profile ? { profile } : {}
+    const calls = []
+    const spy = (kind) => [{ match: /^plan-check$/, reply: (prompt, opts) => { calls.push([kind, opts.model, opts.effort]); return null } }]
+    await assert.rejects(runWorkflow(golden('gk-build.js'), buildArgs(p), spy('golden')), (e) => e.message === 'gk-build: plan check agent returned nothing')
+    await assert.rejects(runWorkflow(neutral('gk-build.js'), { ...buildArgs(p), project: goodricke() }, spy('neutral')), (e) => e.message === 'gk-build: plan check agent returned nothing')
+    assert.deepEqual(calls.filter((c) => c[0] === 'neutral').map((c) => c.slice(1)), [['fable', 'medium'], ['opus', 'xhigh']], String(profile))
+    assert.equal(calls.filter((c) => c[0] === 'golden').length, 1)
+  }
 })
 
 test('page-root paths, gk-build: a piece owning a page or layout meets the scroll-audit trigger by its path alone, as the golden\'s heuristic did', async () => {
@@ -754,16 +848,18 @@ test('page-root paths, gk-build: a piece owning a page or layout meets the scrol
   assert.deepEqual(SCROLL_CHECK.paths.map((s) => new RegExp(s).source), [goldenRe])
   const args = () => ({ plan: PLAN, pieces: structuredClone(PAGE_PIECES) })
   const base = { pieces: PAGE_PIECES, order: PAGE_ORDER }
-  // No agent reports a page root: the paths alone route the judge to fable, under every profile.
+  // No agent reports a page root: the paths alone put the judge on fable high, under every
+  // (retired) profile.
   for (const profile of PROFILES) {
     const old = await runWorkflow(golden('gk-build.js'), { ...args(), profile }, buildResponders('golden', base))
     const now = await runWorkflow(neutral('gk-build.js'), { ...args(), profile, project: goodricke() }, buildResponders('neutral', base))
-    assert.deepEqual(route(now.calls), route(old.calls), profile)
-    assert.equal(judgeModel(now.calls), 'fable', profile)
+    assert.deepEqual(step(now.calls), step(old.calls), profile)
+    assert.equal(old.calls.find((c) => c.label === 'judge').model, 'fable', profile)
+    assert.equal(judgeTier(now.calls), 'fable-high', profile)
     assert.deepEqual(old.result.planCheck.pageRootPieces, ['p', 'r'])
     assert.ok(old.logs.includes('Page-root heuristic added: p, r'), old.logs.join('\n'))
     assert.ok(now.logs.includes('Sign-off path rules added: scroll-audit: p, scroll-audit: r'), now.logs.join('\n'))
-    assert.ok(now.logs.includes('Judge on fable (sign-off scroll-audit sets uiJudge)'), now.logs.join('\n'))
+    assert.ok(now.logs.includes('Judge on fable high (sign-off scroll-audit sets uiJudge)'), now.logs.join('\n'))
     assert.deepEqual(now.result.planCheck.triggered, [{ key: 'scroll-audit', pieces: ['p', 'r'] }])
     assert.deepEqual(now.result.signOff.map((e) => [e.key, e.pieces]), [['changelog', ['p', 'q', 'r']], ['scroll-audit', ['p', 'r']]])
     // The judge sees them as met, from the path rules among the rest.
@@ -785,9 +881,9 @@ test('page-root paths, gk-build: a piece owning a page or layout meets the scrol
   const deadNow = await runWorkflow(neutral('gk-build.js'), { ...args(), project: goodricke() }, buildResponders('neutral', { ...base, dead: /^judge$/ }))
   assert.deepEqual(deadOld.result.judge.scrollAuditRequired, ['p', 'r'])
   assert.deepEqual(deadNow.result.judge.signOffRequired, [{ key: 'scroll-audit', pieces: ['p', 'r'] }])
-  // A project without path rules has no heuristic: the same pieces get an opus judge.
+  // A project without path rules has no heuristic: the same pieces get the judge's base tier.
   const generic = await runWorkflow(neutral('gk-build.js'), { ...args(), project: { root: '/tmp/repo' } }, buildResponders('neutral', base))
-  assert.equal(judgeModel(generic.calls), 'opus')
+  assert.equal(judgeTier(generic.calls), 'fable-medium')
   assert.deepEqual(generic.result.signOff, [])
   // Any project's paths: each is a regular expression over the top-level-relative path, with
   // forward slashes, so a piece given under the root or with backslashes is matched too. The
@@ -803,7 +899,7 @@ test('page-root paths, gk-build: a piece owning a page or layout meets the scrol
     { match: /^plan-check$/, reply: () => ({ ok: true, problems: [], order: [['a', 'b', 'c', 'd']], triggered: [] }) },
   ])
   assert.deepEqual(any.result.signOff, [{ key: 'visual', seat: 'Look at each screen.', pieces: ['a', 'b', 'd'] }])
-  assert.equal(judgeModel(any.calls), 'fable')
+  assert.equal(judgeTier(any.calls), 'fable-high')
 })
 
 // Goodricke sentences of the golden that the marker misses, one reason each; checked verbatim.
@@ -954,17 +1050,24 @@ test('goodricke sentences preserved, gk-build: every marked or listed golden sen
   for (const u of BUILD_UNMARKED) assert.ok(seenUnmarked.has(u.sentence), `stale listed sentence (no golden prompt has it): ${u.sentence}`)
 })
 
-test('stage schemas, gk-build: the check and review schemas are the golden\'s; the others change only the renamed fields', async () => {
+test('stage schemas, gk-build: the review schemas are the golden\'s; the check reports its exit code; the others change only the renamed fields and the plan check\'s classes', async () => {
   const old = await schemasOf(golden('gk-build.js'), buildArgs(), buildResponders('golden'))
   const now = await schemasOf(neutral('gk-build.js'), { ...buildArgs(), project: goodricke() }, buildResponders('neutral'))
   assert.deepEqual([...now.keys()].sort(), [...old.keys()].sort(), 'the same stages run')
-  for (const label of ['check', 'review:a', 'review:b', 'review:c']) assert.equal(now.get(label), old.get(label), label)
+  for (const label of ['review:a', 'review:b', 'review:c']) assert.equal(now.get(label), old.get(label), label)
   const shape = (json) => { const s = JSON.parse(json); return [Object.keys(s.properties), s.required] }
+  // The check reports the command run, its exit code and the tail of its output (passed is the
+  // workflow's: exitCode 0), in place of the golden's passed and output.
+  assert.deepEqual(shape(old.get('check')), [['passed', 'output'], ['passed', 'output']])
+  assert.deepEqual(JSON.parse(now.get('check')), { type: 'object', properties: { ran: { type: 'string' }, exitCode: { type: 'integer' }, tail: { type: 'string' } }, required: ['ran', 'exitCode', 'tail'] })
   // pageRootPieces → triggered (plan check); changelogLine → sharedFileLines and pageRootChanged
   // → triggered (implementers); scrollAuditRequired → signOffRequired (judge). Same order, same
-  // required-ness as the field each replaces.
+  // required-ness as the field each replaces. The plan check also confirms each piece's class
+  // (classes, required, before triggered).
   assert.deepEqual(shape(old.get('plan-check')), [['ok', 'problems', 'order', 'pageRootPieces'], ['ok', 'problems', 'order', 'pageRootPieces']])
-  assert.deepEqual(shape(now.get('plan-check')), [['ok', 'problems', 'order', 'triggered'], ['ok', 'problems', 'order', 'triggered']])
+  assert.deepEqual(shape(now.get('plan-check')), [['ok', 'problems', 'order', 'classes', 'triggered'], ['ok', 'problems', 'order', 'classes', 'triggered']])
+  const classes = JSON.parse(now.get('plan-check')).properties.classes.items
+  assert.deepEqual([Object.keys(classes.properties), classes.required, classes.properties.class.enum], [['name', 'class', 'agree', 'reason'], ['name', 'class', 'agree', 'reason'], ['spec', 'judgement', 'hard', 'security']])
   assert.deepEqual(shape(old.get('impl:a')), [['name', 'filesTouched', 'changelogLine', 'testResult', 'notes', 'blockers', 'pageRootChanged'], ['name', 'filesTouched', 'changelogLine', 'testResult', 'notes', 'blockers']])
   assert.deepEqual(shape(now.get('impl:a')), [['name', 'filesTouched', 'sharedFileLines', 'testResult', 'notes', 'blockers', 'triggered'], ['name', 'filesTouched', 'sharedFileLines', 'testResult', 'notes', 'blockers']])
   assert.deepEqual(shape(old.get('judge')), [['ship', 'blockers', 'reworkPieces', 'scrollAuditRequired'], ['ship', 'blockers', 'reworkPieces', 'scrollAuditRequired']])
@@ -1133,7 +1236,7 @@ test('generic run is clean, gk-build: no prompt names Goodricke, its stack or a 
     if (extra.check && fields.packages) {
       assert.ok(check.prompt.startsWith(`Run the project check and report. For each package in ["src"]: cd /tmp/repo/<package> and run \`set -o pipefail; ${extra.check} 2>&1 | tail -40; echo "EXIT=$?"\``), check.prompt)
     } else if (extra.check) {
-      assert.ok(check.prompt.startsWith(`Run the project check and report. From /tmp/repo, run \`set -o pipefail; ${extra.check} 2>&1 | tail -40; echo "EXIT=$?"\` in the FOREGROUND (without pipefail, tail hides the failure). Do not fix anything; edit nothing. passed = it printed EXIT=0 and showed no errors. output = the command run and its tailed output.\nRules:`), check.prompt)
+      assert.ok(check.prompt.startsWith(`Run the project check and report. From /tmp/repo, run \`set -o pipefail; ${extra.check} 2>&1 | tail -40; echo "EXIT=$?"\` in the FOREGROUND (without pipefail, tail hides the failure). Do not fix anything; edit nothing. ran = the exact command you ran. exitCode = the number it printed after EXIT=. tail = the last 40 lines of its output, verbatim. Copy them; do not summarise or judge the output: the exit code alone decides whether the check passed.\nRules:`), check.prompt)
     } else {
       assert.equal(check, undefined)
       assert.deepEqual(result.check, SKIPPED_CHECK)
@@ -1178,24 +1281,38 @@ test('check stage, gk-build: the check runs from each affected project package, 
   const logOf = (r, prefix) => r.logs.filter((l) => l.startsWith(prefix))
   const head = (p) => p.slice(0, p.indexOf('\nRules:'))
   // Goodricke (check "npm run typecheck", packages backend and frontend): the golden's check
-  // stage, its prompt word for word but for the TypeScript fallback, which is a Check-stage guard.
+  // stage, its prompt word for word but for the TypeScript fallback, which is a Check-stage guard,
+  // and for what it reports: the commands run, the exit code and the tail verbatim, in place of
+  // the golden's passed and output (passed is now the workflow's own: exitCode 0).
   const fallback = ' If the command is "npm run typecheck" and that package has no typecheck script, run `set -o pipefail; npx tsc --noEmit 2>&1 | tail -40; echo "EXIT=$?"` instead and say so.'
+  const goldenReport = ' passed = every package printed EXIT=0 and showed no errors. output = per package, the command run and its tailed output.'
+  const exitReport = ' ran = each exact command you ran, with its package, one per line. exitCode = the first non-zero number a package printed after EXIT=, else 0. tail = per package, the last 40 lines of its output, verbatim. Copy them; do not summarise or judge the output: the exit code alone decides whether the check passed.'
   for (const [pieces, order, extra] of [[BUILD_PIECES, BUILD_ORDER, {}], [BUILD_PIECES, BUILD_ORDER, { check: 'npm test' }], [PAGE_PIECES, PAGE_ORDER, {}], [DOCS_PIECES, [['a', 'b']], { check: 'npm test' }]]) {
     const name = `${pieces.map((p) => p.name).join('')} ${JSON.stringify(extra)}`
     const old = await runWorkflow(golden('gk-build.js'), { plan: PLAN, pieces: structuredClone(pieces), ...extra }, buildResponders('golden', { pieces, order }))
     const now = await runWorkflow(neutral('gk-build.js'), { plan: PLAN, pieces: structuredClone(pieces), ...extra, project: goodricke() }, buildResponders('neutral', { pieces, order }))
-    assert.deepEqual(now.result.check, old.result.check, name)
+    // A check that ran: the harness's minimal reply (exitCode 1) fails it, as the golden's
+    // minimal reply (passed false) did. One that did not run is the golden's result.
+    if (checkOf(old)) {
+      assert.equal(old.result.check.passed, false, name)
+      assert.deepEqual(now.result.check, { passed: false, ran: 'x', exitCode: 1, tail: 'x' }, name)
+      assert.equal(now.result.seatMustRerun, extra.check || 'npm run typecheck', name)
+    } else {
+      assert.deepEqual(now.result.check, old.result.check, name)
+      assert.equal(now.result.seatMustRerun, null, name)
+    }
     assert.deepEqual(logOf(now, 'Check: '), logOf(old, 'Check: '), name)
     assert.deepEqual(logOf(now, 'Check '), logOf(old, 'Check '), name)
     assert.deepEqual(logOf(now, 'Plan check over '), logOf(old, 'Plan check over '), name)
-    // The judge reads the check exactly as the golden's did (Goodricke's check always has a
-    // command, so it is never reported as skipped).
+    // The judge reads the check result as the golden's did, in its new shape when it ran
+    // (Goodricke's check always has a command, so it is never reported as skipped).
     const checkLine = (r) => r.calls.find((c) => c.label === 'judge').prompt.split('\n').find((l) => l.startsWith('Project check: '))
-    assert.equal(checkLine(now), checkLine(old), name)
+    assert.equal(checkLine(now), checkOf(old) ? `Project check: ${JSON.stringify(now.result.check)}` : checkLine(old), name)
     assert.equal(Boolean(checkOf(now)), Boolean(checkOf(old)), name)
     if (checkOf(old)) {
       assert.ok(head(checkOf(old).prompt).includes(fallback), name)
-      assert.equal(head(checkOf(now).prompt), head(checkOf(old).prompt).replace(fallback, ''), name)
+      assert.ok(head(checkOf(old).prompt).includes(goldenReport), name)
+      assert.equal(head(checkOf(now).prompt), head(checkOf(old).prompt).replace(fallback, '').replace(goldenReport, exitReport), name)
     }
   }
   // Any project's check and packages: three pieces, one in each package folder and one in docs.
@@ -1274,7 +1391,7 @@ test('build returns signOff: an untriggered check lists every piece, a triggered
   // No trigger met: the triggered check is not listed; the changelog check always is.
   const none = await run({})
   assert.deepEqual(none.result.signOff, [changelog(['a', 'b'])])
-  assert.equal(judgeModel(none.calls), 'opus')
+  assert.equal(judgeTier(none.calls), 'fable-medium')
   // The plan check and the implementers both count; the judge may add a piece, and what names
   // no trigger or no piece is dropped and logged.
   const judgeAdds = () => ({ ship: true, blockers: [], reworkPieces: [], signOffRequired: [{ key: 'scroll-audit', pieces: ['b', 'zz'] }, { key: 'changelog', pieces: ['a'] }] })
@@ -1332,24 +1449,24 @@ test('sign-off checks, gk-build: shared files, implementer and reviewer texts, t
   assert.ok(judgePrompt.includes('or a shared-file line a sign-off check needs is missing or wrong (NOTICE: a new dependency missing from NOTICE; docs/CHANGES.md).'), judgePrompt)
   // Shared files are not out of scope; any other file outside the piece is.
   assert.ok(logs.includes('Out-of-scope edits reported: a: CHANGELOG.md; b: CHANGELOG.md'), logs.join('\n'))
-  // perf (no uiJudge) is met: the judge stays on opus; visual (uiJudge) is not met.
-  assert.equal(judgeModel(calls), 'opus')
+  // perf (no uiJudge) is met: the judge stays on its base tier; visual (uiJudge) is not met.
+  assert.equal(judgeTier(calls), 'fable-medium')
   assert.deepEqual(result.signOff, [
     { key: 'notice', seat: 'Check NOTICE.', pieces: ['a', 'b'] },
     { key: 'docs', seat: 'Check docs/CHANGES.md.', pieces: ['a', 'b'] },
     { key: 'perf', seat: 'Run the benchmarks.', pieces: ['a'] },
   ])
-  // A met trigger whose check sets uiJudge routes the judge to fable, under every profile.
+  // A met trigger whose check sets uiJudge puts the judge on fable high, under every (retired) profile.
   for (const profile of PROFILES) {
     const viaTrigger = await runWorkflow(neutral('gk-build.js'), { plan: PLAN, pieces: structuredClone(pieces), profile, project: { root: '/tmp/repo', signOff } }, [
       { match: /^plan-check$/, reply: () => ({ ok: true, problems: [], order: [['a', 'b']], triggered: [{ key: 'visual', pieces: ['b'] }] }) },
     ])
-    assert.equal(judgeModel(viaTrigger.calls), 'fable', profile)
-    assert.ok(viaTrigger.logs.includes('Judge on fable (sign-off visual sets uiJudge)'), viaTrigger.logs.join('\n'))
+    assert.equal(judgeTier(viaTrigger.calls), 'fable-high', profile)
+    assert.ok(viaTrigger.logs.includes('Judge on fable high (sign-off visual sets uiJudge)'), viaTrigger.logs.join('\n'))
   }
-  // A check with no trigger applies to every piece, so its uiJudge always routes to fable.
+  // A check with no trigger applies to every piece, so its uiJudge always puts the judge on fable high.
   const always = await run({}, { root: '/tmp/repo', signOff: [{ key: 'design', uiJudge: true, seat: 'Review the design.' }] })
-  assert.equal(judgeModel(always.calls), 'fable')
+  assert.equal(judgeTier(always.calls), 'fable-high')
   assert.deepEqual(always.result.signOff, [{ key: 'design', seat: 'Review the design.', pieces: ['a', 'b'] }])
 })
 
@@ -1378,7 +1495,8 @@ test('dead judge, gk-build: with two triggered checks met, the stand-in lists ev
     },
   ])
   const met = [{ key: 'perf', pieces: ['c', 'a'] }, { key: 'visual', pieces: ['c', 'b', 'a'] }]
-  assert.equal(judgeModel(calls), 'fable')
+  // visual sets uiJudge: fable high, then once more on opus xhigh when that dies.
+  assert.deepEqual(calls.filter((c) => c.label === 'judge').map((c) => [c.model, c.effort]), [['fable', 'high'], ['opus', 'xhigh']])
   assert.ok(logs.includes('Judge: returned nothing'), logs.join('\n'))
   assert.deepEqual(result.judge, { ship: false, blockers: ['judge agent returned nothing'], reworkPieces: [], signOffRequired: met })
   assert.deepEqual(result.planCheck.triggered, met)
