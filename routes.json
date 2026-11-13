@@ -172,79 +172,94 @@
     "chat": {
       "tier": "seat",
       "who": "seat",
+      "examples": "conversation",
       "check": "none"
     },
     "lookup": {
       "tier": "seat",
       "who": "seat",
+      "examples": "one file or fact",
       "check": "none"
     },
     "search": {
       "tier": "haiku-medium",
       "who": "worker",
+      "examples": "codebase search with no file list",
       "check": "the paths exist"
     },
     "run-report": {
       "tier": "haiku-low",
       "who": "worker",
+      "examples": "run tests, builds, audits or logs, and report",
       "check": "exit code"
     },
     "mechanical": {
       "tier": "sonnet-medium",
       "who": "worker",
+      "examples": "renames, find-and-replace, boilerplate from an exact spec, dependency bumps, changelog and doc touch-ups",
       "check": "tests or a build"
     },
     "known-cause": {
       "tier": "sonnet-medium",
       "who": "worker",
+      "examples": "a fix with a known cause, a scoped feature from a spec, tests for existing behaviour, CRUD",
       "check": "a reproduction shown fixed, then tests"
     },
     "feature": {
       "tier": "opus-medium",
       "next": "opus-high",
       "who": "worker",
+      "examples": "a feature, a multi-file change, an unclear bug, a refactor that needs intent, code review",
       "check": "tests and a build"
     },
     "ui-build": {
       "tier": "opus-high",
       "who": "worker",
+      "examples": "UI built to a fixed design",
       "check": "tests and a build"
     },
     "hard": {
       "tier": "fable-medium",
       "next": "fable-high",
       "who": "worker",
+      "examples": "migrations, performance, concurrency, architecture, security-sensitive code, a new visual direction",
       "check": "tests, a build or a reproduction"
     },
     "plan-check": {
       "tier": "fable-medium",
       "who": "workflow",
+      "examples": "gk-build's check of a plan before anything is built",
       "check": "judge sheet"
     },
     "design-panel": {
       "tier": "fable-medium",
       "who": "workflow",
+      "examples": "gk-design's judges over the proposals",
       "check": "judge sheet"
     },
     "judge-opus": {
       "tier": "fable-medium",
       "who": "workflow",
+      "examples": "a judge over work done on Opus",
       "check": "judge sheet"
     },
     "judge-sensitive": {
       "tier": "fable-high",
       "who": "workflow",
+      "examples": "a judge over UI, client-facing wording or security work",
       "check": "judge sheet"
     },
     "ui-signoff": {
       "tier": "fable-high",
       "who": "workflow",
+      "examples": "the sign-off on anything that reaches a user's screen",
       "check": "judge sheet"
     },
     "legal-doc": {
       "tier": "seat",
       "floor": "opus-medium",
       "who": "seat",
+      "examples": "review of one document that fits one context",
       "check": "quote check, then an opus-high check"
     }
   },

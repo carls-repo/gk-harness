@@ -7,7 +7,8 @@ Version 2 holds:
   "retired": {old agent name: tier}, rendered with the tier's model, effort and body,
   "agents": {name: {tier, tools, description, body}}, extra agents such as Explore,
   "ladder": [tier, ...], the escalation order, strictly rising,
-  "classes": {name: {tier ("seat" or a tier), who, check, next?, floor?}},
+  "classes": {name: {tier ("seat" or a tier), who, check, examples, next?, floor?}}; examples
+             is the policy table's examples column (gen.render_policy_table),
   "stages": {"<workflow>.<role>": {tier ("byClass" with "byClass": {class: tier}),
              when?: {condition: tier}, atLeast?: "implementer", authorFloor?, apex?,
              noFable?: tier | "none" | {class: tier}, onFail?: rerun | unfinished | hold}},
@@ -226,8 +227,9 @@ def _class_problems(classes: dict, tiers: dict) -> list:
                 out.append("class %s: unknown %s tier %r" % (name, key, c[key]))
         if c.get("who") not in WHO:
             out.append("class %s: who must be one of %s" % (name, ", ".join(WHO)))
-        if not _text(c.get("check")):
-            out.append("class %s: check must be a non-empty string" % name)
+        for field in ("check", "examples"):
+            if not _text(c.get(field)):
+                out.append("class %s: %s must be a non-empty string" % (name, field))
     return out
 
 

@@ -10,7 +10,10 @@ routes.json carries a generated routes block, directly after its gk-project bloc
 the workflow's slice of routes.json (ROUTES) and the routing helper copied from
 gkh/templates/routes-helper.js. gen also writes each mapped phase's `model` label in the
 script's meta (routes.json "phases"), from the stage's base tier (byClass: the judgement
-class); a phase with no `model` key is left without one."""
+class); a phase with no `model` key is left without one.
+
+policy.md carries the class table between TABLE_BEGIN and TABLE_END, written by
+render_policy_table; the rest of policy.md is hand-written and kept byte for byte."""
 from __future__ import annotations
 
 import json
@@ -27,6 +30,9 @@ BLOCK = re.compile(r"^// <gk-routes v\d+>[^\n]*\n.*?^// </gk-routes>\n", re.S | 
 PROJECT_END = "gk-project block: END"
 PHASE_LINE = re.compile(r"^(\s*\{ title: '([^'\\]*)'.*\bmodel: ')([a-z0-9-]+)(' \},?)$")
 PHASE_TITLE = re.compile(r"^\s*\{ title: '([^'\\]*)'")
+TABLE_BEGIN = "<!-- gk-routes:table -->"
+TABLE_END = "<!-- /gk-routes:table -->"
+TABLE = re.compile(r"^<!-- gk-routes:table -->\n.*?^<!-- /gk-routes:table -->\n", re.S | re.M)
 FINISHING_HEADING = "# Finishing work"
 FINISHING_EFFORTS = ("low", "medium")
 # A YAML plain scalar may not hold ": " or " #", nor start with an indicator character.
@@ -202,6 +208,48 @@ def render_script(routes: dict, workflow: str, text: str, rel: str = "") -> str:
     return _label_phases(routes, workflow, text, rel)
 
 
+# --- the policy's class table -------------------------------------------------------------
+
+def _cell(text: str) -> str:
+    return " ".join(str(text).split()).replace("|", "\\|")
+
+
+def _class_tier(c: dict) -> str:
+    tier = c.get("tier")
+    out = tier if tier == rt.SEAT_TIER else "`%s`" % tier
+    if c.get("next"):
+        out += ", then `%s`" % c["next"]
+    if c.get("floor"):
+        out += ", at least `%s`" % c["floor"]
+    return out
+
+
+def render_policy_table(routes: dict) -> str:
+    """The policy's class table, from TABLE_BEGIN to TABLE_END (each line ending in "\n"): one
+    row per class in routes.json order (class, examples, who, tier with its next or floor tier,
+    evidence), then the escalation ladder."""
+    evidence = routes.get("evidence") or {}
+    rows = [TABLE_BEGIN, "| Class | Examples | Who | Tier | Evidence |", "|---|---|---|---|---|"]
+    for name, c in (routes.get("classes") or {}).items():
+        rows.append("| %s | %s | %s | %s | %s |" % (
+            name, _cell(c.get("examples", "")), c.get("who", ""), _class_tier(c),
+            _cell(evidence.get(name, ""))))
+    ladder = routes.get("ladder") or []
+    if ladder:
+        rows += ["", "Ladder: " + " → ".join("`%s`" % t for t in ladder) + "."]
+    rows.append(TABLE_END)
+    return "\n".join(rows) + "\n"
+
+
+def render_policy(routes: dict, text: str) -> str:
+    """policy.md text with its class table regenerated. Raises RoutesError without the markers."""
+    if len(TABLE.findall(text)) != 1:
+        raise rt.RoutesError("policy.md: needs one class table between %s and %s lines"
+                             % (TABLE_BEGIN, TABLE_END))
+    table = render_policy_table(routes)
+    return TABLE.sub(lambda _m: table, text)
+
+
 def outputs(root: Path) -> dict:
     """Repo-relative path -> the text that file should hold."""
     root = Path(root)
@@ -212,6 +260,9 @@ def outputs(root: Path) -> dict:
         out["agents/%s.md" % name] = render_retired(routes, name)
     for name in routes.get("agents") or {}:
         out["agents/%s.md" % name] = render_extra(routes, name)
+    policy = _current(root / "policy.md")
+    if policy is not None:
+        out["policy.md"] = render_policy(routes, policy)
     folder = root / "workflows"
     for script in sorted(folder.glob("gk-*.js")) if folder.is_dir() else ():
         rel = "workflows/%s" % script.name

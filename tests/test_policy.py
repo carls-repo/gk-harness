@@ -152,5 +152,75 @@ class PolicyTest(unittest.TestCase):
                 live_text = (AGENTS / (t["agent"] + ".md")).read_text(encoding="utf-8")
                 self.assertEqual(text.split("\n---\n", 1)[1], live_text.split("\n---\n", 1)[1])
 
+    # --- the routing policy (Task 18) ------------------------------------------------------
+
+    def test_policy_is_short(self):
+        lines = POLICY.read_text(encoding="utf-8").splitlines()
+        self.assertLessEqual(len(lines), 140)
+
+    def test_policy_keeps_the_old_title(self):
+        # The installer's old-policy detection keys on this first line (gkh/claude_md.py).
+        first = POLICY.read_text(encoding="utf-8").splitlines()[0]
+        self.assertEqual(first, "# Model orchestration policy")
+
+    def test_policy_has_both_approval_lists_and_default(self):
+        text = POLICY.read_text(encoding="utf-8")
+        headings = [ln for ln in text.splitlines() if ln.startswith("#")]
+        self.assertTrue(any("Needs Carl's word" in h for h in headings), headings)
+        self.assertTrue(any("No approval needed" in h for h in headings), headings)
+        self.assertIn(DEFAULT_SENTENCE, text)
+
+    def test_no_retired_concepts(self):
+        text = POLICY.read_text(encoding="utf-8")
+        for word in RETIRED_CONCEPTS:
+            with self.subTest(word=word):
+                self.assertNotIn(word, text)
+
+    def test_table_is_generated(self):
+        from gkh import gen
+        text = POLICY.read_text(encoding="utf-8")
+        self.assertEqual(text.count(gen.TABLE_BEGIN), 1)
+        self.assertEqual(text.count(gen.TABLE_END), 1)
+        self.assertIn(gen.render_policy_table(ROUTES), text)
+        self.assertNotIn("policy.md", gen.stale(ROOT))
+        for name in ROUTES["classes"]:
+            self.assertIn("| %s |" % name, text)
+
+    def test_policy_carries_the_two_anthropic_texts_verbatim(self):
+        text = " ".join(POLICY.read_text(encoding="utf-8").split())
+        self.assertIn(" ".join(ROUTES["finishingWork"].split()), text)
+        self.assertIn(LOW_CONTEXT, text)
+
+    def test_policy_names_dials_route_line_and_switch(self):
+        text = POLICY.read_text(encoding="utf-8")
+        for needle in ("#nofable", "#fable", "#deep", "#solo", "args.dials", "gkh fable off",
+                       "gkh fable on", "Route: <class>", "150 changed lines"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+
+
+DEFAULT_SENTENCE = ("Anything on neither list proceeds, subject to the project's own "
+                    "instructions.")
+RETIRED_CONCEPTS = ("Mode A", "Mode B", "Mode C", "profile:", "escalate", "think less",
+                    "This codebase is yours")
+# Anthropic's "write for a low-context reader" text (claude-api skill, shared/model-migration.md,
+# Fable 5.2 section, "Make reports easy to follow"), verbatim.
+LOW_CONTEXT = (
+    "Write for an intelligent but low-context reader. The person reading has not seen your tool "
+    "calls, your reasoning or the files you opened, and may be switching in from other work. "
+    "Messages should generally be self-contained: the reader should understand what you mean "
+    "without having to dig for other context. Put the key points in the first few sentences. "
+    "Practice progressive disclosure in your sentence order, and do not use undefined references "
+    "and ideas in line 1 that won't make sense until the reader reaches line 12. Use plain words, "
+    "and write in clear, understandable full sentences. Do not use a term or abbreviation that "
+    "you made up during the work - say what the thing is in a way any reader would understand. "
+    "Write mostly in the style of ASD-STE100 Simplified Technical English: short sentences, one "
+    "idea per sentence, active voice, and consistently using the same word for the same thing. "
+    "Use a paragraph of flowing prose where ideas connect, and keep bullets for lists of separate "
+    "items. Leave out unnecessary details unless the reader asks and practice concision, but do "
+    "ensure that your messages have the key context. Aim to make your user-facing text as "
+    "human-readable and clear as possible.")
+
+
 if __name__ == "__main__":
     unittest.main()

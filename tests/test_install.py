@@ -1470,7 +1470,9 @@ class StatusTests(InstallBase):
         agent = self.cdir / "agents" / "worker-opus.md"
         agent.unlink()
         md = self.cdir / "CLAUDE.md"
-        write(md, md.read_text(encoding="utf-8").replace("(read first)", "(read me)"))
+        text = md.read_text(encoding="utf-8")
+        self.assertIn("### Needs Carl's word", text)
+        write(md, text.replace("### Needs Carl's word", "### Needs a word"))
         out, err = self.ok("status")
         self.assertNotIn("drift: none", out)
         drift = out[out.index("drift:"):]

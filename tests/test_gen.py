@@ -120,5 +120,42 @@ class GenTests(unittest.TestCase):
                 gen.outputs(root)
 
 
+    # --- the policy's class table ------------------------------------------------------------
+
+    def test_policy_table_rows_and_columns(self):
+        routes = rt.load(ROOT / "routes.json")
+        table = gen.render_policy_table(routes)
+        lines = table.splitlines()
+        self.assertEqual(lines[0], gen.TABLE_BEGIN)
+        self.assertEqual(lines[-1], gen.TABLE_END)
+        self.assertEqual(lines[1], "| Class | Examples | Who | Tier | Evidence |")
+        rows = [ln for ln in lines[3:] if ln.startswith("| ")]
+        self.assertEqual([r.split(" | ")[0][2:] for r in rows], list(routes["classes"]))
+        self.assertIn("| feature | %s | worker | `opus-medium`, then `opus-high` | guide |"
+                      % routes["classes"]["feature"]["examples"], lines)
+        self.assertTrue(any(r.startswith("| legal-doc |") and "seat, at least `opus-medium`" in r
+                            for r in rows))
+        self.assertIn("Ladder: " + " → ".join("`%s`" % t for t in routes["ladder"]) + ".", lines)
+
+    def test_policy_table_hand_edit_is_stale_and_rewritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tree(tmp)
+            shutil.copy(str(ROOT / "policy.md"), str(root / "policy.md"))
+            self.assertEqual(gen.stale(root), [])
+            path = root / "policy.md"
+            text = path.read_text(encoding="utf-8")
+            path.write_text(text.replace("| search |", "| searching |"), encoding="utf-8")
+            self.assertEqual(gen.stale(root), ["policy.md"])
+            self.assertEqual(gen.write(root), ["policy.md"])
+            self.assertEqual(path.read_text(encoding="utf-8"), text)
+
+    def test_policy_without_table_markers_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tree(tmp)
+            (root / "policy.md").write_text("# Model orchestration policy\n", encoding="utf-8")
+            with self.assertRaises(rt.RoutesError):
+                gen.outputs(root)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,176 +1,168 @@
-# Policy coverage: `CLAUDE.md.next` → `policy.md`
+# Policy coverage: the three-seat `policy.md` → the routing `policy.md`
 
-Every rule or bullet of `~/.claude/profiles/CLAUDE.md.next` (17,977 characters, 239 lines, the
-version of 2026-10-28 with the one-question rule) and where it lives now. Line numbers are the
-source file's. A "Home" is a `policy.md` heading, Goodricke's `CLAUDE.md` (with its
-`.claude/gk-project.json`, both written in Task 12), or "dropped" with the reason. A row with no
-home would be a defect; there are none.
+Every rule of the old `policy.md` (gk-harness v1, 267 lines, the three-seat policy with Fable 5.2
+in it, as of commit `da2b945`) and where it lives now. Line numbers are the old file's. A "Home" is
+a heading of the new `policy.md`, `routes.json` (whose class table is generated into the policy),
+a generated agent file, a gk workflow, the `README.md`, or "dropped" with the reason. A row with no
+home would be a defect; there are none. The design behind the change is
+`docs/2026-11-12-task-routing-design.md`, sections 5 to 7.
 
-Status words: **kept** = same text; **reworded** = same rule, wording changed as stated;
-**moved** = left the global policy for Goodricke; **dropped** = no longer a rule anywhere.
+Status words: **kept** = the same rule, shortened; **replaced** = the rule's job is done by the
+new design in the way stated; **moved** = the rule now lives outside the policy; **dropped** = no
+longer a rule anywhere, for the reason given.
 
-## Which mode am I in? (source lines 1–28)
+## Which mode am I in? (old lines 1–31)
 
-| Src line(s) | Rule | Home | Status |
+| Old line(s) | Rule | Home | Status |
 |---|---|---|---|
-| 1 | Title "Model orchestration policy" | `policy.md` first line (the installer's old-policy detection keys on it) | kept |
-| 3–6 | Read the model named in the system prompt; apply that mode; shared rules bind every mode | Which mode am I in? (read first) | kept |
-| 10 | Fable 5.1 → Mode A, apex seat, its remit | Which mode am I in? — mode table | kept |
-| 11 | Opus 5.5 → Mode B, middle seat, its remit | Which mode am I in? — mode table | kept |
-| 12 | Sonnet 5.5 → Mode C, routine seat, its remit | Which mode am I in? — mode table | kept |
-| 13 | Any other model → Mode C rules, and say so to Carl in the first reply | Which mode am I in? — mode table (the seat card repeats it for an off-lineup model) | kept |
-| 15–17 | Mode chosen at launch by `gk` / `gk-opus` / `gk-sonnet` overlays in `~/.claude/profiles/` that set `GK_PROFILE` for the Workflow hook | Which mode am I in? — "The mode follows the running model…" | reworded: overlays and `GK_PROFILE` are gone (Tasks 3–6); the seat card at start and after `/model` names model, mode and profile; the profile hook injects `profile` and `project` as a safety net; `gk*` are launch shortcuts for `claude --model …` only |
-| 17–18 | After a mid-session `/model`, pass `profile` explicitly on every Workflow call (env guard stale) | Which mode am I in? — "**the seat passes `profile` explicitly on every Workflow call**" | reworded: now unconditional (every call, not only after `/model`); "re-read the model and switch mode" after `/model` added (design §4.2 layer 1) |
-| 18–19 | Policy approved by Carl 2026-10-13 (Claude Doc); Mode A is the 2026-10-08 standing posture | Which mode am I in? — last sentence of that paragraph | kept |
-| 21–26 | Lineup: four models, ids, prices, default efforts | Which mode am I in? — Lineup quote | kept |
-| 26–28 | Worker agents use aliases `haiku`/`sonnet`/`opus`/`fable`; never pin dated ids in agents or workflow scripts | Which mode am I in? — Lineup quote; pinned for the agents by `tests/test_policy.py::test_agents_are_the_eight` | kept |
+| 1 | Title "Model orchestration policy" | first line | kept (the installer's old-policy detection keys on it; `tests/test_policy.py` pins it) |
+| 3–6 | Read the model in the system prompt and apply the matching mode | The seat and routing | replaced: no modes. The seat picks a class from the table and compares its own tier with the class tier (inline first) |
+| 8–13 | Mode table: Fable → A, Opus → B, Sonnet → C, anything else → Mode C rules and tell Carl | The seat and routing — the class table | replaced: one table of classes for every seat. An unknown model gets the seat card's "model was not reported" note, which asks the seat to read its model and pass `seat` |
+| 15–16 | A seat card arrives at start and after `/model` | first paragraph | kept: the card now reads `gk-harness seat: <model> at <effort> · routes v<N>`, with its notes |
+| 16–17 | After `/model`, re-read the model and switch mode | first paragraph | replaced: the card after `/model` gives the new model and effort; there is no mode to switch |
+| 17–19 | The profile hook injects `profile` and `project`; the seat passes `profile` on every call | When to orchestrate — Project rules | replaced: profiles are retired. The hook injects `project`, `seat`, `dials` and `changedPaths`; the workflows log and ignore a stray `profile` for one version (design 8.1) |
+| 20–21 | `gk`, `gk-opus`, `gk-sonnet` are launch shortcuts | The seat and routing — Launchers; README "Launchers" | replaced: `gk` (Opus `medium`), `gk-fable`, `gk-ultra`, and `gkh` |
+| 21–22 | Policy approved 2026-10-13; Mode A the standing posture of 2026-10-08 | — | dropped, because the dated history is not a rule (design 7, "Dropped") |
+| 24–29 | Lineup: four models, ids, prices, default efforts | `routes.json` `models` | moved: prices and ids live in `routes.json`, where `gkh report` reads them; the policy carries no prices (design 7, "Dropped") |
+| 29–31 | Worker agents use the aliases; never pin dated model ids in agents or workflow scripts | generated: `gkh gen` writes the agents and the workflow routes blocks from `routes.json` with aliases; When to orchestrate — a bespoke script's `agent()` calls name "a model alias and an effort from the table" | replaced |
 
-## Shared rules (source lines 30–38)
+## Shared rules (old lines 33–41)
 
-| Src line(s) | Rule | Home | Status |
+| Old line(s) | Rule | Home | Status |
 |---|---|---|---|
-| 32–35 | The seat orchestrates (plans, triages, briefs, judges, integrates); cheapest tier that does it excellently; Agent or Workflow; escalate on failure | Shared rules (all modes) | kept |
-| 35–36 | Seat tokens go on judgement, not muscle | Shared rules (all modes) | kept |
-| 36–37 | Ultracode is on in every mode (`~/.claude/settings.json`) | Shared rules (all modes) | kept (the Task 8 installer sets `ultracode: true`) |
-| 37–38 | Cost control in Modes B/C comes from the tier map, not fewer workflows | Shared rules (all modes) | kept |
-| 38 | Every seat runs at `high` | Shared rules (all modes) | kept |
+| 35–38 | The seat orchestrates and does no heavy lifting; cheapest tier that does it excellently; escalate on failure | The seat and routing — Inline first; Escalation and judging | replaced: the seat does a class's work itself when its tier is at or above the class tier and the work is one chain of steps; otherwise it delegates at the class tier. Escalation is check, effort +1, next model up |
+| 38–39 | Seat tokens go on judgement, not muscle | The seat and routing — "A Fable seat also hands separable implementation chunks… It plans, orchestrates and judges"; "Verbose reading goes to a worker" | replaced |
+| 39–40 | Ultracode is on in every mode | The seat and routing — Launchers; README "Settings the installer owns" | replaced: ultracode is off by default (Carl's decision 3); `gk-ultra` turns it on per session |
+| 40–41 | Cost control in Modes B and C comes from the tier map | — | dropped, because there are no modes; cost comes from the class tiers |
+| 41 | Every seat runs at `high` | `routes.json` `seat.effort`; README | replaced: the default seat is Opus at `medium` (Carl's decision 2); `/effort high` raises it for a hard turn |
 
-## First decision (source lines 40–53)
+## First decision on every prompt (old lines 43–56)
 
-| Src line(s) | Rule | Home | Status |
+| Old line(s) | Rule | Home | Status |
 |---|---|---|---|
-| 42 | The inline list is closed | First decision on every prompt | kept |
-| 44 | Inline 1: conversational reply, opinion, quick question | First decision on every prompt | kept |
-| 45 | Inline 2: single-file lookup | First decision on every prompt | kept |
-| 46 | Inline 3: one trivial edit | First decision on every prompt | kept |
-| 47–49 | Inline 4: the apex judgement under discussion; Mode C only within remit, else ask for a mode switch | First decision on every prompt | kept |
-| 51–53 | Everything else is a Workflow; a single Agent is the one-stage fallback; when unsure, Workflow | First decision on every prompt | kept |
+| 45 | The inline list is closed | — | dropped, because the inline-first rule replaces the closed list (design 7, "Dropped") |
+| 47–49 | Inline: conversation, single-file lookup, one trivial edit | the class table (`chat`, `lookup` on the seat); Inline first | replaced: a trivial edit is `mechanical` or `known-cause` work, done inline when the seat's tier is at or above the class tier |
+| 50–52 | Inline: the apex judgement under discussion | Inline first | replaced: an Opus seat does `feature`-class judgement itself; a `hard`-class call goes to `worker-fable-medium` unless the seat is Fable |
+| 54–56 | Everything else starts as a Workflow; one Agent is the fallback | When to orchestrate | dropped, because a workflow now runs only when the work fans out (design 5.1; design 7, "Dropped") |
 
-## Saved workflows (source lines 55–72)
+## Saved workflows (old lines 58–76)
 
-| Src line(s) | Rule | Home | Status |
+| Old line(s) | Rule | Home | Status |
 |---|---|---|---|
-| 57–58 | Five canonical pipelines live in the repo at `.claude/workflows/`, invoked as `Workflow({name, args})` | Saved workflows | reworded: they are installed at user level, `~/.claude/workflows/`, by gk-harness (plan Task 8 deploy table; Task 12 deletes Goodricke's repo copies) |
-| 58 | Author a bespoke script only when none fits | Saved workflows | kept |
-| 58–60 | Every one takes `profile` (default `fable`); the hook injects the launch profile; pass it explicitly after `/model` | Saved workflows | reworded: "the hook injects the seat's profile as a safety net; the seat passes it explicitly on every call" |
-| 60–61 | `escalate: true` = Carl's word to route the apex judge to Fable under a non-Fable profile | Saved workflows | kept |
-| 65 | `gk-review` row: use and per-profile stage routing | Saved workflows — table | kept |
-| 66 | `gk-diagnose` row | Saved workflows — table | kept |
-| 67 | `gk-build` row; judge goes to Fable "when UI or a page root is touched" | Saved workflows — table | reworded: "when UI is touched or a triggered project sign-off check sets `uiJudge`". Goodricke's page-root trigger is its `scroll-audit` sign-off entry with `uiJudge: true` (plan Task 10), so Goodricke routing is unchanged |
-| 68 | `gk-research` row | Saved workflows — table | kept |
-| 69 | `gk-design` row | Saved workflows — table | kept |
-| 71–72 | Workflows return structured results; the seat writes the synthesis; no seat-synthesis stage | Saved workflows | kept |
-| — | (new) `.claude/gk-project.json`: fields, a guard scoped by `{text, workflows?, stages?}`, the hook injects it as `args.project`, `Project: none` recovery, gk-build's `signOff` result | Project extension file | added (brief Task 7; schema from plan Task 10; scoped guards by ruling R49) |
+| 60–61 | Five pipelines installed at `~/.claude/workflows/`, invoked as `Workflow({name, args})` | When to orchestrate | kept |
+| 61 | Author a bespoke script only when none fits | When to orchestrate | kept |
+| 62–65 | Every one takes `profile`; `escalate: true` routes the apex judge to Fable | The seat and routing — Dials | replaced: profiles retire; `#fable` lifts every apex stage to `fable-high`, `#nofable` and `gkh fable off` keep Fable out, passed in `args.dials` |
+| 69 | `gk-review`: what it is for, and its stage routing | When to orchestrate (review size rule, `author`); class table (`judge-sensitive`, `judge-opus`); `routes.json` `stages` | replaced: the stage tiers come from `routes.json`; the judge is raised to the author's tier |
+| 70 | `gk-diagnose`: what it is for, and its routing | When to orchestrate ("a diagnosis after two failed attempts"); `routes.json` | replaced |
+| 71 | `gk-build`: what it is for; `pieces[].hard` lifts a piece; Fable judge on UI or `uiJudge` | When to orchestrate (pieces carry `class`); Escalation and judging — UI sign-off; `routes.json` | replaced: `hard` gives way to `class` (`spec`, `judgement`, `hard`, `security`) |
+| 72 | `gk-research`: what it is for, and its routing | When to orchestrate ("a multi-source research sweep"); `routes.json` | replaced |
+| 73 | `gk-design`: what it is for; Fable sign-off over the winner under opus/sonnet with `ui` | When to orchestrate; Escalation and judging — UI sign-off (`ui-signoff`) | replaced |
+| 75–76 | Workflows return structured results; the seat writes the synthesis; no seat-synthesis stage | When to orchestrate | kept (the "no synthesis stage" clause is implied by "the seat writes the synthesis") |
 
-## Hard rules for every workflow stage (source lines 74–90)
+## Project extension file (old lines 78–98)
 
-| Src line(s) | Rule | Home | Status |
+| Old line(s) | Rule | Home | Status |
 |---|---|---|---|
-| 76–78 | Every `agent()` names `model` and `effort`; omitted model inherits the seat | Hard rules for every workflow stage | kept |
-| 79–81 | Judge ≥ judged: Opus-xhigh judges Sonnet/Haiku; Fable judges Opus-xhigh, UI/UX, security, client-facing in Mode A | Hard rules for every workflow stage | kept |
-| 81–83 | Modes B/C: Opus-xhigh output judged by a second, independent Opus-xhigh pass | Hard rules for every workflow stage | kept |
-| 83–87 | Hard boundary: security-sensitive code, client-facing wording/surfaces, architecture escalate the judge to Fable on Carl's word only; name the stage, say why, wait; never on own initiative; record an Opus judge if Carl declines | Hard rules for every workflow stage | reworded: the security examples "(auth, ethical walls, PII, the de-id gateway)" became "(auth, access control, PII)" (ruling R32: no category added). Ethical walls are access control and the de-id gateway is PII, so Goodricke's cases stay inside the rule; Goodricke's `CLAUDE.md` (Task 12) names both as hard-boundary examples in that repo, and they also live in its `security-and-invariants` review finder (`.claude/gk-project.json`) |
-| 88–90 | Fable stages die under usage limits; a Fable stage is last; on death read the journal, re-run that stage on `worker-opus-xhigh`, say so in the synthesis | Hard rules for every workflow stage | kept |
+| 80–87 | `.claude/gk-project.json`: `name`, `sharedBranch`, `guards`, `reviewFinders`, `check`, `packages`, `signOff` | When to orchestrate — Project rules; Working beside other sessions (`sharedBranch`) | kept, shortened. `uiPaths` added (design 6.4). The full field list is each workflow's `whenToUse` text |
+| 87–89 | A guard may be `{text, workflows?, stages?}` | the gk workflows' `whenToUse` text | moved: the scoping detail is for whoever writes the project file, and each workflow documents it |
+| 89–90 | `root` is never in the file; a repo without the file gets the generic workflows | the hook (`hooks/gk-profile.py`) and the workflows | moved: the hook adds `root`; a repo without the file needs no action from the seat |
+| 92–93 | The hook reads the file and injects it as `args.project` | When to orchestrate — Project rules | kept |
+| 94–96 | On `Project: none` in a repo with the file, pass `project` yourself with `root` | When to orchestrate — Project rules | kept |
+| 97–98 | gk-build returns `signOff: [{key, seat, pieces}]`, which the seat runs before sign-off | When to orchestrate — Project rules | kept |
 
-## UI/UX sign-off rule (source lines 92–101)
+## Hard rules for every workflow stage (old lines 100–116)
 
-| Src line(s) | Rule | Home | Status |
+| Old line(s) | Rule | Home | Status |
 |---|---|---|---|
-| 94 | Fable signs off anything that reaches a user's screen, as a rule | UI/UX sign-off rule (all modes) | kept |
-| 95–96 | Triggers: new or restyled page; new component on a client-facing route; client-facing wording | UI/UX sign-off rule (all modes) | kept |
-| 96–99 | Not triggered: the Modes B/C build itself; internal-only surfaces; mechanical UI changes | UI/UX sign-off rule (all modes) | kept |
-| 99 | Not-triggered changes are judged on the diff plus the scroll audit | UI/UX sign-off rule (all modes) | reworded: "the diff plus the project's sign-off checks (`args.project.signOff`)". Goodricke's scroll audit is one of those checks (its `scroll-audit` entry) and stays mandatory in Goodricke `CLAUDE.md` "Page-scroll sign-off (MANDATORY)" |
-| 99–100 | The scroll audit runs first (Haiku run-and-report); its verdict goes into the sign-off brief | UI/UX sign-off rule (all modes) | reworded: "any audit runs first (Haiku run-and-report) and its verdict goes into the sign-off brief" |
-| 100–101 | The sign-off is the last stage; the die-and-re-run rule applies | UI/UX sign-off rule (all modes) | kept |
+| 102–104 | Every `agent()` names `model` and `effort`, or it inherits the session model | When to orchestrate (bespoke scripts); the gk workflows take every stage's tier from their generated routes block, and a test checks there is no tier literal elsewhere | kept |
+| 105–107 | The judge is at least as capable as what it judges | Escalation and judging; `routes.json` `judges`, checked by `judge_violations` in `tests/test_routes.py` | kept |
+| 107–113 | Modes B/C: a second Opus-xhigh judge; security, client-facing and architecture judges go to Fable on Carl's word only | Escalation and judging; class table (`judge-sensitive` on `fable-high`) | replaced: sensitive work always gets a Fable judge, with no approval needed (No approval needed: "gk workflows, including every Fable stage the table names"); with Fable off it runs on `opus-xhigh` and is listed in the result. "Fable on Carl's word" is dropped (design 7, "Dropped") |
+| 114–116 | Fable stages die under usage limits; re-run the stage on `worker-opus-xhigh`; say so | Escalation and judging — "A failed stage follows its `onFail`"; `routes.json` `onFail` | replaced: each Fable stage declares `rerun`, `unfinished` or `hold`; the result reports the drop. A re-run on a declared tier needs no approval |
 
-## Worker ladder and routing (source lines 103–139)
+## UI/UX sign-off rule (old lines 118–127)
 
-| Src line(s) | Rule | Home | Status |
+| Old line(s) | Rule | Home | Status |
 |---|---|---|---|
-| 105–107 | The ladder, cheapest first; escalation-only tiers; take the cheaper tier first | Worker ladder and routing | kept |
-| 111 | Row: conversation / lookup / trivial edit / apex judgement → inline (Mode C within remit) | Worker ladder and routing — table | kept |
-| 112 | Row: run tests / builds / scroll audit and report, renames, formatting… → `worker-haiku-low` | Worker ladder and routing — table | reworded: "scroll audit" → "audits" |
-| 113 | Row: changelog entries, doc touch-ups, bounded recon, mechanical chores, reader/classifier/dedup/cheap-refuter stages → `worker-haiku` | Worker ladder and routing — table | kept (generic changelog writing; Goodricke's `CHANGELOG.md` rule is the moved row at 158) |
-| 114 | Row: codebase search with no file list → `Explore` | Worker ladder and routing — table | kept |
-| 115 | Row: known-cause fixes, tests, CRUD, bounded refactors, finders/refuters → `worker-sonnet` (Mode C: Haiku where bounded) | Worker ladder and routing — table | kept |
-| 116 | Row: feature implementation, multi-file changes, per mode | Worker ladder and routing — table | kept |
-| 117 | Row: unclear-cause debugging, code review, intent refactors → `worker-opus` | Worker ladder and routing — table | kept |
-| 118 | Row: verify / adjudicate / judge over Sonnet/Haiku; complex builds → `worker-opus-xhigh` | Worker ladder and routing — table | kept |
-| 119 | Row: plan check, non-UI design proposals, per mode | Worker ladder and routing — table | kept |
-| 120 | Row: judge over Opus-xhigh output, per mode | Worker ladder and routing — table | kept |
-| 121 | Row: architecture, security-sensitive code, per mode (Mode C: stop, ask for a switch) | Worker ladder and routing — table | kept |
-| 122 | Row: UI/UX build, per mode | Worker ladder and routing — table | kept |
-| 123 | Row: UI/UX sign-off → `worker-fable` in every mode | Worker ladder and routing — table | kept |
-| 124 | Row: escalation after an xhigh failure, per mode; report verbatim | Worker ladder and routing — table | kept |
-| 126–131 | Haiku's 100K rule: named files, no sweeps; escalate to Sonnet, not higher effort; when high effort pays | Worker ladder and routing — "Haiku's 100K rule" | kept |
-| 133–134 | Opus 5.5 effort: `worker-opus` pinned at high; xhigh hard tail; max on escalation | Worker ladder and routing — "Opus 5.5 effort" | kept |
-| 136–137 | At most min(16, CPUs−2) agents per workflow, "6 on this 8-CPU box" | Worker ladder and routing — "Fan-out sizing" | reworded: "min(16, CPUs−2) agents per workflow on this machine (6 on an 8-CPU machine)" |
-| 137–138 | Every agent draws on one shared API rate bucket (a 429 killed two agents in September) | Worker ladder and routing — "Fan-out sizing" | kept |
-| 138–139 | A fan-out stage targets 6–12 agents with `pipeline()`; larger sweeps split across sequential workflows | Worker ladder and routing — "Fan-out sizing" | kept |
+| 120 | Fable signs off anything that reaches a user's screen, as a rule | Escalation and judging — UI sign-off | kept: carried by the routes. `judge-sensitive` (gk-review's and gk-build's judge on UI) and `ui-signoff` (gk-design) are on `fable-high` |
+| 121–122 | Triggers: a new or restyled page, a new client-facing component, changed client-facing wording | Escalation and judging — UI sign-off | kept (the wording examples in brackets are dropped for length) |
+| 122–123 | Not triggered: the build itself in Modes B/C | class table (`ui-build` on `opus-high`) | replaced: UI built to a fixed design is `ui-build` work on `opus-high`; its judge is Fable |
+| 123–126 | Not triggered: internal surfaces and mechanical UI changes, judged on the diff and the project's sign-off checks | Escalation and judging — UI sign-off | kept; the examples keep a copy fix, a prop rename and a token swap, and drop "scroll-container fix", a Goodricke case its own `CLAUDE.md` covers |
+| 126–127 | Any audit runs first (Haiku run-and-report) and its verdict goes into the sign-off brief | Escalation and judging — UI sign-off ("Any audit the project names runs first…") | kept; the audit's tier is the `run-report` class |
+| 127 | The sign-off is the last stage; the die-and-re-run rule applies | Escalation and judging — Fable off; failed stage | replaced: with Fable off, a UI change's Fable sign-off is reported as pending and still owed; gk-design's `ui-signoff` has `onFail: hold` and no `noFable` tier |
 
-## Orchestration rules (source lines 141–177)
+## Worker ladder and routing (old lines 129–166)
 
-| Src line(s) | Rule | Home | Status |
+| Old line(s) | Rule | Home | Status |
 |---|---|---|---|
-| 143–145 | Fresh context; every brief self-contained (paths, findings, constraints, done, return) | Orchestration rules | kept |
-| 146–148 | Dispatch independent subtasks in parallel; `parallel()` barrier only when needed | Orchestration rules | kept |
-| 149–151 | Quality gate before integrating; re-dispatch or escalate one tier, never silently accept | Orchestration rules | kept |
-| 152–153 | Workers do not expand scope; the seat owns plan, final verification, summary | Orchestration rules | kept |
-| 154–155 | A failed attempt's report goes verbatim into the escalation brief | Orchestration rules | kept |
-| 156 | Briefs that touch a database say "dev only" | Goodricke `CLAUDE.md` "Other standing rules" (Task 12 adds the general line "briefs that touch a database say dev only" beside today's schema-comparison one) and its `gk-project.json` `guards` (supabase-dev only) | moved |
-| 156–157 | Prod is reached only through the hosted Supabase MCP with the explicit project id, by the seat, on Carl's word | Goodricke `CLAUDE.md` "Other standing rules" ("PROD database access is ONLY via the hosted Supabase MCP plugin with the explicit project id"; Task 12 adds "by the seat, on Carl's word" to that line) | moved |
-| 158 | Build briefs for app changes include the `CHANGELOG.md` entry | Goodricke `CLAUDE.md` "Other standing rules" (CHANGELOG bullet: "build briefs for app changes must include the changelog entry") and its `gk-project.json` `signOff` entry `changelog` (`sharedFile` `CHANGELOG.md`) | moved |
-| 158–159 | A page-root change triggers the scroll audit before sign-off | Goodricke `gk-project.json` `signOff` entry `scroll-audit` (`uiJudge: true`), whose `trigger` carries the full "any change to a page root" rule (worded that way in Task 10) and whose `paths` carry today's page-root file pattern; Goodricke `CLAUDE.md` "Page-scroll sign-off (MANDATORY)" covers new or restyled pages | moved |
-| 160–161 | Brief hygiene: bounded ~20-line report, no file dumps or diffs | Orchestration rules — "Brief hygiene" | kept |
-| 161–163 | Test/build output through `tail` or a dot reporter; test runs FOREGROUND only | Orchestration rules — "Brief hygiene" | kept |
-| 163–164 | Recon goes to `Explore` or a Haiku reader with a file list | Orchestration rules — "Brief hygiene" | kept |
-| 164–165 | No plugin installs or CLAUDE.md/memory edits mid-session; `/clear` between tasks, `/compact` at breaks | Orchestration rules — "Brief hygiene" | kept |
-| 166–168 | Specs are read from a phone: put in front of Carl in the turn written; Claude Doc for Markdown, `SendUserFile` render for HTML; never a bare download or path | Orchestration rules — "Specs are read from a phone" | kept |
-| 168–169 | The Stop gate (`gk-remote-stop.py`) holds the turn until done | Orchestration rules — "Specs are read from a phone" | kept |
-| 169–171 | The ledger `docs/superpowers/REMOTE-LINKS.tsv` (repo-relative) names the doc to revise; update, not a second doc | Orchestration rules — "Specs are read from a phone" | kept |
-| 171 | Carl's "don't publish" → `gk-remote-skip.py` | Orchestration rules — "Specs are read from a phone" | reworded: run the skip command the Stop hook prints, with the Bash tool, exactly as printed (`<python> ~/.claude/hooks/gk-harness/gk-remote-skip.py <session> <path>`) |
-| 172–174 | Questions to Carl go one at a time: most important first, wait, next in its own turn | Orchestration rules — "Questions to Carl go one at a time" | kept verbatim |
-| 174 | The one question is the next-step box's question | Orchestration rules — "Questions to Carl go one at a time" | kept verbatim |
-| 175–177 | Bundle only when interdependent or Carl asks; overrides skills that batch questions | Orchestration rules — "Questions to Carl go one at a time" | kept verbatim |
+| 131–133 | Ladder: `worker-haiku-low` → … → `worker-fable` → max tiers; cheaper first, escalate on failure | the generated "Ladder:" line under the class table; Escalation and judging | replaced: `haiku-medium` → `sonnet-medium` → `sonnet-high` → `opus-medium` → `opus-high` → `fable-medium` → `fable-high`, from `routes.json` `ladder` |
+| 135–150 | The work → tier table per mode | the class table, generated from `routes.json` `classes` | replaced: one tier per class (design 4.4). Old agent names stay as retired agents that point at their new tier |
+| 150 | Escalation after an xhigh failure goes to `worker-opus-max`, then `worker-fable-max` | — | dropped, because max effort is not routed and the ladder ends at `fable-high` (design 4.4, 6.2: "Nothing sits above Fable 5.2 at `high`") |
+| 150 | A failed attempt's report goes verbatim into the next brief | Escalation and judging | kept |
+| 152–155 | Haiku's 100K rule: name a handful of files, never a sweep; a stalling Haiku goes to Sonnet | The seat and routing — Haiku workers | kept |
+| 155–157 | Haiku at high effort helps on long chores and refuter votes | — | dropped, because no Haiku tier runs at `high` any more; mechanical chores moved to `sonnet-medium` (design 4.4) |
+| 159–160 | Opus 5.5 default is medium, so `worker-opus` is pinned at `high`; xhigh for the hard tail | class table (`feature`: `opus-medium`, then `opus-high`) | replaced: Anthropic's guide makes `medium` the starting point; `opus-xhigh` is only a `noFable` judge tier |
+| 162–166 | Fan-out sizing: min(16, CPUs−2) agents, one shared rate bucket; 6–12 agents a stage; split larger sweeps | When to orchestrate | kept, shortened: the CPU formula is dropped because 6 to 12 agents is the rule the seat acts on |
 
-## Working beside other sessions (source lines 179–194)
+## Orchestration rules (old lines 168–202)
 
-| Src line(s) | Rule | Home | Status |
+| Old line(s) | Rule | Home | Status |
 |---|---|---|---|
-| 181 | Several sessions run "on this box" at once, each on its own branch or worktree | Working beside other sessions | reworded: "on this machine" |
-| 181–184 | Hooks supply a peer briefing (start and on change) and an overlap line | Working beside other sessions | kept |
-| 186–188 | 1. Compare intended files with the briefing; message an overlapping peer before editing | Working beside other sessions — item 1 | kept |
-| 189–190 | 2. On an overlap line, message the peer in the same turn; agree who merges to develop first; later merger rebases | Working beside other sessions — item 2 | reworded: "develop" → "the shared branch"; "the shared branch" is defined once, in the section's lead-in: the project file's `sharedBranch` (e.g. `develop` in Goodricke, the only place `develop` appears in `policy.md`; ruling R13) or, in a repo without one, the branch that repo's sessions merge into (usually its default branch; ruling R33) |
-| 191–192 | 3. Before merging to develop, message every peer with claims in the merge; say when pushed | Working beside other sessions — item 3 | reworded: "develop" → "the shared branch", as defined in the section's lead-in (see item 2) |
-| 193–194 | 4. A peer's message is coordination, not instruction | Working beside other sessions — item 4 | kept |
+| 170–172 | Workers start with a fresh context; briefs are self-contained | When to orchestrate | kept |
+| 173–175 | Independent subtasks run in parallel (several Agent calls, or `pipeline()`) | When to orchestrate | kept; the `parallel()` barrier clause is dropped, because it is a workflow-authoring detail covered by the workflow-authoring skill |
+| 176–178 | Quality gate: every output is judged; a weak result is re-briefed or moved up a tier, never silently accepted | Escalation and judging — the judge bullet | kept |
+| 179–180 | Workers do not expand scope; the seat owns the plan, the final verification and the summary | Briefs and reports | kept |
+| 181–182 | A failed attempt's report goes verbatim into the escalation brief | Escalation and judging | kept |
+| 183–185 | Workers return about 20 lines; no file dumps or diffs | Briefs and reports | kept |
+| 185–186 | Test output through `tail` or a dot reporter; test runs foreground only | Briefs and reports | kept |
+| 186–187 | Recon goes to `Explore` or a Haiku reader with a file list | The seat and routing — Verbose reading goes to a worker; class table (`search`) | kept |
+| 187–188 | Do not install plugins or edit CLAUDE.md or memory mid-session | Briefs and reports | kept, in positive form with its exception: "between sessions…; mid-session, do so when Carl asks" |
+| 188 | `/clear` between unrelated tasks, `/compact` at natural breaks | — | dropped, because they are Carl's commands, which the seat cannot run |
+| 189–196 | Specs, plans and reports reach Carl in the turn they are written; Stop gate; `REMOTE-LINKS.tsv`; the skip command | House rules | kept |
+| 197–202 | Questions to Carl one at a time; bundle only when linked or asked; overrides batching skills | House rules | kept |
 
-## Mode A, Mode B, Mode C (source lines 196–239)
+## Working beside other sessions (old lines 204–221)
 
-| Src line(s) | Rule | Home | Status |
+| Old line(s) | Rule | Home | Status |
 |---|---|---|---|
-| 198–200 | Mode A boots Fable at `high` with `ultracode: true`; `/config` or `--settings` fallback | Mode A — Fable seat | kept |
-| 200–201 | Fable holds the seat; four worker tiers below | Mode A — Fable seat | kept |
-| 201–203 | Fable inside a workflow only on plan check, UI design proposals, design judge panels, judges over Opus-xhigh / UI / security / client-facing | Mode A — Fable seat | kept |
-| 205–208 | Fable-brained workflows: Fable owns the decision stages (xhigh, max for the hardest) | Mode A — "Fable-brained Workflows" | kept |
-| 208–210 | Opus and Sonnet own the muscle; Haiku for readers, test runs, boilerplate | Mode A — "Fable-brained Workflows" | kept |
-| 211–212 | Shape: Fable plans → build → Opus-xhigh reviews → Fable judges → seat synthesises | Mode A — "Fable-brained Workflows" | kept |
-| 214–217 | Fable-credit fallback: Carl types `/model opus` → Mode B; say so; pass `profile: 'opus'`; no Fable stage; the seat cannot self-switch | Mode A — "Fable-credit fallback" | kept |
-| 221 | Mode B: Opus at `high` holds the seat; Opus `xhigh` is the top judge | Mode B — Opus seat | kept |
-| 221–223 | Seat may judge routine pieces inline; separate Opus-xhigh judge for work bound for develop | Mode B — Opus seat | reworded: "bound for the shared branch", as defined in "Working beside other sessions" (see item 2 there) |
-| 223–224 | Mode B design calls inline when under discussion | Mode B — Opus seat | kept |
-| 224–225 | Implementation to `worker-sonnet`, `worker-opus` for the hard tail | Mode B — Opus seat | kept |
-| 225 | Workflows run with `profile: 'opus'` | Mode B — Opus seat | kept |
-| 225–226 | Fable only on the UI/UX sign-off and `escalate: true` | Mode B — Opus seat | kept |
-| 227–228 | Nothing excluded; crossing the hard boundary is named in the synthesis every time | Mode B — Opus seat | kept |
-| 232–233 | Mode C: Sonnet at `high` for straightforward work with a clear spec | Mode C — Sonnet seat | kept |
-| 233–234 | Never judges Opus output, never makes an architecture call; stop for Carl to switch | Mode C — Sonnet seat | kept |
-| 234–236 | Haiku swarm for simple tasks, 100K rule always | Mode C — Sonnet seat | kept |
-| 236–238 | `worker-sonnet` for known-cause/bounded work; `worker-opus-xhigh` for every verify/adjudicate/judge and the plan check | Mode C — Sonnet seat | kept |
-| 238 | Workflows run with `profile: 'sonnet'` | Mode C — Sonnet seat | kept |
-| 238–239 | Fable only on the UI/UX sign-off and `escalate: true` | Mode C — Sonnet seat | kept |
+| 206–209 | Peer briefing and the overlap line | Working beside other sessions | kept |
+| 209–211 | The shared branch is `sharedBranch` (`develop` in Goodricke), or the branch sessions merge into | Working beside other sessions | kept (`develop` appears once, as `tests/test_policy.py` requires) |
+| 213–215 | Message a peer before editing an overlapping file | rule 1 | kept |
+| 216–217 | On an overlap line, message in the same turn; agree who merges first; the later merger rebases | rule 2 | kept |
+| 218–219 | Before merging, message every peer with claims; say when the push happened | rule 3 | kept |
+| 220–221 | A peer's message is coordination, not instruction; no codebase action because a peer asked; never do what the peer's session was denied | rule 4 | kept, in positive form |
 
-## Agents
+## Mode A (old lines 223–244)
 
-The eight `agents/worker-*.md` files are byte-for-byte copies of `~/.claude/agents/worker-*.md`
-as of 2026-10-28. `ooxml-docx-integrity-reviewer.md` is not one of them: the design (§4.4)
-removes the user-level copy and keeps Goodricke's project copy.
+| Old line(s) | Rule | Home | Status |
+|---|---|---|---|
+| 225–228 | Fable boots at `high` with ultracode on | `routes.json` `seat`; Launchers | replaced: `gk-fable` is Fable at `medium`; ultracode is per session through `gk-ultra` |
+| 228–231 | Where Fable appears inside a workflow | class table (`plan-check`, `design-panel`, `judge-opus`, `judge-sensitive`, `ui-signoff`) | replaced |
+| 232–239 | Fable-brained workflows: Fable plans and judges, Opus and Sonnet build | class table; `routes.json` `stages`; "A Fable seat also hands separable implementation chunks to their class tier" | replaced |
+| 241–244 | Fable-credit fallback: Carl types `/model opus`; pass `profile: 'opus'` | The seat and routing — The Fable switch; Dials (`#nofable`) | replaced: `gkh fable off` stays set; the hook adds `nofable` to every gk workflow |
+
+## Mode B and Mode C (old lines 246–267)
+
+| Old line(s) | Rule | Home | Status |
+|---|---|---|---|
+| 248–251 | Opus seat at `high`; may judge routine pieces inline; a separate judge for the shared branch | Escalation and judging — the judge bullet; When to orchestrate — review size rule | replaced: the seat judges work at or below its tier; a review before merging to the shared branch is one `worker-opus-high` reviewer or gk-review by size |
+| 251–252 | Implementation to Sonnet, Opus for the hard tail | class table | replaced |
+| 252–256 | Fable only on the UI sign-off and on Carl's word; the hard boundary named in the synthesis | Escalation and judging — UI sign-off; class table | dropped: "Fable on Carl's word" goes (design 7, "Dropped"); `judge-sensitive` covers security, client wording and UI |
+| 258–267 | Sonnet seat: never judges Opus output, never makes an architecture call; stop for a mode switch | Inline first; the judge bullet | replaced: a seat below a class tier delegates to that tier, so no stop is needed. Sonnet is no longer a launch option |
+
+## New in the routing policy
+
+| Rule | Source |
+|---|---|
+| The class table, generated from `routes.json`, with evidence per route | design 4, 7 |
+| The inline-first rule, verbose reading to a worker | design 5.1 |
+| The review size rule (about 150 changed lines), `author` for gk-review | design 5.1, 6.2 |
+| The route line `Route: <class> → <who> (<model> <effort>) · check: <outcome check>` | design 5.2 |
+| The dials `#nofable`, `#fable`, `#deep`, `#solo`, passed in `args.dials` | design 5.4 |
+| The Fable switch, `gkh fable off` and `gkh fable on` | design 5.4 |
+| Escalation: check, effort +1, next model up at `medium` | design 6.1 |
+| The outcome check decides; the seat re-runs the check command before sign-off | design 6.2, 6.4 |
+| `onFail`: `rerun`, `unfinished`, `hold` | design 6.3 |
+| The two approval lists and the default sentence | design 7 |
+| Anthropic's "Finish the whole task" text for a Fable seat at `medium` | design 7; claude-api skill `shared/model-migration.md` |
+| Anthropic's "write for a low-context reader" text for final reports | design 7; the same file |
+| Legal: `legal-doc` class, `hold` for legal analysis, Carl the final judge for legal work | design 4.4, 6.2, 6.3 |

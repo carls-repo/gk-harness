@@ -338,6 +338,21 @@ class RoutesTests(unittest.TestCase):
         r["classes"]["feature"]["tier"] = "opus-ultra"
         self.assertProblem(r, "class feature")
 
+    def test_class_examples_required(self):
+        r = repo()
+        for name, c in r["classes"].items():
+            with self.subTest(cls=name):
+                self.assertIsInstance(c.get("examples"), str)
+                self.assertTrue(c["examples"].strip())
+        for bad in ("", "  ", None, ["a list"]):
+            with self.subTest(examples=bad):
+                r = repo()
+                if bad is None:
+                    del r["classes"]["search"]["examples"]
+                else:
+                    r["classes"]["search"]["examples"] = bad
+                self.assertProblem(r, "class search: examples")
+
     def test_v2_values(self):
         r = repo()
         self.assertEqual(r["stages"]["gk-build.plan-check"]["tier"], "fable-medium")
