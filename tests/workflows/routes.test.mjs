@@ -856,7 +856,7 @@ test('stage tiers equal routes.json, gk-design: proposals and judges run on the 
   }
 })
 
-test('no sign-off agent when judges ran on fable, gk-design: their judgement is the UI sign-off; no ui, no sign-off', async () => {
+test('no sign-off agent when judges ran on fable, gk-design: when every sheet came from fable their judgement is the UI sign-off; a mixed panel runs the sign-off agent; no ui, no sign-off', async () => {
   for (const dials of [[], ['fable']]) {
     const { calls, result, logs } = await runDesign({ ui: true, dials })
     assert.ok(calls.every((c) => c.label !== 'sign-off' && c.phase !== 'Sign-off'), `${JSON.stringify(dials)}: no sign-off agent`)
@@ -869,14 +869,35 @@ test('no sign-off agent when judges ran on fable, gk-design: their judgement is 
     assert.equal(result.signOff, null, `no ui ${JSON.stringify(dials)}`)
     assert.ok(!logs.some((l) => l.startsWith('UI sign-off')), logs.join('\n'))
   }
-  // One Fable judge dies and is re-run on opus; the other returns its sheet from fable, so the
-  // panel still carries a Fable judgement and no sign-off agent runs.
-  const { calls, result } = await runDesign({ ui: true }, designReplies({ judge: (prompt, opts, sheet) => (opts.label === 'judge:1' && opts.model === 'fable' ? null : sheet) }))
-  assert.deepEqual(calls.filter((c) => c.label === 'judge:1').map(pairOf), [['fable', 'high'], ['opus', 'xhigh']])
-  assert.deepEqual(calls.filter((c) => c.label === 'judge:2').map(pairOf), [['fable', 'high']])
-  assert.ok(calls.every((c) => c.label !== 'sign-off'))
-  assert.deepEqual(result.signOff, { satisfiedBy: 'judges', tier: 'fable-high' })
-  assert.deepEqual(result.routing.offTier, [{ stage: 'gk-design.judge', label: 'judge:1', tier: 'opus-xhigh', reason: 'onFail' }])
+  // A mixed panel: judge:1 dies on fable and is re-run on opus, judge:2 returns its sheet from
+  // fable. Fable did not give every sheet, so the panel is not the sign-off: the agent runs.
+  // Case a: both name P1. Case b (the review's reproduction): the opus re-run votes P2 with high
+  // scores, the fable judge votes P1, and P2 wins on the opus sheet, which Fable never endorsed.
+  const favour = (prompt, fav, high) => {
+    const keys = [...new Set([...prompt.matchAll(/^=== (P\d) /gm)].map((m) => m[1]))].sort()
+    return { scores: keys.map((k) => ({ title: k, fit: k === fav ? high : 5, simplicity: 5, risk: 5, design: k === fav ? high : 5, reason: 'r' })), winner: fav, grafts: [] }
+  }
+  const approved = { approved: true, concerns: [], mustChange: ['m'] }
+  const mixed = [
+    ['both name P1', (prompt, opts, sheet) => (opts.label === 'judge:1' && opts.model === 'fable' ? null : sheet), 'P1', ['P1', 'P1']],
+    ['the opus re-run carries P2', (prompt, opts) => (opts.label === 'judge:1' ? (opts.model === 'fable' ? null : favour(prompt, 'P2', 10)) : favour(prompt, 'P1', 6)), 'P2', ['P2', 'P1']],
+  ]
+  for (const [name, judge, winner, votes] of mixed) {
+    const { calls, result, logs } = await runDesign({ ui: true }, designReplies({ judge, signOff: () => approved }))
+    assert.deepEqual(calls.filter((c) => c.label === 'judge:1').map(pairOf), [['fable', 'high'], ['opus', 'xhigh']], name)
+    assert.deepEqual(calls.filter((c) => c.label === 'judge:2').map(pairOf), [['fable', 'high']], name)
+    assert.equal(result.winner.key, winner, name)
+    assert.deepEqual(result.winner.judgeVotes, votes, name)
+    assert.deepEqual(calls.filter((c) => c.label === 'sign-off').map((c) => [c.phase, c.model, c.effort]), [['Sign-off', 'fable', 'high']], `${name}: the sign-off agent runs`)
+    assert.deepEqual(result.signOff, approved, `${name}: the sign-off agent's result`)
+    assert.ok(logs.includes(`UI sign-off: one fable high agent over winner ${winner} (the judges ran on opus-xhigh, fable-high)`), logs.join('\n'))
+    assert.ok(!logs.some((l) => l.startsWith('UI sign-off: satisfied')), name)
+    assert.deepEqual(result.routing.offTier, [{ stage: 'gk-design.judge', label: 'judge:1', tier: 'opus-xhigh', reason: 'onFail' }], name)
+  }
+  // Every sheet from fable, after one fable judge died for good: the panel is still the sign-off.
+  const lost = await runDesign({ ui: true }, designReplies({ judge: (prompt, opts, sheet) => (opts.label === 'judge:1' ? null : sheet) }))
+  assert.ok(lost.calls.every((c) => c.label !== 'sign-off'))
+  assert.deepEqual(lost.result.signOff, { satisfiedBy: 'judges', tier: 'fable-high' })
 })
 
 test('sign-off pending when fable is off, gk-design: the judges run on opus xhigh, no sign-off agent runs, and the sign-off is owed', async () => {
@@ -1007,7 +1028,9 @@ test('withoutComments: drops comments, keeps strings, templates and regular expr
 // A tier is named by model and effort in the routes block only, which gen writes from
 // routes.json; a stage takes its route from runStage or routeOf. meta.phases[].model is gen's
 // too (gen --check covers it), so the phase labels are left out.
-const TIER_LITERALS = ["model: '", "effort: '", "'xhigh'", "'max'"]
+// Any quote, any spacing around the colon, and a value on the next line (the text is matched
+// whole, not line by line).
+const TIER_LITERALS = [/\b(model|effort)\s*:\s*['"`]/g, /['"`](xhigh|max)['"`]/g]
 const PHASE_MODEL = /(^\s*\{ title: '[^'\\]*'.*), model: '[a-z0-9-]+'( \},?)$/gm
 // The lines of a script that name a tier literal, once its routes block, its comments and its
 // meta.phases model labels are removed.
@@ -1017,7 +1040,17 @@ function tierLiteralLines(src) {
   // The block comes after the marker, so removing it leaves meta (everything before) in place.
   const noBlock = blk.count ? [...blk.lines.slice(0, blk.begin), ...blk.lines.slice(blk.end + 1)].join('\n') : src
   const code = withoutComments(noBlock.slice(0, at).replace(PHASE_MODEL, '$1$2') + noBlock.slice(at))
-  return code.split('\n').filter((l) => TIER_LITERALS.some((lit) => l.includes(lit)))
+  // Each hit, reported as the code from the start of the line it begins on to the end of the
+  // line it ends on.
+  const hits = []
+  for (const re of TIER_LITERALS) {
+    for (const m of code.matchAll(re)) {
+      const from = code.lastIndexOf('\n', m.index) + 1
+      const to = code.indexOf('\n', m.index + m[0].length)
+      hits.push(code.slice(from, to < 0 ? code.length : to))
+    }
+  }
+  return hits
 }
 
 test('tierLiteralLines: finds a tier literal in code, not in the routes block, a comment or a phase label', () => {
@@ -1035,8 +1068,14 @@ test('tierLiteralLines: finds a tier literal in code, not in the routes block, a
     body,
   ].join('\n')
   assert.deepEqual(tierLiteralLines(script("runStage('s', {}, p, { label: 'x' })")), [])
-  for (const lit of ["agent(p, { model: 'opus' })", "agent(p, { effort: 'high' })", "const e = 'xhigh'", "if (x === 'max') y()", "const m = { title: 'T', model: 'fable' }"]) {
-    assert.deepEqual(tierLiteralLines(script(lit)), [lit], lit)
+  for (const lit of [
+    "agent(p, { model: 'opus' })", "agent(p, { effort: 'high' })", "const e = 'xhigh'", "if (x === 'max') y()", "const m = { title: 'T', model: 'fable' }",
+    'agent(p, { model: "opus" })', "agent(p, { model:'opus' })", 'agent(p, { model: `opus` })', "agent(p, { effort :\t'high' })",
+    'const e = "xhigh"', 'const e = `max`', "agent(p, {\n  model:\n    'opus' })",
+  ]) {
+    const hits = tierLiteralLines(script(lit))
+    assert.equal(hits.length, 1, lit)
+    assert.ok(lit.endsWith(hits[0]) && (lit.includes('\n') || hits[0] === lit), `${lit}: got ${JSON.stringify(hits)}`)
   }
 })
 

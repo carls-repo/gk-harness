@@ -2,11 +2,11 @@ export const meta = {
   name: 'gk-design',
   description: 'Decide a design-heavy or architecturally novel question by angle-diverse proposals scored by a judge panel',
   whenToUse:
-    'Use when a design or architecture question has a wide solution space and should be settled by competing proposals rather than one attempt. Requires args {brief: string (REQUIRED); constraints?: string[]; context?: string[] — files to read first; approaches?: number — default 3, 2..4; ui?: boolean — true puts the proposals on fable and calls for a UI sign-off; judges?: number — default 2, 1..3; dials?: string[] — routing dials: "fable" (the judge panel is already on fable), "nofable" keeps every stage off fable (each stage\'s model and effort come from routes.json); project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. Returns {proposals, judgeSheets, scoreboard, winner, grafts, signOff, routing} as structured JSON (signOff is null without ui; with ui it is {satisfiedBy: "judges", tier} when a judge that returned a sheet ran on fable, whose judgement is the UI sign-off; a fable sign-off agent\'s {approved, concerns, mustChange} over the winner when every such judge was re-run on opus after its fable run died; {pending: "Fable off", note} under nofable, and {pending: "Fable sign-off held", note} when that sign-off agent died: the UI sign-off is still owed by fable. Plus degraded: string, with winner null and signOff null, when fewer than 2 proposals or no judge sheets survive); the calling session (the seat) writes the design from the winner plus grafts.',
+    'Use when a design or architecture question has a wide solution space and should be settled by competing proposals rather than one attempt. Requires args {brief: string (REQUIRED); constraints?: string[]; context?: string[] — files to read first; approaches?: number — default 3, 2..4; ui?: boolean — true puts the proposals on fable and calls for a UI sign-off; judges?: number — default 2, 1..3; dials?: string[] — routing dials: "fable" (the judge panel is already on fable), "nofable" keeps every stage off fable (each stage\'s model and effort come from routes.json); project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. Returns {proposals, judgeSheets, scoreboard, winner, grafts, signOff, routing} as structured JSON (signOff is null without ui; with ui it is {satisfiedBy: "judges", tier} when every judge that returned a sheet ran on fable, whose judgement is then the UI sign-off; a fable sign-off agent\'s {approved, concerns, mustChange} over the winner when some such judge was re-run on opus after its fable run died; {pending: "Fable off", note} under nofable, and {pending: "Fable sign-off held", note} when that sign-off agent died: the UI sign-off is still owed by fable. Plus degraded: string, with winner null and signOff null, when fewer than 2 proposals or no judge sheets survive); the calling session (the seat) writes the design from the winner plus grafts.',
   phases: [
     { title: 'Propose', detail: 'one agent per angle (MVP-first, risk-first, user-first, maintainability-first), each commits to ONE recommendation; opus high, fable medium when ui (opus high under nofable)' },
     { title: 'Judge', detail: 'judge panel scores every proposal 1..10 on fit, simplicity, risk (and design when ui); plain code averages and picks the winner (fable high; opus xhigh under nofable)', model: 'fable' },
-    { title: 'Sign-off', detail: 'fable high UI sign-off over the winner, only when ui and no judge that returned a sheet ran on fable; owed, not run, under nofable', model: 'fable' },
+    { title: 'Sign-off', detail: 'fable high UI sign-off over the winner, only when ui and some judge that returned a sheet ran off fable (a dead fable judge re-run on opus); owed, not run, under nofable', model: 'fable' },
   ],
 }
 // gk-harness:args-v2
@@ -490,11 +490,11 @@ judgeSheets.forEach((sheet, j) => {
 })
 log(`Winner ${winner.key} "${winner.title}" (${winner.angle}) total ${winner.total}; ${grafts.length} graft(s) collected${graftDupes ? `, ${graftDupes} exact duplicate(s) dropped` : ''}`)
 
-// ---- Sign-off: the UI sign-off rule (fable signs off UI work) holds under every dial. A judge
-// that returned a sheet from a fable tier has already given that judgement, so no sign-off agent
-// runs. Otherwise (every such judge was re-run on opus after its fable run died) one fable agent
-// signs off the winner; under nofable it cannot run, and the sign-off is owed. It never changes
-// the winner; the seat acts on mustChange.
+// ---- Sign-off: the UI sign-off rule (fable signs off UI work) holds under every dial. When every
+// judge that returned a sheet ran on a fable tier, the panel's judgement is that sign-off, so no
+// sign-off agent runs. Otherwise (some judge was re-run on opus after its fable run died, and an
+// opus sheet may have carried the winner) one fable agent signs off the winner; under nofable it
+// cannot run, and the sign-off is owed. It never changes the winner; the seat acts on mustChange.
 const SIGN_OFF_SCHEMA = {
   type: 'object',
   properties: {
@@ -505,10 +505,11 @@ const SIGN_OFF_SCHEMA = {
   required: ['approved', 'concerns', 'mustChange'],
 }
 const OWED = 'UI sign-off still owed by Fable'
-const fableJudgeTiers = judgeTiers.filter(t => routeTier(t).model === 'fable')
+// judgeTiers is non-empty here: a run with no judge sheets returned degraded above.
+const panelOnFable = judgeTiers.every(t => routeTier(t).model === 'fable')
 let signOff = null
-if (UI && fableJudgeTiers.length) {
-  signOff = { satisfiedBy: 'judges', tier: fableJudgeTiers[0] }
+if (UI && panelOnFable) {
+  signOff = { satisfiedBy: 'judges', tier: judgeTiers[0] }
   const t = routeTier(signOff.tier)
   log(`UI sign-off: satisfied by the ${t.model} ${t.effort} judge panel; no separate sign-off agent`)
 } else if (UI) {
