@@ -353,6 +353,7 @@ class RoundTripTests(InstallBase):
     def test_round_trip_fresh(self):
         start = snapshot(self.home)
         out, err = self.ok("install")
+        self.assertIn("hooks/gk-harness: %d files copied" % (len(REPO_HOOKS) + 1), out)
         self.assertEqual(err, "")
         first = snapshot(self.home, mtimes=True, skip=())
 
@@ -544,6 +545,27 @@ class PreflightTests(InstallBase):
         with mock.patch.object(paths, "harness_root", lambda: root):
             code, out, err = self.gk("install")
         self.assertStopped(code, err, start, "agents/worker-opus.md", "hooks/gk-seat.py")
+
+    def test_unusable_routes_does_not_block_uninstall_or_status(self):
+        self.ok("install")
+        root = copy_checkout(self.tmp / "checkout")
+        for breakage in ("{bad", None):
+            with self.subTest(breakage=breakage):
+                if breakage is None:
+                    (root / "routes.json").unlink()
+                else:
+                    (root / "routes.json").write_text(breakage, encoding="utf-8")
+                with mock.patch.object(paths, "harness_root", lambda: root):
+                    code, out, err = self.gk("status")
+                    self.assertNotIn("1 .", out)
+                    self.assertIn("owned files: %d hooks," % (len(REPO_HOOKS) + (breakage is not None)), out)
+                    code, out, err = self.gk("install")
+                    self.assertEqual(code, 2)
+                    self.assertIn("routes.json", err)
+        with mock.patch.object(paths, "harness_root", lambda: root):
+            code, out, err = self.gk("uninstall")
+        self.assertEqual(code, 0, err)
+        self.assertFalse((self.cdir / "hooks" / "gk-harness" / "routes.json").exists())
 
     def test_claude_md_that_cannot_be_edited_aborts(self):
         self.fill_box()

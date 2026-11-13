@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import VERSION, claude_md, gen, legacy, manifest, paths, shell
-from .routes import agent_names, load as load_routes
+from .routes import RoutesError, agent_names, load as load_routes
 from . import settings_merge as sm
 
 COMMANDS = ("install", "uninstall", "update", "status", "gen")
@@ -34,7 +34,6 @@ USAGE = ("usage: install [install [%s] | uninstall | update [%s] | status | gen 
          % (RETIRE, RETIRE, CHECK))
 # Sources install will not run without. It deploys every hooks/*.py, agents/worker-*.md and
 # workflows/gk-*.js present; there may be no workflows yet.
-WORKERS = tuple(agent_names(load_routes(Path(__file__).resolve().parent.parent / "routes.json")))
 HOOK_SUPPORT = ("gk_common.py", "gk_model.py", "gk-remote-skip.py")
 OTHER_SOURCES = ("policy.md", "shell/aliases.sh", "shell/aliases.ps1")
 DEPLOYED = (("hooks", "*.py", ("hooks", "gk-harness")),
@@ -126,17 +125,30 @@ def _write_problem(path: Path) -> str | None:
 
 # --- sources --------------------------------------------------------------------------------
 
-def _required() -> list:
+def workers(root: Path) -> list:
+    """The worker agent names, read from the checkout's routes.json (Stop when it is unusable)."""
+    try:
+        return agent_names(load_routes(root / "routes.json"))
+    except RoutesError as e:
+        raise Stop("the gk-harness checkout's routes.json is unusable (%s)" % e) from None
+
+
+def _required(root: Path) -> list:
     scripts = sorted({s for _, _, names in sm.REGISTRATIONS for s in names} | set(HOOK_SUPPORT))
-    return (["hooks/" + s for s in scripts] + ["agents/%s.md" % w for w in WORKERS]
+    return (["hooks/" + s for s in scripts] + ["agents/%s.md" % w for w in workers(root)]
             + list(OTHER_SOURCES) + ["routes.json"])
 
 
 def _check_sources(root: Path) -> None:
-    missing = [rel for rel in _required() if not root.joinpath(*rel.split("/")).is_file()]
+    missing = [rel for rel in _required(root) if not root.joinpath(*rel.split("/")).is_file()]
     if missing:
         raise Stop("the gk-harness checkout %s is missing %s"
                    % (paths.posix(root), ", ".join(missing)))
+
+
+def _group_label(group: str) -> str:
+    """routes.json sits in the repo root but lands beside the hooks, so it counts as hooks."""
+    return "hooks" if group == "." else group
 
 
 def _deployed(root: Path, cdir: Path) -> list:
@@ -148,7 +160,7 @@ def _deployed(root: Path, cdir: Path) -> list:
             continue
         for src in sorted(folder.glob(pattern)):
             if src.is_file():
-                out.append((group, src, cdir.joinpath(*target) / src.name))
+                out.append((_group_label(group), src, cdir.joinpath(*target) / src.name))
     return out
 
 
@@ -165,7 +177,7 @@ class _Step:
         self.backup_rel = backup_rel  # where its backup goes, inside the backup folder
         self.record = record  # (prior, sha256) -> the journal action
         self.note = note
-        self.group = group  # "hooks", "agents" or "workflows" (copied files), "rc", or None
+        self.group = group  # "hooks" (routes.json too), "agents" or "workflows" (copied files), "rc", or None
 
 
 def _rel(path: Path, cdir: Path) -> str:
@@ -864,7 +876,7 @@ def status() -> int:
     files = _deployed(root, cdir)
     print("owned files: %s" % ", ".join(
         "%d %s" % (sum(1 for g, _, _ in files if g == group), group)
-        for group, _, _ in DEPLOYED))
+        for group in dict.fromkeys(_group_label(g) for g, _, _ in DEPLOYED)))
     try:
         journal = manifest.load(paths.manifest_path())
     except manifest.ManifestError as e:
@@ -910,7 +922,7 @@ def _forgiving_output() -> None:
 
 
 def _gen(check: bool) -> int:
-    root = Path(__file__).resolve().parent.parent
+    root = paths.harness_root()
     if check:
         out = gen.stale(root)
         for rel in out:
