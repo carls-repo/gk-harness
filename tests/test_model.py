@@ -303,6 +303,31 @@ class ModelTest(unittest.TestCase):
             self.assertNotIn("Mode ", card)  # no CLAUDE.md vocabulary: modes or profiles
             self.assertNotIn("profile", card)
 
+    def test_seat_tier_maps_to_the_nearest_tier_of_the_model(self):
+        # An effort outside routes.json's tiers maps to the highest tier of the same model at or
+        # below it, else the lowest tier of that model (final review I2).
+        routes = json.loads((Path(__file__).resolve().parents[1] / "routes.json").read_text(encoding="utf-8"))
+        t = gk_model.seat_tier
+        cases = [
+            ("claude-fable-5-2", "xhigh", "fable-high"),
+            ("claude-fable-5-2", "max", "fable-high"),
+            ("claude-fable-5-2", "low", "fable-medium"),
+            ("claude-fable-5-2", "medium", "fable-medium"),
+            ("claude-opus-5-5", "max", "opus-xhigh"),
+            ("claude-opus-5-5", "low", "opus-medium"),
+            ("claude-opus-5-5", "xhigh", "opus-xhigh"),
+            ("claude-sonnet-5-5", "xhigh", "sonnet-high"),
+            ("claude-haiku-5-5", "max", "haiku-medium"),
+        ]
+        for model, effort, want in cases:
+            self.assertEqual(t(model, effort, routes), want, (model, effort))
+            self.assertIn(t(model, effort, routes), routes["tiers"])
+        # The seat's default effort is mapped the same way.
+        odd = dict(routes, seat=dict(routes["seat"], effort={"opus": "max"}))
+        self.assertEqual(t("claude-opus-5-5", None, odd), "opus-xhigh")
+        # Without tiers for the model there is nothing to map to: the name is kept.
+        self.assertEqual(t("claude-opus-5-5", "max", dict(routes, tiers={})), "opus-max")
+
     # -- the seat for a Workflow call -------------------------------------------------
 
     def test_resolve_seat_order(self):

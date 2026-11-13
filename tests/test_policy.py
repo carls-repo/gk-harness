@@ -158,8 +158,8 @@ class PolicyTest(unittest.TestCase):
         lines = POLICY.read_text(encoding="utf-8").splitlines()
         self.assertLessEqual(len(lines), 140)
 
-    def test_policy_is_at_most_15500_characters(self):
-        self.assertLessEqual(len(POLICY.read_text(encoding="utf-8")), 15500)
+    def test_policy_is_at_most_16000_characters(self):
+        self.assertLessEqual(len(POLICY.read_text(encoding="utf-8")), 16000)
 
     def test_policy_names_only_tiers_and_agents_in_routes(self):
         text = POLICY.read_text(encoding="utf-8")

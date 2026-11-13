@@ -128,15 +128,17 @@ def _tiers_used(routes: dict, stages: list) -> list:
 
 
 def routes_data(routes: dict, workflow: str) -> dict:
-    """The ROUTES object of the workflow's block: {version, tiers, stages}. A tier carries its
-    model alias, effort and cap = [model rank, effort position], the capability order."""
+    """The ROUTES object of the workflow's block: {version, efforts, tiers, stages}. A tier
+    carries its model alias, effort and cap = [model rank, effort position], the capability
+    order; efforts is routes.json's effort order, so the helper can map a caller's
+    <model>-<effort> that is not a tier to the nearest tier."""
     stages = workflow_stages(routes, workflow)
     tiers = {}
     for name in _tiers_used(routes, stages):
         t = rt.tier(routes, name)
         tiers[name] = {"model": t["model"], "effort": t["effort"],
                        "cap": list(rt.capability(routes, name))}
-    return {"version": routes["version"], "tiers": tiers,
+    return {"version": routes["version"], "efforts": list(routes["efforts"]), "tiers": tiers,
             "stages": {k: routes["stages"][k] for k in stages}}
 
 
@@ -154,7 +156,8 @@ def render_routes_block(routes: dict, workflow: str) -> str:
         rows = ["    %s: %s" % (dump(k), dump(v)) for k, v in data[name].items()]
         return "  %s: {\n%s\n  }" % (dump(name), ",\n".join(rows))
 
-    data = "{\n  \"version\": %s,\n%s,\n%s\n}" % (dump(data["version"]), section("tiers"), section("stages"))
+    data = "{\n  \"version\": %s,\n  \"efforts\": %s,\n%s,\n%s\n}" % (
+        dump(data["version"]), dump(data["efforts"]), section("tiers"), section("stages"))
     helper = _helper()
     if not helper.endswith("\n"):
         helper += "\n"

@@ -76,11 +76,20 @@ const judgeRouteLogs = (logs) => logs.filter((l) => /^(Judge: \w+ \w+ over|Secur
 // `expect(oldCalls)` gives the neutral calls a case expects when they legitimately differ.
 const step = (calls) => calls.map((c) => [c.label, c.phase])
 const RETIRED = /^profile is retired; routes come from routes\.json v\d+$/
-const behaviourLog = (logs) => logs.filter((l) => !l.startsWith('Profile:') && !l.startsWith('Project:') && !RETIRED.test(l) && !judgeRouteLogs([l]).length)
+// The neutral script's additions to the log and the result: the owed Fable sign-off (its line,
+// and fableSignOffOwed) and deadFinders (the golden only logged them). assertSameReview checks
+// each against the golden's own facts.
+const OWED_LOG = /^Fable sign-off owed: /
+const behaviourLog = (logs) => logs.filter((l) => !l.startsWith('Profile:') && !l.startsWith('Project:') && !RETIRED.test(l) && !OWED_LOG.test(l) && !judgeRouteLogs([l]).length)
 const withoutRouting = (r) => {
   if (!r || typeof r !== 'object') return r
-  const { routing, ...rest } = r
+  const { routing, deadFinders, fableSignOffOwed, ...rest } = r
   return rest
+}
+// The golden's "dimension(s) NOT covered" line, as the list it names.
+const goldenDeadFinders = (logs) => {
+  const m = logs.map((l) => /^Find: \d+ finder\(s\) returned nothing; dimension\(s\) NOT covered: (.*)$/.exec(l)).find(Boolean)
+  return m ? m[1].split(', ') : []
 }
 const counts = (r) => ({ files: r.scope.files.length, confirmed: r.confirmed.length, rejected: r.rejected.length, killed: r.killedByRefuters.length, dedupDropped: r.dedupDropped, unjudged: r.unjudged.length })
 async function assertSameReview(name, args, opts, expect = (calls) => step(calls)) {
@@ -91,6 +100,11 @@ async function assertSameReview(name, args, opts, expect = (calls) => step(calls
   assert.equal(judgeRouteLogs(now.logs).length, judgeRouteLogs(old.logs).some((l) => l.startsWith('Judge:')) ? 1 : 0, `${name}: one judge line when the judge runs`)
   assert.ok(now.result && now.result.routing, `${name}: the result carries routing`)
   assert.deepEqual(withoutRouting(now.result), old.result, `${name}: the result`)
+  assert.deepEqual(now.result.deadFinders, goldenDeadFinders(old.logs), `${name}: deadFinders`)
+  // No author or seat here, so a judge on fable is a sensitive one: it is owed when it re-ran.
+  const reran = now.calls.filter((c) => c.label === 'judge').map((c) => c.model).join() === 'fable,opus'
+  assert.equal(now.result.fableSignOffOwed, reran, `${name}: fableSignOffOwed`)
+  assert.equal(now.logs.filter((l) => OWED_LOG.test(l)).length, reran ? 1 : 0, `${name}: the owed line`)
   const generic = await runWorkflow(neutral('gk-review.js'), { ...structuredClone(args), target: 'main..HEAD', project: { root: '/tmp/repo' } }, reviewResponders(opts))
   assert.deepEqual(generic.calls.map((c) => c.phase), expect(old.calls).map((c) => c[1]), `${name} (generic): the stages`)
   assert.deepEqual(counts(generic.result), counts(old.result), `${name} (generic): the result's counts`)
@@ -732,7 +746,7 @@ const goldenLogInNeutralWords = (l) => l
   .replace(/; page roots: (.*)$/, (m, xs) => `; sign-off triggers met: ${xs === 'none' ? 'none' : `scroll-audit: ${xs}`}`)
   .replace(/^Implementers reported page-root changes: (.*) — added to page roots$/, (m, xs) => `Implementers reported sign-off triggers: ${asScroll(xs)} — added`)
 const buildBehaviourLog = (logs) => logs
-  .filter((l) => !l.startsWith('Profile:') && !l.startsWith('Project:') && !BUILD_RETIRED.test(l) && !l.startsWith('Judge on ') && !l.startsWith('Sign-off for the seat: '))
+  .filter((l) => !l.startsWith('Profile:') && !l.startsWith('Project:') && !BUILD_RETIRED.test(l) && !l.startsWith('Judge on ') && !l.startsWith('Sign-off for the seat: ') && !OWED_LOG.test(l))
   .map(waveLine)
 const scrollList = (pieces) => (pieces.length ? [{ key: 'scroll-audit', pieces }] : [])
 const goldenResultInNeutralWords = (r) => {
@@ -741,7 +755,7 @@ const goldenResultInNeutralWords = (r) => {
   return { planCheck: { ...plan, triggered: scrollList(pageRootPieces) }, pieces: r.pieces.map(neutralReport), check: r.check, reviews: r.reviews, judge: { ...judge, signOffRequired: scrollList(scrollAuditRequired) } }
 }
 const buildBehaviour = (r) => {
-  const { routing, seatMustRerun, seatMustRerunIn, classDisagreements, failed, signOff, ...rest } = r
+  const { routing, seatMustRerun, seatMustRerunIn, classDisagreements, failed, signOff, fableSignOffOwed, ...rest } = r
   return { ...rest, check: 'exitCode' in rest.check ? { passed: rest.check.passed } : rest.check }
 }
 const afterLast = (calls, phase, extra) => {
@@ -772,6 +786,9 @@ async function assertSameBuild(name, args, opts, expect = (calls) => step(calls)
   assert.deepEqual(now.result.seatMustRerunIn, now.result.seatMustRerun ? goldenWhere.split(', ') : null, `${name}: seatMustRerunIn`)
   assert.deepEqual(now.result.failed.map((f) => f.name), names.filter((n) => !old.result.pieces.some((p) => p.name === n)), `${name}: failed`)
   assert.deepEqual(now.result.classDisagreements, [], `${name}: classDisagreements`)
+  // A ui judge (fable high) that re-ran on opus owes the Fable sign-off; any other judge does not.
+  const judges = now.calls.filter((c) => c.label === 'judge').map((c) => `${c.model}-${c.effort}`).join()
+  assert.equal(now.result.fableSignOffOwed, judges === 'fable-high,opus-xhigh', `${name}: fableSignOffOwed`)
   const roots = old.result.planCheck.pageRootPieces
   const signOff = [{ key: 'changelog', seat: CHANGELOG_CHECK.seat, pieces: names }, ...(roots.length ? [{ key: 'scroll-audit', seat: SCROLL_CHECK.seat, pieces: roots }] : [])]
   assert.deepEqual(now.result.signOff, signOff, `${name}: signOff`)

@@ -4,7 +4,9 @@
 //     1. the stage's tier, or its byClass[ctx.cls || 'judgement'];
 //     2. a `when` condition whose ctx flag is true sets the tier (the highest, if several);
 //     3. atLeast: the highest of the tier, ctx.implementer and ROUTE_FLOOR;
-//     4. authorFloor: ctx.author, when it is above ROUTE_FLOOR and above the tier;
+//     4. authorFloor: ctx.author, when it is above ROUTE_FLOOR and above the tier; an author
+//        that is not a tier but names a model and an effort maps to that model's nearest
+//        tier (routeNearest: fable-max is fable-high, fable-low fable-medium), logged;
 //     5. the fable dial puts an apex stage on ROUTE_APEX (under nofable too: rule 6 then moves
 //        it to its noFable tier, so nofable wins over fable; every apex stage has one);
 //     6. the nofable dial moves a Fable tier to the stage's noFable (its class entry for a
@@ -55,6 +57,19 @@ const routeKnown = (name, what) => {
   log(`routes: ${what} ${JSON.stringify(name)} is not a tier this workflow knows; ignored`)
   return null
 }
+// The tier a caller's name stands for: the name when it is a tier; when it is <model>-<effort>
+// with an effort in ROUTES.efforts, the highest tier of that model at or below that effort, else
+// that model's lowest tier; otherwise null.
+const routeNearest = (name) => {
+  if (typeof name !== 'string') return null
+  if (routeOwn(ROUTES.tiers, name)) return name
+  const m = /^([a-z]+)-([a-z]+)$/.exec(name)
+  const at = m && Array.isArray(ROUTES.efforts) ? ROUTES.efforts.indexOf(m[2]) + 1 : 0
+  if (!at) return null
+  const own = Object.keys(ROUTES.tiers).filter(k => ROUTES.tiers[k].model === m[1]).sort((a, b) => ROUTES.tiers[a].cap[1] - ROUTES.tiers[b].cap[1])
+  const below = own.filter(k => ROUTES.tiers[k].cap[1] <= at)
+  return below.length ? below[below.length - 1] : own.length ? own[0] : null
+}
 function routeStage(stage) {
   const s = routeOwn(ROUTES.stages, stage)
   if (!s) throw new Error(`routes: unknown stage ${JSON.stringify(stage)}`)
@@ -78,7 +93,9 @@ function routeOf(stage, ctx = {}) {
     tier = routeHigher(routeHigher(tier, ROUTE_FLOOR), impl || tier)
   }
   if (s.authorFloor === true) {
-    const author = routeKnown(c.author, 'ctx.author')
+    const author = routeNearest(c.author)
+    if (author === null) routeKnown(c.author, 'ctx.author')
+    else if (author !== c.author) log(`routes: ctx.author ${JSON.stringify(c.author)} is not a tier; the nearest ${author} is used`)
     if (author && routeAbove(author, ROUTE_FLOOR)) tier = routeHigher(tier, author)
   }
   const nofable = DIALS.includes('nofable')

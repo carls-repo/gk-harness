@@ -1,7 +1,7 @@
 export const meta = {
   name: 'gk-build',
   description: 'Build a multi-file change from a plan split into pieces with disjoint file sets: plan check, wave-ordered implement, project check, per-piece review, judge',
-  whenToUse: 'Use when a written plan/spec is already decomposed into pieces that each own a disjoint set of files. Requires args {plan: "<path to the plan/spec file>" (REQUIRED), pieces: [{name: "<unique piece name>", files: ["src/...", "tests/..."], brief: "<what this piece must do>", tests?: "<test file path (the piece owns it, in any language) or test command>", class?: "spec"|"judgement"|"hard"|"security" (default "judgement": the class picks the implementer\'s tier from routes.json; hard: true is retired, read as class "hard" for one version)}] (REQUIRED, non-empty), check?: "<project-wide check command; default the project\'s check, and with neither the check is skipped>", ui?: true|false, dials?: string[] — routing dials: "fable" puts the plan check and the judge on fable high, "nofable" moves every fable stage to its noFable tier (each stage\'s model and effort come from routes.json; a plan check, review or judge that dies on fable runs once more on opus xhigh; an implementer that dies is returned unfinished, never re-run), project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases), check (the default check command), packages (folders relative to the top level: the check runs from each one that holds a file some piece owns, and passes without running when none does; without packages it runs once from the top level; implementers run tests from the owning package, else from the top level) and signOff ([{key, seat, sharedFile?, trigger?, paths?, uiJudge?, implementer?, reviewer?}] — the checks the seat runs before sign-off: each implementer may add its one line to each sharedFile, implementer texts go into the implement brief and reviewer texts onto the reviewers\' list, a trigger names the work that needs its check, paths (regular expressions) meet the trigger for every piece that owns a file whose top-level-relative path matches one, and a check that applies (no trigger, or a met one) and sets uiJudge routes the judge to Fable); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. The plan check confirms each piece\'s class; a disagreement is returned in classDisagreements, never applied. Paths are relative to the repository\'s top level. Edits land uncommitted in the working tree; returns {planCheck, pieces, failed: [{name, class, stage, tier, status: "unfinished"}], check, seatMustRerun, seatMustRerunIn, reviews, judge, classDisagreements: [{name, given, proposed, reason}], signOff: [{key, seat, pieces}], routing: {routes, dials, offTier}} — check is {passed, ran, exitCode, tail} when it ran (passed is exitCode 0, whatever the agent says), {passed: null, skipped: true, output} when there is no check command, {passed: false, output} when its agent returned nothing; seatMustRerun is the check command (null when no check ran) and seatMustRerunIn the package folders the check ran from, in its order (null without packages, meaning the top level, and null when no check ran). The seat re-runs seatMustRerun itself before sign-off, from each folder in seatMustRerunIn (or the top level when it is null), applying the project\'s Check-stage guards; a failed piece is re-run by the seat on the next rung; a sign-off check with no trigger lists every piece, a triggered one the pieces that met it — and the calling session commits, runs each signOff entry\'s seat check for its pieces, and writes the summary.',
+  whenToUse: 'Use when a written plan/spec is already decomposed into pieces that each own a disjoint set of files. Requires args {plan: "<path to the plan/spec file>" (REQUIRED), pieces: [{name: "<unique piece name>", files: ["src/...", "tests/..."], brief: "<what this piece must do>", tests?: "<test file path (the piece owns it, in any language) or test command>", class?: "spec"|"judgement"|"hard"|"security" (default "judgement": the class picks the implementer\'s tier from routes.json; hard: true is retired, read as class "hard" for one version)}] (REQUIRED, non-empty), check?: "<project-wide check command; default the project\'s check, and with neither the check is skipped>", ui?: true|false, dials?: string[] — routing dials: "fable" puts the plan check and the judge on fable high, "nofable" moves every fable stage to its noFable tier (each stage\'s model and effort come from routes.json; a plan check, review or judge that dies on fable runs once more on opus xhigh; an implementer that dies is returned unfinished, never re-run), project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases), check (the default check command), packages (folders relative to the top level: the check runs from each one that holds a file some piece owns, and passes without running when none does; without packages it runs once from the top level; implementers run tests from the owning package, else from the top level) and signOff ([{key, seat, sharedFile?, trigger?, paths?, uiJudge?, implementer?, reviewer?}] — the checks the seat runs before sign-off: each implementer may add its one line to each sharedFile, implementer texts go into the implement brief and reviewer texts onto the reviewers\' list, a trigger names the work that needs its check, paths (regular expressions) meet the trigger for every piece that owns a file whose top-level-relative path matches one, and a check that applies (no trigger, or a met one) and sets uiJudge routes the judge to Fable); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. The plan check confirms each piece\'s class; a disagreement is returned in classDisagreements, never applied. Paths are relative to the repository\'s top level. Edits land uncommitted in the working tree; returns {planCheck, pieces, failed: [{name, class, stage, tier, status: "unfinished"}], check, seatMustRerun, seatMustRerunIn, reviews, judge, classDisagreements: [{name, given, proposed, reason}], signOff: [{key, seat, pieces}], fableSignOffOwed: boolean (true when the ui judge died on fable and was re-run on opus: the Fable sign-off is still owed), routing: {routes, dials, offTier}} — judge.ship is false whenever a piece is unfinished or unreviewed or the check failed, with a "workflow:" blocker per cause; check is {passed, ran, exitCode, tail} when it ran (passed is exitCode 0, whatever the agent says), {passed: null, skipped: true, output} when there is no check command, {passed: false, output} when its agent returned nothing; seatMustRerun is the check command (null when no check ran) and seatMustRerunIn the package folders the check ran from, in its order (null without packages, meaning the top level, and null when no check ran). The seat re-runs seatMustRerun itself before sign-off, from each folder in seatMustRerunIn (or the top level when it is null), applying the project\'s Check-stage guards; a failed piece is re-run by the seat on the next rung; a sign-off check with no trigger lists every piece, a triggered one the pieces that met it — and the calling session commits, runs each signOff entry\'s seat check for its pieces, and writes the summary.',
   phases: [
     { title: 'Plan check', detail: 'one agent verifies the decomposition, orders pieces into waves, confirms each piece\'s class and names the pieces that meet each project sign-off trigger (fable medium; opus xhigh under nofable)', model: 'fable' },
     { title: 'Implement', detail: 'waves run in sequence; pieces within a wave run in parallel, one agent per piece on its class tier (spec sonnet medium, judgement opus medium, hard and security fable medium, opus high under nofable); a piece whose agent dies comes back unfinished', model: 'opus' },
@@ -138,6 +138,7 @@ const projectRules = (stage) => {
 // <gk-routes v2> generated by gkh gen from routes.json v2; do not edit
 const ROUTES = {
   "version": 2,
+  "efforts": ["low", "medium", "high", "xhigh", "max"],
   "tiers": {
     "haiku-low": {"model": "haiku", "effort": "low", "cap": [1, 1]},
     "sonnet-medium": {"model": "sonnet", "effort": "medium", "cap": [2, 2]},
@@ -161,7 +162,9 @@ const ROUTES = {
 //     1. the stage's tier, or its byClass[ctx.cls || 'judgement'];
 //     2. a `when` condition whose ctx flag is true sets the tier (the highest, if several);
 //     3. atLeast: the highest of the tier, ctx.implementer and ROUTE_FLOOR;
-//     4. authorFloor: ctx.author, when it is above ROUTE_FLOOR and above the tier;
+//     4. authorFloor: ctx.author, when it is above ROUTE_FLOOR and above the tier; an author
+//        that is not a tier but names a model and an effort maps to that model's nearest
+//        tier (routeNearest: fable-max is fable-high, fable-low fable-medium), logged;
 //     5. the fable dial puts an apex stage on ROUTE_APEX (under nofable too: rule 6 then moves
 //        it to its noFable tier, so nofable wins over fable; every apex stage has one);
 //     6. the nofable dial moves a Fable tier to the stage's noFable (its class entry for a
@@ -212,6 +215,19 @@ const routeKnown = (name, what) => {
   log(`routes: ${what} ${JSON.stringify(name)} is not a tier this workflow knows; ignored`)
   return null
 }
+// The tier a caller's name stands for: the name when it is a tier; when it is <model>-<effort>
+// with an effort in ROUTES.efforts, the highest tier of that model at or below that effort, else
+// that model's lowest tier; otherwise null.
+const routeNearest = (name) => {
+  if (typeof name !== 'string') return null
+  if (routeOwn(ROUTES.tiers, name)) return name
+  const m = /^([a-z]+)-([a-z]+)$/.exec(name)
+  const at = m && Array.isArray(ROUTES.efforts) ? ROUTES.efforts.indexOf(m[2]) + 1 : 0
+  if (!at) return null
+  const own = Object.keys(ROUTES.tiers).filter(k => ROUTES.tiers[k].model === m[1]).sort((a, b) => ROUTES.tiers[a].cap[1] - ROUTES.tiers[b].cap[1])
+  const below = own.filter(k => ROUTES.tiers[k].cap[1] <= at)
+  return below.length ? below[below.length - 1] : own.length ? own[0] : null
+}
 function routeStage(stage) {
   const s = routeOwn(ROUTES.stages, stage)
   if (!s) throw new Error(`routes: unknown stage ${JSON.stringify(stage)}`)
@@ -235,7 +251,9 @@ function routeOf(stage, ctx = {}) {
     tier = routeHigher(routeHigher(tier, ROUTE_FLOOR), impl || tier)
   }
   if (s.authorFloor === true) {
-    const author = routeKnown(c.author, 'ctx.author')
+    const author = routeNearest(c.author)
+    if (author === null) routeKnown(c.author, 'ctx.author')
+    else if (author !== c.author) log(`routes: ctx.author ${JSON.stringify(c.author)} is not a tier; the nearest ${author} is used`)
     if (author && routeAbove(author, ROUTE_FLOOR)) tier = routeHigher(tier, author)
   }
   const nofable = DIALS.includes('nofable')
@@ -690,6 +708,27 @@ Weigh each review finding yourself — spot-check the diff (\`git diff -- <file>
   },
 )
 log(`Judge: ${judge ? (judge.ship ? 'SHIP' : `HOLD — rework ${judge.reworkPieces.join(', ') || 'none named'}`) : 'returned nothing'}`)
+// A ui judge routed to fable that died there and was re-run on opus (onFail) has not given the
+// Fable sign-off: the seat still owes it, whether or not the re-run answered.
+const FABLE_SIGN_OFF_OWED = JUDGE_CTX.ui && judgeRoute.model === 'fable' && routingResult().offTier.some(o => o.stage === 'gk-build.judge' && o.reason === 'onFail')
+if (FABLE_SIGN_OFF_OWED) {
+  const rerun = routeTier(ROUTES.stages['gk-build.judge'].noFable)
+  log(`Fable sign-off owed: the ${judgeRoute.model} ${judgeRoute.effort} judge (ui work) died and was re-run on ${rerun.model} ${rerun.effort}`)
+}
+// The verdict follows the workflow's own facts: a judge that says ship beside an unfinished
+// piece, an unreviewed piece or a failed check (a dead check agent counts) is overruled, with a
+// blocker per cause after its own. A skipped check is not a failure; a dead judge keeps its
+// stand-in below.
+const CHECK_OUT = check || { passed: false, output: 'check agent returned nothing' }
+const FACT_BLOCKERS = [
+  ...(FAILED.length ? [`workflow: unfinished piece(s), with no implementation result: ${FAILED.map(f => f.name).join(', ')}`] : []),
+  ...(unreviewed.length ? [`workflow: unreviewed piece(s): ${unreviewed.join(', ')}`] : []),
+  ...(CHECK_OUT.passed === false ? [`workflow: the project check failed (${Number.isInteger(CHECK_OUT.exitCode) ? `exit code ${CHECK_OUT.exitCode}` : 'no exit code: the check agent returned nothing'})`] : []),
+]
+const JUDGE_OUT = judge && judge.ship === true && FACT_BLOCKERS.length
+  ? { ...judge, ship: false, blockers: [...(Array.isArray(judge.blockers) ? judge.blockers : []), ...FACT_BLOCKERS] }
+  : judge
+if (JUDGE_OUT !== judge) log(`Judge said ship; overruled by the workflow's own facts: ${FACT_BLOCKERS.length} blocker(s) added`)
 // The judge's list joins the triggers already met; a dead judge's stand-in lists every one met.
 if (judge && TRIGGERS.length) {
   const strays = addMet(judge.signOffRequired)
@@ -705,12 +744,13 @@ return {
   planCheck: { ...planCheck, ...(TRIGGERS.length ? { triggered: MET } : {}) },
   pieces: implemented,
   failed: FAILED,
-  check: check || { passed: false, output: 'check agent returned nothing' },
+  check: CHECK_OUT,
   seatMustRerun: SEAT_MUST_RERUN,
   seatMustRerunIn: SEAT_MUST_RERUN_IN,
   reviews,
-  judge: judge || { ship: false, blockers: ['judge agent returned nothing'], reworkPieces: [], ...(TRIGGERS.length ? { signOffRequired: MET } : {}) },
+  judge: JUDGE_OUT || { ship: false, blockers: ['judge agent returned nothing'], reworkPieces: [], ...(TRIGGERS.length ? { signOffRequired: MET } : {}) },
   classDisagreements,
   signOff: SIGN_OFF_RESULT,
+  fableSignOffOwed: FABLE_SIGN_OFF_OWED,
   routing: routingResult(),
 }

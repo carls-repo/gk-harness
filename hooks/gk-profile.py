@@ -267,6 +267,11 @@ def _inject_v2(name: str, args: dict, data: dict, top: Path | None, warnings: li
             changed = True
     if gk_common.fable_off():
         dials = args.get("dials")
+        if isinstance(dials, str):
+            # One dial typed as a string is a one-element list; any other non-list is left for
+            # the script to reject.
+            dials = args["dials"] = [dials]
+            changed = True
         if dials is None:
             args["dials"] = ["nofable"]
             changed = True

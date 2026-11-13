@@ -65,6 +65,7 @@ test('routes block present and current: one block per gk workflow (none in gk-se
     // The block runs on its own, and its data is this workflow's slice of routes.json.
     const { ROUTES } = evalBlock(blk.text)
     assert.equal(ROUTES.version, routes.version)
+    assert.deepEqual(ROUTES.efforts, routes.efforts, `${f}: the block carries routes.json's effort order`)
     assert.deepEqual(Object.keys(ROUTES.stages), stagesOf(wf), `${f}: the block holds this workflow's stages, in order`)
     for (const k of stagesOf(wf)) assert.deepEqual(ROUTES.stages[k], routes.stages[k], `${f}: stage ${k}`)
     for (const [name, t] of Object.entries(ROUTES.tiers)) {
@@ -119,6 +120,7 @@ test('the marker stays directly after meta, within 16 KB', () => {
 const T = (model, effort, rank, e) => ({ model, effort, cap: [rank, e] })
 const FIXTURE = {
   version: 9,
+  efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   tiers: {
     'sonnet-medium': T('sonnet', 'medium', 2, 2),
     'opus-medium': T('opus', 'medium', 3, 2),
@@ -186,6 +188,23 @@ test('routeOf rule 4: authorFloor lifts to an author above opus-high', () => {
   assert.equal(routeOf('wf.judge', { author: 'opus-medium' }).tier, 'opus-high')
   assert.equal(routeOf('wf.judge', { sensitive: true, author: 'fable-medium' }).tier, 'fable-high')
   assert.equal(routeOf('wf.propose', { author: 'fable-high' }).tier, 'opus-high')
+})
+
+test('routeOf rule 4: an author effort outside the tiers maps to the nearest tier of its model, and the mapping is logged', () => {
+  const { routeOf, logs } = helper()
+  for (const [author, want] of [['fable-xhigh', 'fable-high'], ['fable-max', 'fable-high'], ['fable-low', 'fable-medium'], ['opus-max', 'opus-xhigh']]) {
+    logs.length = 0
+    assert.equal(routeOf('wf.judge', { author }).tier, want, author)
+    assert.deepEqual(logs, [`routes: ctx.author ${JSON.stringify(author)} is not a tier; the nearest ${want} is used`], author)
+  }
+  // opus-low maps to opus-medium, which is below the floor: the floor stays.
+  assert.equal(routeOf('wf.judge', { author: 'opus-low' }).tier, 'opus-high')
+  // A model with no tier, an effort that is not an effort, or no model at all names nothing.
+  for (const author of ['haiku-max', 'fable-turbo', 'fable', 'max']) {
+    logs.length = 0
+    assert.equal(routeOf('wf.judge', { author }).tier, 'opus-high', author)
+    assert.deepEqual(logs, [`routes: ctx.author ${JSON.stringify(author)} is not a tier this workflow knows; ignored`], author)
+  }
 })
 
 test('routeOf rule 5: the fable dial puts an apex stage on fable-high', () => {
@@ -469,6 +488,21 @@ test('dead critic re-runs on opus high: under the fable dial gk-research\'s crit
   assert.deepEqual(result.routing.offTier, [{ stage: 'gk-research.critic', label: 'critic', tier: 'opus-high', reason: 'onFail' }])
 })
 
+test('dead critic is unavailable, gk-research: a critic dead after its re-run comes back with unavailable true, not as nothing missing', async () => {
+  const replies = fullReplies['gk-research']()
+  replies.pop()
+  replies.push({ match: /^critic$/, reply: () => null })
+  for (const dials of [[], ['fable']]) {
+    const { calls, result } = await runFull('gk-research', { dials }, replies)
+    assert.equal(calls.filter((c) => c.label === 'critic').length, dials.length ? 2 : 1, JSON.stringify(dials))
+    assert.equal(result.critic.unavailable, true, JSON.stringify(dials))
+    assert.deepEqual(result.critic.missing, [])
+  }
+  // A critic that answers has no unavailable field.
+  const live = await runFull('gk-research')
+  assert.equal('unavailable' in live.result.critic, false)
+})
+
 test('retired args are accepted: profile and escalate run, are ignored, and log the retired line once; no Profile: line', async () => {
   const retired = `profile is retired; routes come from routes.json v${routes.version}`
   for (const wf of ['gk-research', 'gk-diagnose', 'gk-review', 'gk-build', 'gk-design']) {
@@ -580,6 +614,22 @@ test('judge floor, gk-review: an author or seat that names no tier is logged and
     assert.deepEqual(calls.filter((c) => c.label === 'judge').map(tierName), ['opus-high'], `${k} ${JSON.stringify(v)}`)
     assert.deepEqual(logs.filter((l) => l.startsWith('routes: ctx.author')), [`routes: ctx.author ${JSON.stringify(v)} is not a tier this workflow knows; ignored`], `${k} ${JSON.stringify(v)}: logged once`)
   }
+})
+
+test('judge floor, gk-review: an author effort outside the tiers maps to its model\'s nearest tier; an author naming no tier gives way to the seat', async () => {
+  const fableMax = await runReview({ author: 'fable-max' })
+  assert.deepEqual(fableMax.calls.filter((c) => c.label === 'judge').map(tierName), ['fable-high'])
+  assert.equal(fableMax.logs.filter((l) => l.startsWith('routes: ctx.author')).length, 1, fableMax.logs.join('\n'))
+  // The hook's seat is mapped too, so a seat of fable-xhigh is already fable-high; a caller's seat
+  // that is not a tier maps here the same way.
+  const seatMax = await runReview({ seat: 'fable-xhigh' })
+  assert.deepEqual(seatMax.calls.filter((c) => c.label === 'judge').map(tierName), ['fable-high'])
+  const bogus = await runReview({ author: 'bogus', seat: 'fable-medium' })
+  assert.deepEqual(bogus.calls.filter((c) => c.label === 'judge').map(tierName), ['fable-medium'])
+  assert.ok(bogus.logs.includes('Judge floor: args.author "bogus" names no tier; the seat\'s tier is used instead'), bogus.logs.join('\n'))
+  // An author that names a tier still wins over the seat.
+  const both = await runReview({ author: 'opus-max', seat: 'fable-medium' })
+  assert.deepEqual(both.calls.filter((c) => c.label === 'judge').map(tierName), ['opus-xhigh'])
 })
 
 test('changedPaths, gk-review: an array of strings or absent; anything else stops the run before any agent', async () => {
@@ -739,6 +789,46 @@ test('dead fable implementer is unfinished, gk-build: no re-run, the piece comes
   assert.deepEqual(fine.result.failed, [])
 })
 
+test('ship follows the facts, gk-build: a judge that says ship beside an unfinished piece, an unreviewed piece or a failed check is overruled, with a blocker for each cause', async () => {
+  const pieces = [
+    { name: 'h', class: 'hard', files: ['src/h.ts'], brief: 'Add h.' },
+    { name: 'j', files: ['src/j.ts'], brief: 'Add j.' },
+  ]
+  const ship = { match: /^judge$/, reply: () => ({ ship: true, blockers: [], reworkPieces: [] }) }
+  const failedCheck = { match: /^check$/, reply: () => ({ ran: 'make check', exitCode: 1, tail: 'FAIL' }) }
+  const deadImpl = { match: /^impl:h$/, reply: () => null }
+  // The harness's minimal check reply is exit code 1; a passing check says 0.
+  const passed = { match: /^check$/, reply: () => ({ ran: 'make check', exitCode: 0, tail: 'ok' }) }
+  const both = await runBuild({ pieces }, [buildPlanReply([['h', 'j']]), deadImpl, failedCheck, ship])
+  assert.equal(both.result.judge.ship, false)
+  assert.deepEqual(both.result.judge.blockers, [
+    'workflow: unfinished piece(s), with no implementation result: h',
+    'workflow: the project check failed (exit code 1)',
+  ])
+  assert.ok(both.logs.includes('Judge said ship; overruled by the workflow\'s own facts: 2 blocker(s) added'), both.logs.join('\n'))
+  // A reviewer that dies (j's review is on opus-high, so it is not re-run) leaves j unreviewed.
+  const unrev = await runBuild({ pieces }, [buildPlanReply([['h', 'j']]), passed, { match: /^review:j$/, reply: () => null }, ship])
+  assert.equal(unrev.result.judge.ship, false)
+  assert.deepEqual(unrev.result.judge.blockers, ['workflow: unreviewed piece(s): j'])
+  // The judge's own blockers stay, first.
+  const own = await runBuild({ pieces }, [buildPlanReply([['h', 'j']]), failedCheck, { match: /^judge$/, reply: () => ({ ship: true, blockers: ['mine'], reworkPieces: [] }) }])
+  assert.deepEqual(own.result.judge.blockers, ['mine', 'workflow: the project check failed (exit code 1)'])
+  // A dead check agent is a failed check.
+  const deadCheck = await runBuild({ pieces }, [buildPlanReply([['h', 'j']]), { match: /^check$/, reply: () => null }, ship])
+  assert.equal(deadCheck.result.judge.ship, false)
+  assert.deepEqual(deadCheck.result.judge.blockers, ['workflow: the project check failed (no exit code: the check agent returned nothing)'])
+  // Nothing wrong: the judge's ship stands. A skipped check (no command) is not a failure.
+  const fine = await runBuild({ pieces }, [buildPlanReply([['h', 'j']]), passed, ship])
+  assert.deepEqual(fine.result.judge, { ship: true, blockers: [], reworkPieces: [] })
+  const skipped = await runBuild({ pieces, check: undefined }, [buildPlanReply([['h', 'j']]), ship])
+  assert.equal(skipped.result.judge.ship, true)
+  // A judge that says no ship is left as it is; a dead judge keeps its stand-in.
+  const hold = await runBuild({ pieces }, [buildPlanReply([['h', 'j']]), deadImpl, { match: /^judge$/, reply: () => ({ ship: false, blockers: ['h missing'], reworkPieces: ['h'] }) }])
+  assert.deepEqual(hold.result.judge, { ship: false, blockers: ['h missing'], reworkPieces: ['h'] })
+  const dead = await runBuild({ pieces }, [buildPlanReply([['h', 'j']]), deadImpl, { match: /^judge$/, reply: () => null }])
+  assert.deepEqual(dead.result.judge, { ship: false, blockers: ['judge agent returned nothing'], reworkPieces: [] })
+})
+
 test('hard is retired but accepted, gk-build: hard true is class hard and logs the retired line; hard false is the default class', async () => {
   const pieces = [
     { name: 'a', files: ['src/a.ts'], brief: 'Add a.' },
@@ -809,6 +899,8 @@ test('dead plan check and judge, gk-build: each re-runs once on its noFable tier
   const { calls, result } = await runBuild({ pieces }, [
     { match: /^plan-check$/, reply: onFable({ ok: true, problems: [], order: [['a']], classes: [] }) },
     { match: /^judge$/, reply: onFable({ ship: true, blockers: [], reworkPieces: [] }) },
+    // A passing check: ship beside a failed one is overruled (the ship test below).
+    { match: /^check$/, reply: () => ({ ran: 'make check', exitCode: 0, tail: 'ok' }) },
   ])
   const at = (label) => calls.filter((c) => c.label === label).map((c) => [c.model, c.effort])
   assert.deepEqual(at('plan-check'), [['fable', 'medium'], ['opus', 'xhigh']])
@@ -827,6 +919,93 @@ test('dead plan check and judge, gk-build: each re-runs once on its noFable tier
   assert.ok(plain.logs.includes('Judge on fable medium'), plain.logs.join('\n'))
   const off = await runBuild({ pieces, ui: true, dials: ['nofable'] }, [buildPlanReply([['a']])])
   assert.ok(off.logs.includes('Judge on opus xhigh (ui work)'), off.logs.join('\n'))
+})
+
+test('fable sign-off owed, gk-build: a ui judge that dies on fable and re-runs on opus says the Fable sign-off is still owed; otherwise the field is false', async () => {
+  const pieces = [{ name: 'a', files: ['src/a.ts'], brief: 'Add a.' }]
+  const onFable = (live) => (prompt, opts) => (opts.model === 'fable' ? null : live)
+  const judge = { match: /^judge$/, reply: onFable({ ship: false, blockers: ['b'], reworkPieces: [] }) }
+  const ui = await runBuild({ pieces, ui: true }, [buildPlanReply([['a']]), judge])
+  assert.deepEqual(ui.calls.filter((c) => c.label === 'judge').map((c) => [c.model, c.effort]), [['fable', 'high'], ['opus', 'xhigh']])
+  assert.equal(ui.result.fableSignOffOwed, true)
+  assert.ok(ui.logs.includes('Fable sign-off owed: the fable high judge (ui work) died and was re-run on opus xhigh'), ui.logs.join('\n'))
+  // The re-run died too: still owed.
+  const both = await runBuild({ pieces, ui: true }, [buildPlanReply([['a']]), { match: /^judge$/, reply: () => null }])
+  assert.equal(both.result.fableSignOffOwed, true)
+  // A ui judge that answers on fable, a judge that is not ui (fable medium, re-run on opus), and
+  // a ui judge under nofable (on opus from the start, no re-run): nothing owed by this rule.
+  for (const [name, args, replies] of [
+    ['ui, answered', { pieces, ui: true }, []],
+    ['not ui, re-run', { pieces }, [judge]],
+    ['ui under nofable', { pieces, ui: true, dials: ['nofable'] }, [judge]],
+  ]) {
+    const { result, logs } = await runBuild(args, [buildPlanReply([['a']]), ...replies])
+    assert.equal(result.fableSignOffOwed, false, name)
+    assert.ok(!logs.some((l) => l.startsWith('Fable sign-off owed')), name)
+  }
+})
+
+test('fable sign-off owed, gk-review: a sensitive judge that dies on fable and re-runs on opus says the Fable sign-off is still owed; otherwise the field is false', async () => {
+  const verdict = { confirmed: [], rejected: [] }
+  const onFable = (prompt, opts) => (opts.model === 'fable' ? null : verdict)
+  for (const args of [{ ui: true }, { security: true }, { clientFacing: true }, { changedPaths: ['frontend/src/app/x.tsx'], project: UI_PROJECT }]) {
+    const { calls, result, logs } = await runReview(args, { judge: onFable })
+    assert.deepEqual(calls.filter((c) => c.label === 'judge').map(tierName), ['fable-high', 'opus-xhigh'], JSON.stringify(args))
+    assert.equal(result.fableSignOffOwed, true, JSON.stringify(args))
+    assert.ok(logs.includes('Fable sign-off owed: the fable high judge (sensitive work) died and was re-run on opus xhigh'), logs.join('\n'))
+  }
+  // The re-run died too: still owed, and the survivors come back unjudged.
+  const dead = await runReview({ ui: true }, { judge: () => null })
+  assert.equal(dead.result.fableSignOffOwed, true)
+  assert.equal(dead.result.unjudged.length, 4)
+  // A fable judge from the author floor (not sensitive) that dies and re-runs owes nothing; nor
+  // does a sensitive judge that answers, or one under nofable.
+  for (const [name, args, opts] of [
+    ['author floor, re-run', { author: 'fable-medium' }, { judge: onFable }],
+    ['sensitive, answered', { ui: true }, {}],
+    ['sensitive under nofable', { ui: true, dials: ['nofable'] }, { judge: onFable }],
+    ['plain', {}, {}],
+  ]) {
+    const { result, logs } = await runReview(args, opts)
+    assert.equal(result.fableSignOffOwed, false, name)
+    assert.ok(!logs.some((l) => l.startsWith('Fable sign-off owed')), name)
+  }
+  // An early return carries the field too.
+  const none = await runWorkflow(join(workflowsDir, 'gk-review.js'), { target: 'main..HEAD', project: {} }, [
+    { match: /^scope$/, reply: () => ({ files: [{ path: 'src/a.ts', kind: 'backend' }], touchesUi: true, touchesSecurity: false, touchesClientWording: false, summary: 's' }) },
+    { match: /^find:/, reply: () => ({ findings: [] }) },
+  ])
+  assert.equal(none.result.fableSignOffOwed, false)
+})
+
+test('empty scope, gk-review: a Scope pass with no files falls back to the changed paths from git, non-test files first, and the review goes on', async () => {
+  const empty = { match: /^scope$/, reply: () => ({ files: [], touchesUi: false, touchesSecurity: false, touchesClientWording: false, summary: 'Nothing.' }) }
+  const finder = { match: /^find:/, reply: (prompt, opts) => ({ findings: [{ file: 'src/a.ts', line: 1, title: `${opts.label} issue`, claim: 'c', failureScenario: 'f', severity: 'low' }] }) }
+  const run = (changedPaths) => runWorkflow(join(workflowsDir, 'gk-review.js'), { target: 'main..HEAD', project: { root: '/tmp/repo' }, ...(changedPaths ? { changedPaths } : {}) }, [empty, finder])
+  const { calls, logs, result } = await run(['src/a.test.ts', 'src/a.ts', 'docs/x.md'])
+  assert.deepEqual(result.scope.files, [{ path: 'src/a.ts', kind: 'other' }, { path: 'docs/x.md', kind: 'other' }, { path: 'src/a.test.ts', kind: 'test' }])
+  assert.equal(result.scope.filesFrom, 'changedPaths')
+  assert.ok(logs.includes('Scope: the Scope pass returned no files; using 3 changed path(s) from git'), logs.join('\n'))
+  assert.ok(!logs.includes('Scope: no changed files; nothing to review'))
+  assert.ok(calls.some((c) => c.label === 'judge'), 'the review reaches the judge')
+  assert.ok(calls.find((c) => c.label.startsWith('find:')).prompt.includes('Changed files (from the Scope pass): src/a.ts [other], docs/x.md [other], src/a.test.ts [test].'))
+  // Both empty: the early return stays.
+  for (const cp of [undefined, []]) {
+    const none = await run(cp)
+    assert.deepEqual(none.calls.map((c) => c.label), ['scope'], JSON.stringify(cp))
+    assert.ok(none.logs.includes('Scope: no changed files; nothing to review'))
+    assert.deepEqual(none.result.confirmed, [])
+    assert.deepEqual(none.result.deadFinders, [])
+  }
+})
+
+test('dead finders, gk-review: the dimensions whose finders died come back in the result', async () => {
+  const replies = (dead) => [{ match: dead, reply: () => null }, ...reviewReplies()]
+  const run = (dead) => runWorkflow(join(workflowsDir, 'gk-review.js'), { target: 'main..HEAD', project: {} }, replies(dead))
+  assert.deepEqual((await run(/^find:(security|efficiency-and-simplification)$/)).result.deadFinders, ['security', 'efficiency-and-simplification'])
+  assert.deepEqual((await run(/^nothing$/)).result.deadFinders, [])
+  // Every finder dead: nothing to verify, and the early return names them all.
+  assert.deepEqual((await run(/^find:/)).result.deadFinders, ['correctness', 'security', 'regressions-and-tests', 'efficiency-and-simplification'])
 })
 
 // ---------------- gk-design: proposals, the judge panel and the UI sign-off (Task 12) ----------------

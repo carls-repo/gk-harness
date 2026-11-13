@@ -141,7 +141,8 @@ class ProfileHookTests(unittest.TestCase):
         (self.cdir / "settings.json").write_text(json.dumps(
             {"modelSettings": {"claude-sonnet-5-5": {"effortLevel": "xhigh"}}}))
         out = self.call({"name": "gk-build"}, transcript_path=str(tp), effort="low")
-        self.assertEqual(self.args_of(out), {"seat": "sonnet-xhigh"})
+        # sonnet has no xhigh tier in routes.json: the seat is its nearest tier, sonnet-high
+        self.assertEqual(self.args_of(out), {"seat": "sonnet-high"})
 
     def test_seat_is_a_plain_tier_name(self):
         self.seat("opus", effort="medium")
@@ -191,8 +192,14 @@ class ProfileHookTests(unittest.TestCase):
         out = self.call({"name": "gk-review", "args": {"dials": ["fable", "deep"]}})
         self.assertEqual(self.args_of(out), {"dials": ["fable", "deep", "nofable"]})
         self.assertIsNone(self.call({"name": "gk-build", "args": {"dials": ["nofable"]}}))
-        # a malformed dials value is left for the script to reject
-        self.assertIsNone(self.call({"name": "gk-build", "args": {"dials": "fable"}}))
+        # a single dial given as a string becomes a one-element list before nofable joins it
+        out = self.call({"name": "gk-build", "args": {"dials": "fable"}})
+        self.assertEqual(self.args_of(out), {"dials": ["fable", "nofable"]})
+        out = self.call({"name": "gk-build", "args": {"dials": "nofable"}})
+        self.assertEqual(self.args_of(out), {"dials": ["nofable"]})
+        # any other malformed dials value is left for the script to reject
+        for bad in ({"fable": True}, 3, True):
+            self.assertIsNone(self.call({"name": "gk-build", "args": {"dials": bad}}), bad)
 
     # -- args-v1 scripts keep today's behaviour ------------------------------------------
 

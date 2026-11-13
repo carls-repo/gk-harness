@@ -253,14 +253,35 @@ def resolve_effort(model: Any, launch: Any = None,
     return None, None
 
 
+def nearest_tier(alias: Any, effort: Any, routes: Any) -> str | None:
+    """The routes.json tier of this model nearest the effort: the highest of its tiers at or
+    below the effort, else its lowest tier (fable at xhigh or max is fable-high, fable at low
+    is fable-medium, opus at max is opus-xhigh). None when routes.json has no tier for the
+    model or does not list the effort."""
+    tiers = routes.get("tiers") if isinstance(routes, dict) else None
+    order = routes.get("efforts") if isinstance(routes, dict) else None
+    if not isinstance(tiers, dict) or not isinstance(order, list) or effort not in order:
+        return None
+    own = sorted(((order.index(t["effort"]), name) for name, t in tiers.items()
+                  if isinstance(t, dict) and t.get("model") == alias and t.get("effort") in order))
+    if not own:
+        return None
+    at_or_below = [name for pos, name in own if pos <= order.index(effort)]
+    return at_or_below[-1] if at_or_below else own[0][1]
+
+
 def seat_tier(model: Any, effort: Any = None, routes: Any = _UNSET) -> str | None:
-    """The seat's tier name, `<alias>-<effort>`; the effort defaults to routes.json's seat
-    effort for the alias. None when the model names no alias or no effort is known."""
+    """The seat's tier name: `<alias>-<effort>`, mapped to the nearest routes.json tier of the
+    same model when that name is not a tier (nearest_tier). The effort defaults to routes.json's
+    seat effort for the alias. None when the model names no alias or no effort is known."""
     alias = alias_for_model(model)
     if alias is None:
         return None
-    effort = _effort(effort) or routes_effort(alias, _routes_or(routes))
-    return "%s-%s" % (alias, effort) if effort else None
+    routes = _routes_or(routes)
+    effort = _effort(effort) or routes_effort(alias, routes)
+    if not effort:
+        return None
+    return nearest_tier(alias, effort, routes) or "%s-%s" % (alias, effort)
 
 
 def seat_path(sid: Any) -> Path:

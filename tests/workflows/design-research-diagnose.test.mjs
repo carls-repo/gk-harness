@@ -169,7 +169,11 @@ async function assertSameBehaviour(wf, name, args, responders, expect = (calls) 
     assert.deepEqual(step(now.calls), expect(old.calls), `${wf} ${name} (${kind}): the calls`)
     assert.deepEqual(behaviourLog(now.logs), behaviourLog(old.logs), `${wf} ${name} (${kind}): the log`)
     assert.ok(now.result && now.result.routing, `${wf} ${name} (${kind}): the result carries routing`)
-    assert.deepEqual(withoutRouting(now.result), old.result, `${wf} ${name} (${kind}): the result`)
+    // gk-research's one addition to the result: a critic that returned nothing is marked
+    // unavailable (the golden's empty critic read as "nothing missing").
+    const criticDead = wf === 'gk-research' && old.logs.some((l) => l.startsWith('Critic returned nothing'))
+    const want = criticDead ? { ...old.result, critic: { ...old.result.critic, unavailable: true } } : old.result
+    assert.deepEqual(withoutRouting(now.result), want, `${wf} ${name} (${kind}): the result`)
   }
   return old
 }

@@ -2,7 +2,7 @@ export const meta = {
   name: 'gk-review',
   description: 'Review a diff, branch range or the working tree before it is believed: scope, four-dimension find, adversarial refute, one judge',
   whenToUse:
-    'Run before believing a change (pre-merge to the shared branch, after a build workflow, before sign-off). Requires args {target: string — a git revision range such as "main..HEAD" or "main..feat/x" (branches are shared across worktrees, so a worktree branch is reviewed by naming it), or the literal "working-tree" for the uncommitted tree of the repository (REQUIRED); focus?: string[] — optional extra review dimensions, one finder each; ui?: boolean; security?: boolean; clientFacing?: boolean — any true makes the change sensitive, which puts the judge on fable high; so does a changed path (not a test file) that matches the project\'s uiPaths or a sign-off check\'s paths, or the Scope pass detecting ui, security or client wording (the Scope pass only raises it); votes?: number — refuters per finding, default 3, integer 1..5; author?: string — the tier that wrote the change (e.g. "fable-medium"), the judge\'s floor; seat?: string — the seat\'s tier, the floor when author is not given (normally added by the gk-harness hook); changedPaths?: string[] — the target\'s changed paths relative to the top level (normally added by the gk-harness hook); dials?: string[] — routing dials: "fable" puts the judge on fable, "nofable" moves a fable judge to opus xhigh (each stage\'s model and effort come from routes.json; a judge that dies on fable runs once more on opus xhigh); project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases), reviewFinders ([{key, brief, replaces?}] — a finder that replaces a core one takes its place, others run after the core four) and uiPaths (regular expressions over changed paths that raise the judge); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. Returns {scope, confirmed, rejected, killedByRefuters: [titles], dedupDropped: number, unjudged: [survivors the judge died on or gave no verdict for], routing: {routes, dials, offTier}} as JSON; the calling session writes the synthesis.',
+    'Run before believing a change (pre-merge to the shared branch, after a build workflow, before sign-off). Requires args {target: string — a git revision range such as "main..HEAD" or "main..feat/x" (branches are shared across worktrees, so a worktree branch is reviewed by naming it), or the literal "working-tree" for the uncommitted tree of the repository (REQUIRED); focus?: string[] — optional extra review dimensions, one finder each; ui?: boolean; security?: boolean; clientFacing?: boolean — any true makes the change sensitive, which puts the judge on fable high; so does a changed path (not a test file) that matches the project\'s uiPaths or a sign-off check\'s paths, or the Scope pass detecting ui, security or client wording (the Scope pass only raises it); votes?: number — refuters per finding, default 3, integer 1..5; author?: string — the tier that wrote the change (e.g. "fable-medium"), the judge\'s floor; seat?: string — the seat\'s tier, the floor when author is not given (normally added by the gk-harness hook); changedPaths?: string[] — the target\'s changed paths relative to the top level (normally added by the gk-harness hook); dials?: string[] — routing dials: "fable" puts the judge on fable, "nofable" moves a fable judge to opus xhigh (each stage\'s model and effort come from routes.json; a judge that dies on fable runs once more on opus xhigh); project?: object — the repository\'s .claude/gk-project.json plus {root: its git top level}, normally added by the gk-harness hook: guards (rule lines added to every stage brief, or, written as {text, workflows?, stages?}, only to the stages of the named workflows and phases), reviewFinders ([{key, brief, replaces?}] — a finder that replaces a core one takes its place, others run after the core four) and uiPaths (regular expressions over changed paths that raise the judge); without a root the agents work in the git repository containing their working directory; {} runs the generic rules}. Returns {scope, confirmed, rejected, killedByRefuters: [titles], dedupDropped: number, unjudged: [survivors the judge died on or gave no verdict for], deadFinders: [the dimensions whose finders died], fableSignOffOwed: boolean (true when a judge on fable for sensitive work died and was re-run on opus: the Fable sign-off is still owed), routing: {routes, dials, offTier}} as JSON (a Scope pass that lists no files while changedPaths has some is replaced by those paths, and scope.filesFrom is "changedPaths"); the calling session writes the synthesis.',
   phases: [
     { title: 'Scope', detail: 'one haiku reader classifies the changed files and flags ui/security/client-wording', model: 'haiku' },
     { title: 'Find', detail: 'four sonnet finders (correctness, security, regressions-and-tests, efficiency-and-simplification; a project finder may take one\'s place or run after them) plus one per focus entry; then dedup', model: 'sonnet' },
@@ -161,6 +161,7 @@ const projectRules = (stage) => {
 // <gk-routes v2> generated by gkh gen from routes.json v2; do not edit
 const ROUTES = {
   "version": 2,
+  "efforts": ["low", "medium", "high", "xhigh", "max"],
   "tiers": {
     "haiku-low": {"model": "haiku", "effort": "low", "cap": [1, 1]},
     "haiku-medium": {"model": "haiku", "effort": "medium", "cap": [1, 2]},
@@ -185,7 +186,9 @@ const ROUTES = {
 //     1. the stage's tier, or its byClass[ctx.cls || 'judgement'];
 //     2. a `when` condition whose ctx flag is true sets the tier (the highest, if several);
 //     3. atLeast: the highest of the tier, ctx.implementer and ROUTE_FLOOR;
-//     4. authorFloor: ctx.author, when it is above ROUTE_FLOOR and above the tier;
+//     4. authorFloor: ctx.author, when it is above ROUTE_FLOOR and above the tier; an author
+//        that is not a tier but names a model and an effort maps to that model's nearest
+//        tier (routeNearest: fable-max is fable-high, fable-low fable-medium), logged;
 //     5. the fable dial puts an apex stage on ROUTE_APEX (under nofable too: rule 6 then moves
 //        it to its noFable tier, so nofable wins over fable; every apex stage has one);
 //     6. the nofable dial moves a Fable tier to the stage's noFable (its class entry for a
@@ -236,6 +239,19 @@ const routeKnown = (name, what) => {
   log(`routes: ${what} ${JSON.stringify(name)} is not a tier this workflow knows; ignored`)
   return null
 }
+// The tier a caller's name stands for: the name when it is a tier; when it is <model>-<effort>
+// with an effort in ROUTES.efforts, the highest tier of that model at or below that effort, else
+// that model's lowest tier; otherwise null.
+const routeNearest = (name) => {
+  if (typeof name !== 'string') return null
+  if (routeOwn(ROUTES.tiers, name)) return name
+  const m = /^([a-z]+)-([a-z]+)$/.exec(name)
+  const at = m && Array.isArray(ROUTES.efforts) ? ROUTES.efforts.indexOf(m[2]) + 1 : 0
+  if (!at) return null
+  const own = Object.keys(ROUTES.tiers).filter(k => ROUTES.tiers[k].model === m[1]).sort((a, b) => ROUTES.tiers[a].cap[1] - ROUTES.tiers[b].cap[1])
+  const below = own.filter(k => ROUTES.tiers[k].cap[1] <= at)
+  return below.length ? below[below.length - 1] : own.length ? own[0] : null
+}
 function routeStage(stage) {
   const s = routeOwn(ROUTES.stages, stage)
   if (!s) throw new Error(`routes: unknown stage ${JSON.stringify(stage)}`)
@@ -259,7 +275,9 @@ function routeOf(stage, ctx = {}) {
     tier = routeHigher(routeHigher(tier, ROUTE_FLOOR), impl || tier)
   }
   if (s.authorFloor === true) {
-    const author = routeKnown(c.author, 'ctx.author')
+    const author = routeNearest(c.author)
+    if (author === null) routeKnown(c.author, 'ctx.author')
+    else if (author !== c.author) log(`routes: ctx.author ${JSON.stringify(c.author)} is not a tier; the nearest ${author} is used`)
     if (author && routeAbove(author, ROUTE_FLOOR)) tier = routeHigher(tier, author)
   }
   const nofable = DIALS.includes('nofable')
@@ -422,15 +440,30 @@ touchesUi: any ui file changed. touchesSecurity: any change to authentication, a
 summary: two or three sentences on what the change does.${COMMON}${projectRules('Scope')}`,
   { label: 'scope', phase: 'Scope', schema: SCOPE_SCHEMA },
 )
+// What every return carries besides its findings: the dimensions whose finders died, whether a
+// Fable sign-off is still owed (a sensitive judge that died on fable and was re-run on opus),
+// and the routing. Set as the run goes.
+let deadFinders = []
+let fableSignOffOwed = false
+const finish = (fields) => ({ scope, ...fields, deadFinders, fableSignOffOwed, routing: routingResult() })
 // A dead Scope agent must not sink the review: the finders read the diff themselves.
 // An unknown scope cannot rule out ui/security/client wording, so the judge is sensitive.
 const scope = scopeRaw || { files: [], touchesUi: true, touchesSecurity: true, touchesClientWording: true, summary: '(unavailable: the Scope agent returned nothing; read the diff yourself)', unavailable: true }
 log(scopeRaw
   ? `Scope: ${scope.files.length} file(s); ui=${scope.touchesUi} security=${scope.touchesSecurity} clientWording=${scope.touchesClientWording}`
   : 'Scope: agent returned nothing; reviewing without a file list, judge on the fable route')
+// A Scope pass that lists no files while git names changed paths has missed the change: the
+// review goes on with git's paths, non-test files first (filesFrom says so). Only when both are
+// empty is there nothing to review.
+const GIT_PATHS = [...new Set((ARGS.changedPaths || []).map(normFile).filter(Boolean))]
+if (scopeRaw && !scope.files.length && GIT_PATHS.length) {
+  scope.files = [...GIT_PATHS.filter(f => !TEST_FILE.test(f)).map(path => ({ path, kind: 'other' })), ...GIT_PATHS.filter(f => TEST_FILE.test(f)).map(path => ({ path, kind: 'test' }))]
+  scope.filesFrom = 'changedPaths'
+  log(`Scope: the Scope pass returned no files; using ${scope.files.length} changed path(s) from git`)
+}
 if (scopeRaw && !scope.files.length) {
   log('Scope: no changed files; nothing to review')
-  return { scope, confirmed: [], rejected: [], killedByRefuters: [], dedupDropped: 0, unjudged: [], routing: routingResult() }
+  return finish({ confirmed: [], rejected: [], killedByRefuters: [], dedupDropped: 0, unjudged: [] })
 }
 // Untracked new files are invisible to `git diff HEAD`, so the finders get the scoped list.
 const FILES = scope.files.length
@@ -448,7 +481,7 @@ Read the full diff yourself, then the surrounding code as needed. Report only de
     { label: `find:${d.key}`, phase: 'Find', schema: FINDINGS_SCHEMA },
   ).then(r => (r ? r.findings.map(f => ({ ...f, dimension: d.key })) : null)),
 )
-const deadFinders = DIMENSIONS.filter((d, i) => !finderRuns[i]).map(d => d.key)
+deadFinders = DIMENSIONS.filter((d, i) => !finderRuns[i]).map(d => d.key)
 if (deadFinders.length) log(`Find: ${deadFinders.length} finder(s) returned nothing; dimension(s) NOT covered: ${deadFinders.join(', ')}`)
 const found = finderRuns.filter(Boolean).flat()
 
@@ -462,7 +495,7 @@ const deduped = found.filter(f => {
 })
 const dedupDropped = found.length - deduped.length
 log(`Find: ${found.length} raw finding(s) from ${DIMENSIONS.length - deadFinders.length}/${DIMENSIONS.length} finder(s); dedup dropped ${dedupDropped}; ${deduped.length} go to Verify`)
-if (!deduped.length) return { scope, confirmed: [], rejected: [], killedByRefuters: [], dedupDropped, unjudged: [], routing: routingResult() }
+if (!deduped.length) return finish({ confirmed: [], rejected: [], killedByRefuters: [], dedupDropped, unjudged: [] })
 
 phase('Verify')
 const LENSES = ['does it actually reproduce', 'is the code path reachable in practice', 'is it already handled elsewhere', 'is the claimed line/behaviour read correctly', 'is the severity justified']
@@ -490,7 +523,7 @@ const killedByRefuters = verdicts.filter(v => !v.survives).map(v => v.finding.ti
 const deadVotes = verdicts.reduce((n, v) => n + v.dead, 0)
 const lost = deduped.length - verdicts.length
 log(`Verify: ${survivors.length} survived, ${killedByRefuters.length} killed by refuters${deadVotes ? `; ${deadVotes} refuter(s) died and counted as refutations` : ''}${lost ? `; ${lost} finding(s) lost to a failed verify stage` : ''}`)
-if (!survivors.length) return { scope, confirmed: [], rejected: [], killedByRefuters, dedupDropped, unjudged: [], routing: routingResult() }
+if (!survivors.length) return finish({ confirmed: [], rejected: [], killedByRefuters, dedupDropped, unjudged: [] })
 
 phase('Judge')
 const detected = scope.touchesUi === true || scope.touchesSecurity === true || scope.touchesClientWording === true
@@ -500,13 +533,19 @@ if (PATH_HITS.length) log(`Judge floor: ${PATH_HITS.length} changed path(s) matc
 const uiRoute = ARGS.ui === true || ARGS.clientFacing === true || scope.touchesUi === true || scope.touchesClientWording === true
 const securityRoute = ARGS.security === true || scope.touchesSecurity === true
 const judgeRoute = uiRoute ? ' (ui/client-facing sign-off route)' : securityRoute ? ' (security route)' : PATH_HITS.length ? ' (project path route)' : ''
-// The author's tier is the judge's floor: args.author, else the seat's tier.
-const author = ARGS.author || ARGS.seat
+// The author's tier is the judge's floor: args.author, else the seat's tier. Either may be a
+// model and an effort that is not a tier (fable-max); the helper maps it to the nearest tier of
+// that model. An author that names no tier even so gives way to the seat.
+let author = ARGS.author || ARGS.seat
+if (ARGS.author && ARGS.seat && routeNearest(ARGS.author) === null) {
+  log(`Judge floor: args.author ${JSON.stringify(ARGS.author)} names no tier; the seat's tier is used instead`)
+  author = ARGS.seat
+}
 const judgeRouted = routeOf('gk-review.judge', { sensitive, author })
 log(`Judge: ${judgeRouted.model} ${judgeRouted.effort} over ${survivors.length} survivor(s)${judgeRoute}`)
-// routeOf has logged an author that names no tier; runStage routes again, so it gets the author
-// only when it names one (the same route, and the line once).
-const judged = await runStage('gk-review.judge', { sensitive, author: Object.keys(ROUTES.tiers).includes(author) ? author : null },
+// routeOf has logged an author it mapped or ignored; runStage routes again, so it gets the tier
+// the author stands for, or none (the same route, and the line once).
+const judged = await runStage('gk-review.judge', { sensitive, author: routeNearest(author) },
   `You are the final judge on a code review. Change summary: ${scope.summary}
 The findings below each survived ${votes} adversarial refuter(s). For each one, read the diff and the code yourself and decide: confirmed (real, caused or exposed by this change) or rejected. For confirmed findings keep every field, set the severity you judge correct, and give a concrete minimal fix (what to change, where). For rejected ones give the title and the reason. Return exactly one verdict per finding and keep each title verbatim. Weigh client-visible wording and security invariants heavily.
 
@@ -514,13 +553,20 @@ Findings (JSON):
 ${JSON.stringify(survivors, null, 2)}${COMMON}${projectRules('Judge')}`,
   { label: 'judge', phase: 'Judge', schema: JUDGE_SCHEMA },
 )
+// A sensitive judge routed to fable that died there and was re-run on opus (onFail) has not
+// given the Fable sign-off: the seat still owes it, whether or not the re-run answered.
+fableSignOffOwed = sensitive && judgeRouted.model === 'fable' && routingResult().offTier.some(o => o.stage === 'gk-review.judge' && o.reason === 'onFail')
+if (fableSignOffOwed) {
+  const rerun = routeTier(ROUTES.stages['gk-review.judge'].noFable)
+  log(`Fable sign-off owed: the ${judgeRouted.model} ${judgeRouted.effort} judge (sensitive work) died and was re-run on ${rerun.model} ${rerun.effort}`)
+}
 // A dead judge must not discard the verified survivors: hand them back unjudged.
 if (!judged) {
   log(`Judge: agent returned nothing; ${survivors.length} survivor(s) returned unjudged`)
-  return { scope, confirmed: [], rejected: [], killedByRefuters, dedupDropped, unjudged: survivors, routing: routingResult() }
+  return finish({ confirmed: [], rejected: [], killedByRefuters, dedupDropped, unjudged: survivors })
 }
 const decided = new Set([...judged.confirmed, ...judged.rejected].map(x => norm(x.title)))
 const unjudged = survivors.filter(s => !decided.has(norm(s.title)))
 log(`Judge: ${judged.confirmed.length} confirmed, ${judged.rejected.length} rejected${unjudged.length ? `; ${unjudged.length} survivor(s) matched no verdict by title (left out or retitled): ${unjudged.map(s => s.title).join('; ')}` : ''}`)
 
-return { scope, confirmed: judged.confirmed, rejected: judged.rejected, killedByRefuters, dedupDropped, unjudged, routing: routingResult() }
+return finish({ confirmed: judged.confirmed, rejected: judged.rejected, killedByRefuters, dedupDropped, unjudged })
