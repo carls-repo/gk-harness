@@ -136,7 +136,7 @@ const FIXTURE = {
     'wf.review': { tier: 'opus-high', atLeast: 'implementer', noFable: 'opus-xhigh', onFail: 'rerun' },
     'wf.judge': { tier: 'opus-high', when: { sensitive: 'fable-high' }, authorFloor: true, noFable: 'opus-xhigh', onFail: 'rerun', apex: true },
     'wf.plan': { tier: 'fable-medium', noFable: 'opus-xhigh', onFail: 'rerun', apex: true },
-    'wf.critic': { tier: 'opus-high', apex: true },
+    'wf.critic': { tier: 'opus-high', apex: true, noFable: 'opus-high', onFail: 'rerun' },
     'wf.sign-off': { tier: 'fable-high', noFable: 'none', onFail: 'hold' },
   },
 }
@@ -202,7 +202,8 @@ test('routeOf rule 6: the nofable dial moves a Fable tier to its noFable tier (p
   assert.deepEqual(tierOf(routeOf('wf.sign-off', {})), [null, null, null, 'nofable'])
   const both = helper(['fable', 'nofable']).routeOf
   assert.deepEqual(tierOf(both('wf.judge', {})), ['opus-xhigh', 'opus', 'xhigh', 'nofable'])
-  assert.deepEqual(tierOf(both('wf.critic', {})), ['opus-high', 'opus', 'high', null])
+  // Lifted by rule 5, then moved to its noFable by rule 6 (fix round 1).
+  assert.deepEqual(tierOf(both('wf.critic', {})), ['opus-high', 'opus', 'high', 'nofable'])
 })
 
 test('DIALS: only fable, nofable, deep and solo are kept; anything else is logged and dropped', () => {
@@ -251,6 +252,23 @@ test('runStage: a dead Fable stage with onFail rerun runs once more on its noFab
   assert.deepEqual(out, { verdict: 'ok' })
   assert.deepEqual(calls.map((c) => [c.label, c.model, c.effort]), [['plan-check', 'fable', 'medium'], ['plan-check', 'opus', 'xhigh']])
   assert.deepEqual(h.routingResult().offTier, [{ stage: 'wf.plan', label: 'plan-check', tier: 'opus-xhigh', reason: 'onFail' }])
+})
+
+test('runStage: a #fable-lifted apex stage that dies re-runs on its noFable tier and records the drop', async () => {
+  const { calls, agent } = recorder([null, { ok: 1 }])
+  const h = helper(['fable'], agent)
+  assert.deepEqual(await h.runStage('wf.critic', {}, 'p', { label: 'critic' }), { ok: 1 })
+  assert.deepEqual(calls.map((c) => [c.label, c.model, c.effort]), [['critic', 'fable', 'high'], ['critic', 'opus', 'high']])
+  assert.deepEqual(h.routingResult().offTier, [{ stage: 'wf.critic', label: 'critic', tier: 'opus-high', reason: 'onFail' }])
+})
+
+test('runStage, the real gk-research block: a #fable-lifted critic that dies re-runs on opus-high and records the drop', async () => {
+  const blk = blockOf(readFileSync(join(workflowsDir, 'gk-research.js'), 'utf8'))
+  const { calls, agent } = recorder([null, { ok: 1 }])
+  const h = evalBlock(blk.text, { ARGS: { dials: ['fable'] }, agent })
+  assert.deepEqual(await h.runStage('gk-research.critic', {}, 'p', { label: 'critic' }), { ok: 1 })
+  assert.deepEqual(calls.map((c) => [c.model, c.effort]), [['fable', 'high'], ['opus', 'high']])
+  assert.deepEqual(h.routingResult().offTier, [{ stage: 'gk-research.critic', label: 'critic', tier: 'opus-high', reason: 'onFail' }])
 })
 
 test('runStage: a dead stage that is not on Fable is not re-run', async () => {

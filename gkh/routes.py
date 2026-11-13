@@ -428,7 +428,12 @@ def stage_variants(routes: dict, key: str, fable: bool = True, _seen: tuple = ()
 
 
 def reaches_fable(routes: dict, key: str) -> bool:
-    """True when some condition, class or atLeast lift puts the stage on a Fable tier."""
+    """True when some condition, class or atLeast lift puts the stage on a Fable tier, or the
+    stage is apex (the fable dial lifts every apex stage to a Fable tier)."""
+    stages = routes.get("stages")
+    s = stages.get(key) if isinstance(stages, dict) and isinstance(key, str) else None
+    if isinstance(s, dict) and s.get("apex") is True:
+        return True
     try:
         return any(_is_fable(routes, t) for t in stage_variants(routes, key).values())
     except RoutesError:

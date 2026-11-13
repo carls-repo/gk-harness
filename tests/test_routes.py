@@ -238,7 +238,7 @@ class RoutesTests(unittest.TestCase):
         self.assertIn("gk-build.review", reach)
         self.assertIn("gk-design.propose", reach)
         self.assertIn("gk-design.sign-off", reach)
-        self.assertNotIn("gk-research.critic", reach)
+        self.assertIn("gk-research.critic", reach)  # apex: the fable dial lifts it
         for key in reach:
             with self.subTest(stage=key):
                 s = r["stages"][key]
@@ -266,6 +266,22 @@ class RoutesTests(unittest.TestCase):
         r = repo()
         r["stages"]["gk-diagnose.adjudicate"]["onFail"] = "retry"
         self.assertProblem(r, "stage gk-diagnose.adjudicate")
+
+    def test_apex_stage_without_nofable_is_a_problem(self):
+        """An apex stage reaches Fable under the fable dial, so it needs noFable and onFail."""
+        r = repo()
+        r["stages"]["gk-research.sweep"]["apex"] = True
+        self.assertTrue(rt.reaches_fable(r, "gk-research.sweep"))
+        self.assertProblem(r, "stage gk-research.sweep: can run on Fable, so it needs noFable")
+        self.assertProblem(r, "stage gk-research.sweep: can run on Fable, so it needs onFail")
+        r = repo()
+        del r["stages"]["gk-research.critic"]["noFable"]
+        self.assertProblem(r, "stage gk-research.critic")
+        r = repo()
+        r["stages"]["gk-research.critic"]["apex"] = False
+        del r["stages"]["gk-research.critic"]["noFable"]
+        del r["stages"]["gk-research.critic"]["onFail"]
+        self.assertEqual(rt.problems(r), [])
 
     def test_ladder_strictly_increases(self):
         r = repo()

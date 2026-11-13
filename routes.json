@@ -322,6 +322,8 @@
     },
     "gk-research.critic": {
       "tier": "opus-high",
+      "noFable": "opus-high",
+      "onFail": "rerun",
       "apex": true
     },
     "gk-design.propose": {

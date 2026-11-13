@@ -193,8 +193,8 @@ const ROUTES = {
 //     2. a `when` condition whose ctx flag is true sets the tier (the highest, if several);
 //     3. atLeast: the highest of the tier, ctx.implementer and ROUTE_FLOOR;
 //     4. authorFloor: ctx.author, when it is above ROUTE_FLOOR and above the tier;
-//     5. the fable dial puts an apex stage on ROUTE_APEX (under nofable, only a stage that has
-//        a noFable tier, which rule 6 then applies: nofable wins over fable);
+//     5. the fable dial puts an apex stage on ROUTE_APEX (under nofable too: rule 6 then moves
+//        it to its noFable tier, so nofable wins over fable; every apex stage has one);
 //     6. the nofable dial moves a Fable tier to the stage's noFable (its class entry for a
 //        byClass stage), off 'nofable'; noFable "none" gives tier null: the stage does not run.
 //   runStage(stage, ctx, prompt, opts) runs the stage's agent on its route and applies onFail
@@ -264,8 +264,7 @@ function routeOf(stage, ctx = {}) {
     if (author && routeAbove(author, ROUTE_FLOOR)) tier = routeHigher(tier, author)
   }
   const nofable = DIALS.includes('nofable')
-  // Under nofable too, so rule 6 then moves it to noFable; but not a stage with no noFable tier.
-  if (DIALS.includes('fable') && s.apex === true && !(nofable && !routeNoFable(s, cls))) tier = ROUTE_APEX
+  if (DIALS.includes('fable') && s.apex === true) tier = ROUTE_APEX
   let off = null
   if (nofable && routeTier(tier).model === 'fable') {
     const nf = routeNoFable(s, cls)
