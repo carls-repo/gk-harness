@@ -667,15 +667,20 @@ gkh() { python3 "$GK_HARNESS_ROOT/install.py" "$@"; }
 
 ### Task 20: The switch (Carl's go)
 
-- [ ] **Step 1: Wait.** Wait for Carl's go. Name any peer sessions that are busy.
+- [ ] **Step 1: Wait, and check the peers.** Wait for Carl's go. Then, before the tag and the merge, name any peer sessions that are busy, and wait until they are idle. This check comes first because once `merge --ff-only` runs, every new shell sources the v2 aliases from the checkout. `python3 ~/.gk-harness/install.py status` does not list busy sessions (in v1 or v2), so check the session files: a session is busy when its `~/.claude/sessions/<id>.json` has `status` `busy` and its `pid` is alive. From the feat/task-routing checkout, `python3 -c 'from gkh import paths, peers; print(peers.busy_peers(paths.claude_dir(), peers.ancestor_pids()))'` prints them.
 - [ ] **Step 2: Tag the rollback point.** Run `git -C ~/.gk-harness tag pre-routing main && git -C ~/.gk-harness push origin pre-routing`.
 - [ ] **Step 3: Merge and push.** Run `git -C ~/.gk-harness merge --ff-only feat/task-routing && git -C ~/.gk-harness push origin main`.
-- [ ] **Step 4: Update.** Run `~/.gk-harness/install.sh update`. Expected: it refuses if a peer is busy (wait, or Carl says `--ignore-busy`), then installs. Then run `install.sh status`. Expected: no drift, and `model`, the efforts, the subagent default and `ultracode` owned.
-- [ ] **Step 5: Live checks** (record each in the ledger):
-  - open a new terminal session with `gk`, and a desktop session. The card shows `opus at medium · routes v2`.
+- [ ] **Step 4: Update.** Run `~/.gk-harness/install.sh update`. After the merge this runs v2's `update`: it checks for busy peers first and refuses if one is busy (wait, or Carl says `--ignore-busy`); then its pull finds nothing new, and it installs with `--ignore-busy`, so the install cannot refuse after the pull. Then run `install.sh status`. Expected: no drift, and `model`, the efforts, the subagent default and `ultracode` owned.
+- [ ] **Step 5: Live checks** (record each in the ledger). Run them in a new shell and in sessions started after the install. An older shell or session still has the v1 launchers and hooks; there, use `python3 ~/.gk-harness/install.py fable off` (and `fable on`) instead of `gkh`.
+  - open a new terminal session with each launcher, and a desktop session. The card shows the reported model, for example `claude-opus-5-5 at medium · routes v2`:
+    - `gk`: `claude-opus-5-5 at medium`;
+    - `gk-fable`: `claude-fable-5-2 at medium`;
+    - `gk-ultra`: `claude-opus-5-5 at medium`, with ultracode on;
+    - `gkh status` runs the installer's `status`.
+  - run an `Explore` agent on a small search. It reports `claude-haiku-5-5`.
   - run `gkh fable off`, then run Workflow `gk-selftest` with `args: {dials: []}`. The echoed args hold `dials: ['nofable']` and a `seat`. Then run `gkh fable on`.
   - run `gkh report --since <today>`.
-- [ ] **Step 6: Write the rollback into the README and the ledger:**
+- [ ] **Step 6: Write the rollback into the README and the ledger.** Run the rollback only when no peer session is busy: `uninstall` removes the hooks that running sessions call, so a peer's tool calls fail until step 3 installs hooks again.
   1. `~/.gk-harness/install.sh uninstall`
   2. `git -C ~/.gk-harness switch --detach pre-routing`
   3. `~/.gk-harness/install.sh install`

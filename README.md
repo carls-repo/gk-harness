@@ -175,11 +175,11 @@ A dial is a whole word at the start or end of a prompt. The seat passes it to gk
 
 ## After the update from v1
 
-v2.0.0 replaces the three-seat policy with the routing policy, retires the profiles, and adds the four owned settings keys. The first update from v1 runs v1's `update`, which pulls before any busy check, then starts the new `install`. That install refuses while a peer session is busy, which leaves the checkout on v2 but not installed. In that half-installed state, new shells already get the v2 launchers while the v1 hooks stay live. Run `~/.gk-harness/install.sh install` once the peers are idle; `gkh` works in a new shell after that install succeeds. Then run `status`: it should show no drift, and the four keys owned.
+v2.0.0 replaces the three-seat policy with the routing policy, retires the profiles, and adds the four owned settings keys. The first update from v1 runs v1's `update`, which pulls before any busy check, then starts the new `install`. That install refuses while a peer session is busy, which leaves the checkout on v2 but not installed. In that half-installed state, new shells already get the v2 launchers while the v1 hooks stay live. Run `~/.gk-harness/install.sh install` once the peers are idle; `gkh` works in a new shell after that install succeeds. On Windows, `gk-ultra` also needs `GK_HARNESS_ROOT` to find its settings file, and only the v2 profile block sets it: in the half-installed state `gk-ultra` fails, so open a new shell after `install.sh install` (`install.ps1 install`) succeeds. Then run `status`: it should show no drift, and the four keys owned.
 
 ## Rollback
 
-The tag `pre-routing` marks the last v1 commit. To go back to it:
+The tag `pre-routing` marks the last v1 commit. To go back to it, run the steps below while no peer session is busy. `uninstall` removes the hooks that running sessions call, so a peer's tool calls fail until the `install` in step 3 puts hooks back. `uninstall` does not check for busy peers itself, so look first: a session is busy while its `~/.claude/sessions/<id>.json` says `"status": "busy"`.
 
 1. `~/.gk-harness/install.sh uninstall`
 2. `git -C ~/.gk-harness switch --detach pre-routing`

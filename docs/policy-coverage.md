@@ -115,7 +115,7 @@ longer a rule anywhere, for the reason given.
 | 183–185 | Workers return about 20 lines; no file dumps or diffs | Briefs and reports | kept |
 | 185–186 | Test output through `tail` or a dot reporter; test runs foreground only, because background runs have stalled | Briefs and reports | kept, with its reason |
 | 186–187 | Recon goes to `Explore` or a Haiku reader with a file list | The seat and routing — Verbose reading goes to a worker; class table (`search`) | replaced: searches with no file list go to `Explore` on `haiku-medium`; long logs and big test output go to a worker; Haiku readers get named files under the 100K rule |
-| 187–188 | Do not install plugins or edit CLAUDE.md or memory mid-session | Briefs and reports | kept, in positive form with its exception: "between sessions…; mid-session, do so when Carl asks" |
+| 187–188 | Do not install plugins or edit CLAUDE.md or memory mid-session | Briefs and reports | kept, in positive form with its reason and exception: "at the start of a new session, so the prompt cache holds; mid-session, do so when Carl asks" |
 | 188 | `/clear` between unrelated tasks, `/compact` at natural breaks | — | dropped, because they are Carl's commands, which the seat cannot run |
 | 189–196 | Specs, plans and reports reach Carl in the turn they are written; Stop gate; `REMOTE-LINKS.tsv`; the skip command | House rules | kept |
 | 197–202 | Questions to Carl one at a time; where the app shows a next-step box, that one question is the box's question (old 199); bundle only when linked or asked; overrides batching skills | House rules | kept, the next-step box clause included |
