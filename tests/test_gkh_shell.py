@@ -34,8 +34,13 @@ SH_FUNCTIONS = [
     'gk() { claude --model opus --effort medium "$@"; }',
     'gk-fable() { claude --model fable --effort medium "$@"; }',
     'gk-ultra() { claude --model opus --effort medium --settings \'{"ultracode":true}\' "$@"; }',
-    'gkh() { python3 "$GK_HARNESS_ROOT/install.py" "$@"; }',
+    'gkh() { python3 "${GK_HARNESS_ROOT:?%s}/install.py" "$@"; }' % (
+        "gk-harness: open a new shell, or run install.py install from the gk-harness checkout"),
 ]
+UNALIAS = ('for _gk_n in gk gk-opus gk-sonnet gk-fable gk-ultra gkh; do unalias "$_gk_n" '
+           "2>/dev/null; done; unset _gk_n")
+UNSET_ROOT_MESSAGE = ("gk-harness: open a new shell, or run install.py install from the "
+                      "gk-harness checkout")
 
 
 class BlockTests(unittest.TestCase):
@@ -161,8 +166,7 @@ class AliasFileTests(unittest.TestCase):
     def test_sh_defines_exactly_the_four_functions(self):
         lines = [l for l in ALIASES_SH.read_text(encoding="utf-8").splitlines()
                  if l.strip() and not l.lstrip().startswith("#")]
-        self.assertEqual(lines, ["unalias gk gk-opus gk-sonnet gk-fable gk-ultra gkh "
-                                 "2>/dev/null || true"] + SH_FUNCTIONS)
+        self.assertEqual(lines, [UNALIAS] + SH_FUNCTIONS)
         text = ALIASES_SH.read_text(encoding="utf-8")
         self.assertNotIn("gk-opus()", text)
         self.assertNotIn("gk-sonnet()", text)
@@ -244,6 +248,60 @@ class AliasFileTests(unittest.TestCase):
                               capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.splitlines(), ["ARGS:--model opus --effort medium x"])
+
+    def test_gkh_without_the_root_says_why_and_fails_in_bash(self):
+        # A shell that sourced aliases.sh without GK_HARNESS_ROOT (an rc edited by hand, or a
+        # variable unset later) must not run python3 "/install.py".
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = tmp / "h"
+        bash, _ = self.bash_rc(root)
+        script = ('python3() { echo "RAN:$*"; }\n. "$1"\nunset GK_HARNESS_ROOT\n'
+                  "gkh status\necho after\n")
+        env = dict(os.environ)
+        env.pop("GK_HARNESS_ROOT", None)
+        proc = subprocess.run([bash, "-c", script, "bash",
+                               (root / "shell" / "aliases.sh").as_posix()],
+                              capture_output=True, text=True, env=env)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("RAN:", proc.stdout)
+        self.assertIn(UNSET_ROOT_MESSAGE, proc.stderr)
+
+    def test_unalias_runs_name_by_name(self):
+        # One unalias per name: a shell that stops at the first missing name (zsh) still drops
+        # the later ones.
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = tmp / "h"
+        bash, _ = self.bash_rc(root)
+        script = ("shopt -s expand_aliases\nalias gkh='echo stale'\n"
+                  'claude() { echo "ARGS:$*"; }\n. "$1"\n'
+                  "if alias gkh >/dev/null 2>&1; then echo stale-alias; fi\n"
+                  'if [ -n "${_gk_n+x}" ]; then echo leaked; fi\ngk-fable y\n')
+        proc = subprocess.run([bash, "-c", script, "bash",
+                               (root / "shell" / "aliases.sh").as_posix()],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.splitlines(), ["ARGS:--model fable --effort medium y"])
+
+    def test_ps1_gkh_without_the_root_writes_an_error_and_returns(self):
+        text = ALIASES_PS1.read_text(encoding="utf-8")
+        line = re.search(r"^function gkh \{.*\}\s*$", text, re.M).group(0)
+        guard = line.index("if (-not $env:GK_HARNESS_ROOT)")
+        self.assertLess(guard, line.index("python "))
+        self.assertIn("Write-Error '%s'" % UNSET_ROOT_MESSAGE, line)
+        self.assertIn("return", line[guard:line.index("python ")])
+
+    def test_ps1_gkh_without_the_root_in_powershell(self):
+        exe = shutil.which("pwsh") or (shutil.which("powershell") if os.name == "nt" else None)
+        if exe is None:
+            self.skipTest("no PowerShell on PATH")
+        command = ("function python { 'RAN:' + ($args -join ' ') }; "
+                   "$env:GK_HARNESS_ROOT = ''; . '%s'; gkh status" % ALIASES_PS1.as_posix())
+        proc = subprocess.run([exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                              capture_output=True, text=True, timeout=60)
+        self.assertNotIn("RAN:", proc.stdout)
+        self.assertIn("open a new shell", proc.stderr)
 
     def test_rc_block_dot_sources_the_functions_in_powershell(self):
         exe = shutil.which("pwsh") or (shutil.which("powershell") if os.name == "nt" else None)

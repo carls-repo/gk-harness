@@ -14,4 +14,5 @@ Remove-Variable -Name gkName -ErrorAction SilentlyContinue
 function gk { claude --model opus --effort medium @args }
 function gk-fable { claude --model fable --effort medium @args }
 function gk-ultra { claude --model opus --effort medium --settings "$env:GK_HARNESS_ROOT/shell/gk-ultra.json" @args }
-function gkh { python "$env:GK_HARNESS_ROOT/install.py" @args }
+# Without GK_HARNESS_ROOT gkh writes why and returns, rather than run python "/install.py".
+function gkh { if (-not $env:GK_HARNESS_ROOT) { Write-Error 'gk-harness: open a new shell, or run install.py install from the gk-harness checkout'; return }; python "$env:GK_HARNESS_ROOT/install.py" @args }
