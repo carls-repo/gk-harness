@@ -186,6 +186,100 @@ test('routing equivalence, gk-design: golden and neutral+Goodricke make the same
   assert.deepEqual([...seen].sort(), ['Judge fable xhigh', 'Judge opus xhigh', 'Propose fable xhigh', 'Propose opus xhigh', 'Sign-off fable xhigh'])
 })
 
+// ---------------- behaviour parity (gk-research, gk-diagnose) ----------------
+
+// Their routing comes from routes.json (routes.test.mjs checks it); everything else is the
+// golden's. Runs the golden and the neutral script (with the Goodricke project, and with a
+// generic one) on the same args and replies, and checks they make the same calls by
+// [label, phase], log the same lines and return the same result. The neutral script's only
+// additions are left out of the comparison: result.routing, and the log lines about the
+// project, the profile (the golden's "Profile:") and the retired profile.
+// `expect(oldCalls)` gives the neutral calls a case expects when they legitimately differ.
+const step = (calls) => calls.map((c) => [c.label, c.phase])
+const RETIRED = /^profile is retired; routes come from routes\.json v\d+$/
+const behaviourLog = (logs) => runLog(logs).filter((l) => !l.startsWith('Profile:') && !RETIRED.test(l))
+const withoutRouting = (r) => {
+  if (!r || typeof r !== 'object') return r
+  const { routing, ...rest } = r
+  return rest
+}
+async function assertSameBehaviour(wf, name, args, responders, expect = (calls) => step(calls)) {
+  const old = await runWorkflow(golden(`${wf}.js`), structuredClone(args), responders())
+  for (const [kind, project] of [['goodricke', goodricke()], ['generic', { root: '/tmp/repo' }]]) {
+    const now = await runWorkflow(neutral(`${wf}.js`), { ...structuredClone(args), project }, responders())
+    assert.deepEqual(step(now.calls), expect(old.calls), `${wf} ${name} (${kind}): the calls`)
+    assert.deepEqual(behaviourLog(now.logs), behaviourLog(old.logs), `${wf} ${name} (${kind}): the log`)
+    assert.ok(now.result && now.result.routing, `${wf} ${name} (${kind}): the result carries routing`)
+    assert.deepEqual(withoutRouting(now.result), old.result, `${wf} ${name} (${kind}): the result`)
+  }
+  return old
+}
+
+const PARITY_GRID = PROFILES.flatMap((profile) => [true, false].map((escalate) => ({ profile, escalate })))
+
+test('behaviour parity, gk-research: golden and neutral make the same calls, log the same lines and return the same result on every path', async () => {
+  const cases = []
+  for (const { profile, escalate } of PARITY_GRID) {
+    for (const depth of ['quick', 'thorough']) {
+      for (const sources of [undefined, SOURCES, { paths: ['src/a.ts'] }]) {
+        const flags = { profile, escalate, depth, ...(sources ? { sources } : {}) }
+        cases.push([JSON.stringify(flags), flags, {}])
+      }
+    }
+    cases.push(
+      [`${profile} custom angles`, { profile, escalate, angles: ['by-test (what the tests pin)'] }, {}],
+      [`${profile} thorough, the first merger dies`, { profile, depth: 'thorough' }, { dead: /^merge r1$/ }],
+      [`${profile} thorough, a deep-read dies`, { profile, depth: 'thorough' }, { dead: /^deep-read 1:/ }],
+      [`${profile} thorough, the critic dies`, { profile, depth: 'thorough' }, { dead: /^critic$/ }],
+      [`${profile} a reader dies`, { profile }, { dead: /^sweep r1: 2 / }],
+    )
+  }
+  // No profile or escalate at all: the neutral script logs no retired line.
+  cases.push(['no profile', {}, {}], ['no profile, thorough with sources', { depth: 'thorough', sources: SOURCES }, {}])
+  const seen = new Set()
+  for (const [name, flags, opts] of cases) {
+    const old = await assertSameBehaviour('gk-research', name, researchArgs(flags), () => researchResponders(opts))
+    for (const c of old.calls) seen.add(c.phase)
+  }
+  assert.deepEqual([...seen].sort(), ['Critic', 'Deep-read', 'Merge', 'Sweep'])
+})
+
+test('behaviour parity, gk-diagnose: golden and neutral make the same calls, log the same lines and return the same result on every path', async () => {
+  const cases = PARITY_GRID.map((flags) => [JSON.stringify(flags), flags, {}])
+  for (const profile of PROFILES) {
+    cases.push(
+      [`${profile} reproduce, evidence, files and a scratchpad`, { profile, ...WORKFLOWS['gk-diagnose'].full }, {}],
+      [`${profile} custom lenses`, { profile, lenses: ['state', ' timing ', 'state'] }, {}],
+      [`${profile} no hypotheses`, { profile }, { none: true }],
+      [`${profile} a lens dies`, { profile }, { dead: /^hypothesise:environment-and-config$/ }],
+      [`${profile} a test dies`, { profile }, { dead: /^test:H2$/ }],
+    )
+  }
+  cases.push(['no profile', {}, {}], ['no profile, no hypotheses', {}, { none: true }])
+  const seen = new Set()
+  for (const [name, flags, opts] of cases) {
+    const old = await assertSameBehaviour('gk-diagnose', name, diagnoseArgs(flags), () => diagnoseResponders(opts))
+    for (const c of old.calls) seen.add(c.phase)
+  }
+  assert.deepEqual([...seen].sort(), ['Adjudicate', 'Hypothesise', 'Test'])
+  // The early "no hypotheses" return carries routing too, and runs no Test or Adjudicate.
+  const none = await runWorkflow(neutral('gk-diagnose.js'), diagnoseArgs({ project: { root: '/tmp/repo' } }), diagnoseResponders({ none: true }))
+  assert.deepEqual(none.result.verdicts, [])
+  assert.equal(none.result.adjudication, null)
+  assert.deepEqual(none.result.routing.offTier, [])
+  assert.ok(none.calls.every((c) => c.phase === 'Hypothesise'))
+  // The adjudicator dies: the one legitimate difference in the calls. The golden ran it once on
+  // opus xhigh; the neutral script runs it on fable medium and, when that dies, once more on
+  // its noFable tier (onFail rerun), so the neutral calls have one extra adjudicate call. Here
+  // both die, so the results (less routing) and the logs still match.
+  for (const profile of [...PROFILES, undefined]) {
+    const flags = profile ? { profile } : {}
+    await assertSameBehaviour('gk-diagnose', `${profile || 'no profile'} the adjudicator dies`, diagnoseArgs(flags),
+      () => diagnoseResponders({ dead: /^adjudicate$/ }),
+      (calls) => step(calls).flatMap((c) => (c[0] === 'adjudicate' ? [c, c] : [c])))
+  }
+})
+
 // gk-research takes no ui argument: both scripts reject it, true or false, before any agent.
 // (Routing for gk-research and gk-diagnose is checked against routes.json in routes.test.mjs.)
 test('gk-research rejects ui: golden and neutral stop on args.ui before any agent', async () => {

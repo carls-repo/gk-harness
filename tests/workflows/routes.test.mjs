@@ -403,6 +403,16 @@ test('dead adjudicator re-runs on opus xhigh: gk-diagnose\'s adjudicate dies on 
   assert.deepEqual(result.routing.offTier, [{ stage: 'gk-diagnose.adjudicate', label: 'adjudicate', tier: 'opus-xhigh', reason: 'onFail' }])
 })
 
+test('dead critic re-runs on opus high: under the fable dial gk-research\'s critic dies on fable high, runs once more on opus high, and the drop is recorded', async () => {
+  const replies = fullReplies['gk-research']()
+  const live = replies.pop().reply
+  replies.push({ match: /^critic$/, reply: (prompt, opts) => (opts.model === 'fable' ? null : live(prompt, opts)) })
+  const { calls, result } = await runFull('gk-research', { dials: ['fable'] }, replies)
+  assert.deepEqual(calls.filter((c) => c.label === 'critic').map((c) => [c.model, c.effort]), [['fable', 'high'], ['opus', 'high']])
+  assert.deepEqual(result.critic.missing, ['Look for the callers of a in src/.'], 'the re-run\'s critic is used')
+  assert.deepEqual(result.routing.offTier, [{ stage: 'gk-research.critic', label: 'critic', tier: 'opus-high', reason: 'onFail' }])
+})
+
 test('retired args are accepted: profile and escalate run, are ignored, and log the retired line once; no Profile: line', async () => {
   const retired = `profile is retired; routes come from routes.json v${routes.version}`
   for (const wf of ['gk-research', 'gk-diagnose']) {
