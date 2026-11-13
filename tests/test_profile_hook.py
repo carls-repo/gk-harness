@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(ROOT, "hooks", "gk-profile.py")
+sys.path.insert(0, os.path.join(ROOT, "hooks"))
+
+import gk_common  # noqa: E402
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
     "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
@@ -49,7 +55,7 @@ class ProfileHookTests(unittest.TestCase):
     # -- helpers -------------------------------------------------------------------------
 
     def run_hook(self, payload=None, raw=None, extra_env=None):
-        env = dict(os.environ, GK_CLAUDE_DIR=str(self.cdir),
+        env = dict(os.environ, GK_CLAUDE_DIR=str(self.cdir), GK_NO_LAUNCH_ARGS="1",
                    GIT_CEILING_DIRECTORIES=str(self.tmp), **GIT_ENV)
         env.pop("GK_PROFILE", None)
         env.update(extra_env or {})
@@ -74,14 +80,25 @@ class ProfileHookTests(unittest.TestCase):
     def args_of(self, out):
         return out["hookSpecificOutput"]["updatedInput"]["args"]
 
-    def seat(self, profile, sid="s1"):
+    def seat(self, alias, sid="s1", effort="high"):
         d = self.cdir / "state" / "gk-seat"
         d.mkdir(parents=True, exist_ok=True)
-        model = {"fable": "claude-fable-5-1", "opus": "claude-opus-5-5",
-                 "sonnet": "claude-sonnet-5-5"}[profile]
+        model = {"fable": "claude-fable-5-2", "opus": "claude-opus-5-5",
+                 "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}[alias]
         (d / ("%s.json" % sid)).write_text(json.dumps(
-            {"model": model, "profile": profile, "effort": "high", "source": "startup",
+            {"model": model, "effort": effort, "source": "startup", "effortFrom": "launch",
              "updated": "2026-10-28T00:00:00Z"}))
+
+    def v1_user_script(self, name="gk-build"):
+        """An old user-level copy that still carries the args-v1 marker."""
+        wf = self.cdir / "workflows"
+        wf.mkdir(parents=True, exist_ok=True)
+        (wf / (name + ".js")).write_text("export const meta = {name: '%s'}\n"
+                                         "// gk-harness:args-v1\n" % name, encoding="utf-8")
+
+    def fable_off(self):
+        (self.cdir / "state").mkdir(exist_ok=True)
+        (self.cdir / "state" / "gk-fable-off.json").write_text('{"since": "x"}')
 
     def git(self, cwd, *args):
         env = dict(os.environ, **GIT_ENV)
@@ -104,38 +121,119 @@ class ProfileHookTests(unittest.TestCase):
         for s in self.stdouts:
             self.assertNotIn("permissionDecision", s)
 
-    # -- profile -------------------------------------------------------------------------
+    # -- seat (args-v2 scripts) -----------------------------------------------------------
 
-    def test_injects_profile_from_state(self):
+    def test_injects_seat_from_state(self):
         self.seat("opus")
         out = self.call({"name": "gk-review", "args": {"target": "working-tree"}})
         self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "PreToolUse")
-        self.assertEqual(self.args_of(out), {"target": "working-tree", "profile": "opus"})
+        self.assertEqual(self.args_of(out), {"target": "working-tree", "seat": "opus-high"})
         self.assertEqual(out["hookSpecificOutput"]["updatedInput"]["name"], "gk-review")
         self.assertNotIn("additionalContext", out["hookSpecificOutput"])
         self.assertNotIn("systemMessage", out)
 
-    def test_injects_profile_from_transcript(self):
+    def test_injects_seat_from_transcript_and_routes(self):
+        tp = self.tmp / "t.jsonl"
+        tp.write_text(json.dumps({"type": "assistant",
+                                  "message": {"model": "claude-sonnet-5-5"}}) + "\n")
+        out = self.call({"name": "gk-build"}, transcript_path=str(tp))
+        self.assertEqual(self.args_of(out), {"seat": "sonnet-medium"})
+        (self.cdir / "settings.json").write_text(json.dumps(
+            {"modelSettings": {"claude-sonnet-5-5": {"effortLevel": "xhigh"}}}))
+        out = self.call({"name": "gk-build"}, transcript_path=str(tp), effort="low")
+        self.assertEqual(self.args_of(out), {"seat": "sonnet-xhigh"})
+
+    def test_seat_is_a_plain_tier_name(self):
+        self.seat("opus", effort="medium")
+        out = self.call({"name": "gk-build"})
+        self.assertEqual(self.args_of(out), {"seat": "opus-medium"})
+        self.seat("fable", effort=None)
+        out = self.call({"name": "gk-build"})
+        self.assertEqual(self.args_of(out), {"seat": "fable-medium"})
+
+    def test_no_seat_when_unresolved(self):
+        self.assertIsNone(self.call({"name": "gk-build", "args": {"x": 1}},
+                                    extra_env={"GK_PROFILE": "opus"}))
+        self.assertIsNone(self.call({"name": "gk-build"}))
+        self.seat("haiku", effort=None)  # haiku has no seat effort in routes.json
+        self.assertIsNone(self.call({"name": "gk-build"}))
+
+    def test_explicit_seat_kept(self):
+        self.seat("opus")
+        self.assertIsNone(self.call({"name": "gk-build", "args": {"seat": "fable-high"}}))
+        out = self.call({"name": "gk-build", "args": {"seat": ""}})
+        self.assertEqual(self.args_of(out), {"seat": "opus-high"})
+
+    def test_v2_script_gets_no_profile(self):
+        # profile is retired for args-v2 scripts: never injected, never compared
+        self.seat("sonnet")
+        out = self.call({"name": "gk-build"}, extra_env={"GK_PROFILE": "fable"})
+        self.assertEqual(self.args_of(out), {"seat": "sonnet-high"})
+        out = self.call({"name": "gk-build", "args": {"profile": "fable"}})
+        self.assertEqual(out, {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "updatedInput": {"name": "gk-build", "args": {"profile": "fable",
+                                                          "seat": "sonnet-high"}}}})
+        for js in sorted((Path(ROOT) / "workflows").glob("gk-*.js")):
+            if b"gk-harness:args-v2" not in js.read_bytes():
+                continue
+            out = self.call({"scriptPath": str(js)})
+            self.assertNotIn("profile", self.args_of(out), js.name)
+
+    # -- dials -------------------------------------------------------------------------------
+
+    def test_dials_from_the_fable_switch(self):
+        self.assertIsNone(self.call({"name": "gk-build", "args": {"dials": ["fable"]}}))
+        self.assertIsNone(self.call({"name": "gk-build"}))
+        self.fable_off()
+        out = self.call({"name": "gk-build"})
+        self.assertEqual(self.args_of(out), {"dials": ["nofable"]})
+        out = self.call({"name": "gk-review", "args": {"dials": ["fable", "deep"]}})
+        self.assertEqual(self.args_of(out), {"dials": ["fable", "deep", "nofable"]})
+        self.assertIsNone(self.call({"name": "gk-build", "args": {"dials": ["nofable"]}}))
+        # a malformed dials value is left for the script to reject
+        self.assertIsNone(self.call({"name": "gk-build", "args": {"dials": "fable"}}))
+
+    # -- args-v1 scripts keep today's behaviour ------------------------------------------
+
+    def test_v1_injects_profile_from_state(self):
+        self.v1_user_script("gk-review")
+        self.seat("opus")
+        self.fable_off()
+        out = self.call({"name": "gk-review", "args": {"target": "working-tree"}})
+        self.assertEqual(self.args_of(out), {"target": "working-tree", "profile": "opus"})
+
+    def test_v1_injects_profile_from_transcript(self):
+        self.v1_user_script()
         tp = self.tmp / "t.jsonl"
         tp.write_text(json.dumps({"type": "assistant",
                                   "message": {"model": "claude-sonnet-5-5"}}) + "\n")
         out = self.call({"name": "gk-build"}, transcript_path=str(tp))
         self.assertEqual(self.args_of(out), {"profile": "sonnet"})
 
-    def test_injects_profile_from_env(self):
+    def test_v1_injects_profile_from_env(self):
+        self.v1_user_script()
         out = self.call({"name": "gk-build", "args": None}, extra_env={"GK_PROFILE": "fable"})
         self.assertEqual(self.args_of(out), {"profile": "fable"})
 
-    def test_no_source_passthrough(self):
+    def test_v1_haiku_seat_gives_no_profile(self):
+        self.v1_user_script()
+        self.seat("haiku")
+        self.assertIsNone(self.call({"name": "gk-build"}))
+
+    def test_v1_no_source_passthrough(self):
+        self.v1_user_script()
         self.assertIsNone(self.call({"name": "gk-build", "args": {"x": 1}}))
         self.assertIsNone(self.call({"name": "gk-build"}))
 
-    def test_explicit_kept(self):
+    def test_v1_explicit_kept(self):
+        self.v1_user_script()
         self.seat("opus")
         self.assertIsNone(self.call({"name": "gk-build", "args": {"profile": "sonnet"}}))
         self.assertIsNone(self.call({"name": "gk-build", "args": {"profile": "opus"}}))
 
-    def test_explicit_higher_warns_not_changed(self):
+    def test_v1_explicit_higher_warns_not_changed(self):
+        self.v1_user_script()
         self.seat("opus")
         out = self.call({"name": "gk-build", "args": {"profile": "fable", "escalate": "yes"}})
         msg = HIGHER % ("fable", "opus")
@@ -143,18 +241,40 @@ class ProfileHookTests(unittest.TestCase):
                                                       "additionalContext": msg},
                                "systemMessage": msg})
 
-    def test_explicit_higher_with_escalate_silent(self):
+    def test_v1_explicit_higher_with_escalate_silent(self):
+        self.v1_user_script()
         self.seat("sonnet")
         self.assertIsNone(self.call({"name": "gk-build",
                                      "args": {"profile": "fable", "escalate": True}}))
 
-    def test_explicit_higher_no_seat_silent(self):
+    def test_v1_explicit_higher_no_seat_silent(self):
+        self.v1_user_script()
         self.assertIsNone(self.call({"name": "gk-build", "args": {"profile": "fable"}}))
 
-    def test_empty_profile_is_replaced(self):
+    def test_v1_empty_profile_is_replaced(self):
+        self.v1_user_script()
         self.seat("opus")
         out = self.call({"name": "gk-build", "args": {"profile": ""}})
         self.assertEqual(self.args_of(out), {"profile": "opus"})
+
+    def test_v1_gets_no_seat_dials_changed_paths_or_legal_rule(self):
+        # An old copy may reject keys it does not know, so a v1 script gets only what it got.
+        repo = self.repo('{"version": 1, "name": "P", "legal": true}')
+        self.commit_file(repo, "a.txt", "1")
+        (repo / "a.txt").write_text("2")
+        wf = repo / ".claude" / "workflows"
+        wf.mkdir()
+        (wf / "gk-review.js").write_text("// gk-harness:args-v1\n", encoding="utf-8")
+        self.seat("opus")
+        self.fable_off()
+        out = self.call({"name": "gk-review", "args": {"target": "working-tree"}}, cwd=repo)
+        self.assertEqual(self.args_of(out), {
+            "target": "working-tree", "profile": "opus",
+            "project": {"version": 1, "name": "P", "legal": True, "root": self.root_of(repo)}})
+        out = self.call({"name": "gk-review", "args": {"target": "working-tree",
+                                                       "project": {"legal": False}}}, cwd=repo)
+        self.assertEqual(self.args_of(out), {"target": "working-tree", "profile": "opus",
+                                             "project": {"legal": False}})
 
     # -- which calls ---------------------------------------------------------------------
 
@@ -174,9 +294,9 @@ class ProfileHookTests(unittest.TestCase):
     def test_scriptpath_gk_detected(self):
         self.seat("opus")
         out = self.call({"scriptPath": "/home/u/.claude/workflows/gk-review.js"})
-        self.assertEqual(self.args_of(out), {"profile": "opus"})
+        self.assertEqual(self.args_of(out), {"seat": "opus-high"})
         out = self.call({"scriptPath": "C:\\Users\\u\\.claude\\workflows\\gk-build.js"})
-        self.assertEqual(self.args_of(out), {"profile": "opus"})
+        self.assertEqual(self.args_of(out), {"seat": "opus-high"})
 
     def test_saved_run_scriptpath_detected(self):
         # The runtime saves each run's script as <name>-wf_<id>.js; a re-run or resume by
@@ -187,14 +307,14 @@ class ProfileHookTests(unittest.TestCase):
         out = self.call({"scriptPath":
                          "/x/projects/p/s/workflows/scripts/gk-review-wf_33244bcf-5bd.js"},
                         cwd=repo)
-        self.assertEqual(self.args_of(out), {"profile": "opus", "project": project})
+        self.assertEqual(self.args_of(out), {"seat": "opus-high", "project": project})
         out = self.call({"scriptPath":
                          "/x/projects/p/s/workflows/scripts/gk-diagnose-wf_1a2b3c4d-5e6.js",
                          "args": {"symptom": "s"}}, cwd=repo, scratchpad_dir="/sp")
-        self.assertEqual(self.args_of(out), {"symptom": "s", "profile": "opus",
+        self.assertEqual(self.args_of(out), {"symptom": "s", "seat": "opus-high",
                                              "project": project, "scratchpad": "/sp"})
         out = self.call({"scriptPath": "/x/workflows/gk-review.js"}, cwd=repo)
-        self.assertEqual(self.args_of(out), {"profile": "opus", "project": project})
+        self.assertEqual(self.args_of(out), {"seat": "opus-high", "project": project})
         for path in ("/x/scripts/notgk-review-wf_1-2.js", "/x/scripts/gk-review-wf_.js"):
             self.assertIsNone(self.call({"scriptPath": path}), path)
 
@@ -234,13 +354,13 @@ class ProfileHookTests(unittest.TestCase):
         self.assertNotIn("systemMessage", self.stdouts[-1])
         project = {"version": 1, "name": "P", "root": self.root_of(repo)}
         # a workflow the repo has no copy of is injected as before
-        out = self.call({"name": "gk-selftest"}, cwd=repo)
-        self.assertEqual(self.args_of(out), {"profile": "opus", "project": project})
+        out = self.call({"name": "gk-design"}, cwd=repo)
+        self.assertEqual(self.args_of(out), {"seat": "opus-high", "project": project})
         # the same repo copy once it carries the marker (a merge of the harness's copy)
         (wf / "gk-research.js").write_bytes(self.harness_bytes("gk-research"))
         for cwd in (repo, sub):
             out = self.call({"name": "gk-research", "args": {"question": "q"}}, cwd=cwd)
-            self.assertEqual(self.args_of(out), {"question": "q", "profile": "opus",
+            self.assertEqual(self.args_of(out), {"question": "q", "seat": "opus-high",
                                                  "project": project})
 
     def test_repo_copy_wins_over_a_marked_user_copy(self):
@@ -263,7 +383,7 @@ class ProfileHookTests(unittest.TestCase):
         out = self.call({"name": "gk-review", "args": {"target": "x"}})
         self.assertEqual(out, self.note_only("gk-review"))
         out = self.call({"name": "gk-build"})
-        self.assertEqual(self.args_of(out), {"profile": "opus"})
+        self.assertEqual(self.args_of(out), {"seat": "opus-high"})
         # the marker anywhere in the first 16 KB is enough; past them it is not seen
         (wf / "gk-review.js").write_text("export default 1\n// gk-harness:args-v1\n",
                                          encoding="utf-8")
@@ -273,6 +393,15 @@ class ProfileHookTests(unittest.TestCase):
                                          encoding="utf-8")
         out = self.call({"name": "gk-review", "args": {"target": "x"}})
         self.assertEqual(out, self.note_only("gk-review"))
+        # the v2 marker in the first 16 KB makes it a v2 script, whatever follows
+        (wf / "gk-review.js").write_text("// gk-harness:args-v2\n// gk-harness:args-v1\n",
+                                         encoding="utf-8")
+        out = self.call({"name": "gk-review", "args": {"target": "x"}})
+        self.assertEqual(self.args_of(out), {"target": "x", "seat": "opus-high"})
+        (wf / "gk-review.js").write_text("// gk-harness:args-v1\n//" + "x" * 16384
+                                         + "\n// gk-harness:args-v2\n", encoding="utf-8")
+        out = self.call({"name": "gk-review", "args": {"target": "x"}})
+        self.assertEqual(self.args_of(out), {"target": "x", "profile": "opus"})
 
     def test_seat_in_the_home_folder_runs_the_marked_user_copy(self):
         # Install puts the harness workflows in <home>/.claude/workflows. A seat started in the
@@ -288,14 +417,15 @@ class ProfileHookTests(unittest.TestCase):
         sub.mkdir()
         for cwd in (home, sub):
             out = self.call({"name": "gk-review", "args": {"target": "x"}}, cwd=cwd)
-            self.assertEqual(self.args_of(out), {"target": "x", "profile": "opus"}, cwd)
+            self.assertEqual(self.args_of(out), {"target": "x", "seat": "opus-high"}, cwd)
         self.git(home, "init", "-q")
         for cwd in (home, sub):
+            # target x names no revision, so git fails and no changedPaths is added
             out = self.call({"name": "gk-review", "args": {"target": "x"}}, cwd=cwd)
-            self.assertEqual(self.args_of(out), {"target": "x", "profile": "opus",
+            self.assertEqual(self.args_of(out), {"target": "x", "seat": "opus-high",
                                                  "project": {"root": self.root_of(home)}}, cwd)
         out = self.call({"name": "gk-build"}, cwd=home)
-        self.assertEqual(self.args_of(out), {"profile": "opus",
+        self.assertEqual(self.args_of(out), {"seat": "opus-high",
                                              "project": {"root": self.root_of(home)}})
         # an old, unmarked user-level copy is left alone, wherever the seat starts
         (user / "gk-review.js").write_bytes(self.golden_bytes("gk-review"))
@@ -311,7 +441,7 @@ class ProfileHookTests(unittest.TestCase):
         (repo / ".claude" / "workflows" / "gk-review.js").mkdir(parents=True)  # not a file
         out = self.call({"name": "gk-review"}, cwd=repo)
         self.assertEqual(self.args_of(out),
-                         {"profile": "opus", "project": {"root": self.root_of(repo)}})
+                         {"seat": "opus-high", "project": {"root": self.root_of(repo)}})
 
     def test_saved_run_script_of_an_old_copy_gets_nothing(self):
         self.seat("opus")
@@ -334,11 +464,14 @@ class ProfileHookTests(unittest.TestCase):
         saved = scripts / "gk-review-wf_33244bcf-5bd.js"
         saved.write_bytes(self.harness_bytes("gk-review"))
         out = self.call({"scriptPath": str(saved), "args": {"target": "x"}})
-        self.assertEqual(self.args_of(out), {"target": "x", "profile": "opus"})
-        # every harness workflow, run by its own path, is marked and so injected
+        self.assertEqual(self.args_of(out), {"target": "x", "seat": "opus-high"})
+        # every harness workflow, run by its own path, is marked and so injected: the v2
+        # scripts with the seat, the one still on v1 (gk-selftest) with the profile
         for js in sorted((Path(ROOT) / "workflows").glob("gk-*.js")):
             out = self.call({"scriptPath": str(js)})
-            self.assertEqual(self.args_of(out), {"profile": "opus"}, js.name)
+            want = ({"seat": "opus-high"} if b"gk-harness:args-v2" in js.read_bytes()
+                    else {"profile": "opus"})
+            self.assertEqual(self.args_of(out), want, js.name)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs mkfifo")
     def test_fifo_script_is_not_read(self):
@@ -347,14 +480,14 @@ class ProfileHookTests(unittest.TestCase):
         wf.mkdir(parents=True)
         os.mkfifo(str(wf / "gk-review.js"))
         out = self.call({"name": "gk-review"})  # a hang would hit the 30 s timeout
-        self.assertEqual(self.args_of(out), {"profile": "opus"})
+        self.assertEqual(self.args_of(out), {"seat": "opus-high"})
 
     # -- args shapes ---------------------------------------------------------------------
 
     def test_args_string_parsed(self):
         self.seat("opus")
         out = self.call({"name": "gk-review", "args": '{"target": "develop..HEAD"}'})
-        self.assertEqual(self.args_of(out), {"target": "develop..HEAD", "profile": "opus"})
+        self.assertEqual(self.args_of(out), {"target": "develop..HEAD", "seat": "opus-high"})
 
     def test_args_array_untouched(self):
         self.seat("opus")
@@ -367,7 +500,7 @@ class ProfileHookTests(unittest.TestCase):
                         scratchpad_dir="/sp")
         self.assertEqual(self.args_of(out), {"symptom": "s", "scratchpad": "/sp"})
 
-    def test_unusable_cwd_still_injects_profile(self):
+    def test_unusable_cwd_still_injects_seat(self):
         self.seat("opus")
         afile = self.tmp / "afile"
         afile.write_text("x")
@@ -377,7 +510,7 @@ class ProfileHookTests(unittest.TestCase):
             proc = self.run_hook(d)
             self.assertEqual(proc.stderr, b"")
             out = json.loads(proc.stdout.decode("utf-8"))
-            self.assertEqual(self.args_of(out), {"profile": "opus"}, cwd)
+            self.assertEqual(self.args_of(out), {"seat": "opus-high"}, cwd)
 
     # -- project -------------------------------------------------------------------------
 
@@ -391,6 +524,7 @@ class ProfileHookTests(unittest.TestCase):
         self.assertEqual(args["project"],
                          {"version": 1, "name": "Goodricke", "root": self.root_of(repo)})
         self.assertNotIn("profile", args)
+        self.assertNotIn("seat", args)
         self.assertEqual(args["target"], "x")
 
     def test_project_absent_gives_root_only(self):
@@ -398,7 +532,7 @@ class ProfileHookTests(unittest.TestCase):
         self.seat("fable")
         out = self.call({"name": "gk-build"}, cwd=repo)
         self.assertEqual(self.args_of(out),
-                         {"profile": "fable", "project": {"root": self.root_of(repo)}})
+                         {"seat": "fable-high", "project": {"root": self.root_of(repo)}})
         self.assertNotIn("additionalContext", out["hookSpecificOutput"])
 
     def test_project_invalid_warns(self):
@@ -420,6 +554,7 @@ class ProfileHookTests(unittest.TestCase):
                                     cwd=repo))
 
     def test_warnings_combine(self):
+        self.v1_user_script()
         self.seat("sonnet")
         repo = self.repo("{nope")
         out = self.call({"name": "gk-build", "args": {"profile": "opus"}}, cwd=repo)
@@ -429,6 +564,96 @@ class ProfileHookTests(unittest.TestCase):
         self.assertEqual(lines[0], HIGHER % ("opus", "sonnet"))
         self.assertIn("not valid JSON", lines[1])
         self.assertEqual(len(lines), 2)
+
+    def test_project_legal_comes_from_the_file(self):
+        repo = self.repo('{"version": 1, "name": "L", "legal": true}')
+        root = self.root_of(repo)
+        out = self.call({"name": "gk-build"}, cwd=repo)
+        self.assertEqual(self.args_of(out)["project"],
+                         {"version": 1, "name": "L", "legal": True, "root": root})
+        # the caller's project is kept, but its legal is always the file's
+        out = self.call({"name": "gk-build", "args": {"project": {"x": 1, "legal": False}}},
+                        cwd=repo)
+        self.assertEqual(self.args_of(out), {"project": {"x": 1, "legal": True}})
+        out = self.call({"name": "gk-build", "args": {"project": {"x": 1}}}, cwd=repo)
+        self.assertEqual(self.args_of(out), {"project": {"x": 1, "legal": True}})
+        out = self.call({"name": "gk-build", "args": {"project": {"legal": 1}}}, cwd=repo)
+        self.assertEqual(self.args_of(out), {"project": {"legal": True}})
+        self.assertIsNone(self.call({"name": "gk-build", "args": {"project": {"legal": True}}},
+                                    cwd=repo))
+        self.assertIsNone(self.call({"name": "gk-build", "args": {"project": None}}, cwd=repo))
+
+    def test_project_legal_removed_when_the_file_has_none(self):
+        repo = self.repo('{"version": 1, "name": "P"}')
+        for cwd in (repo, self.norepo):
+            out = self.call({"name": "gk-build", "args": {"project": {"x": 1, "legal": True}}},
+                            cwd=cwd)
+            self.assertEqual(self.args_of(out), {"project": {"x": 1}}, cwd)
+        bad = self.tmp / "bad"
+        bad.mkdir()
+        self.git(bad, "init", "-q")
+        (bad / ".claude").mkdir()
+        (bad / ".claude" / "gk-project.json").write_text('{"version": 1, "legal": true',
+                                                          encoding="utf-8")
+        out = self.call({"name": "gk-build", "args": {"project": {"legal": True}}}, cwd=bad)
+        self.assertEqual(self.args_of(out), {"project": {}})
+
+    # -- changedPaths (gk-review) ------------------------------------------------------
+
+    def commit_file(self, repo, rel, text):
+        p = repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        self.git(repo, "add", rel)
+        self.git(repo, "-c", "commit.gpgsign=false", "commit", "-q", "-m", rel)
+
+    def test_changed_paths_working_tree(self):
+        repo = self.repo()
+        self.commit_file(repo, ".gitignore", "*.log\n")
+        self.commit_file(repo, "src/a.py", "1")
+        self.commit_file(repo, "same.txt", "1")
+        (repo / "src" / "a.py").write_text("2")
+        (repo / "docs").mkdir()
+        (repo / "docs" / "new file.md").write_text("n")
+        (repo / "x.log").write_text("ignored")
+        sub = repo / "src"
+        out = self.call({"name": "gk-review", "args": {"target": "working-tree"}}, cwd=sub)
+        self.assertEqual(self.args_of(out)["changedPaths"], ["src/a.py", "docs/new file.md"])
+        # an explicit list is kept; other workflows get none
+        out = self.call({"name": "gk-review", "args": {"target": "working-tree",
+                                                       "changedPaths": ["z"]}}, cwd=repo)
+        self.assertEqual(self.args_of(out)["changedPaths"], ["z"])
+        out = self.call({"name": "gk-build", "args": {"target": "working-tree"}}, cwd=repo)
+        self.assertNotIn("changedPaths", self.args_of(out))
+        # outside a repository there is nothing to diff
+        self.assertIsNone(self.call({"name": "gk-review", "args": {"target": "working-tree"}}))
+
+    def test_changed_paths_range(self):
+        repo = self.repo()
+        self.git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
+        self.commit_file(repo, "base.txt", "1")
+        self.git(repo, "checkout", "-q", "-b", "feat")
+        self.commit_file(repo, "feat.txt", "1")
+        self.git(repo, "checkout", "-q", "main")
+        self.commit_file(repo, "main-only.txt", "1")
+        (repo / "dirty.txt").write_text("not in any range")
+
+        def paths(target):
+            out = self.call({"name": "gk-review", "args": {"target": target}}, cwd=repo)
+            return self.args_of(out).get("changedPaths")
+        self.assertEqual(paths("main...feat"), ["feat.txt"])  # from the merge base, as git diff
+        # tip to tip: main-only.txt is gone on feat; same content, but no rename is folded in
+        self.assertEqual(sorted(paths("main..feat")), ["feat.txt", "main-only.txt"])
+        self.assertEqual(paths("main..main"), [])
+        self.assertIsNone(paths("nosuch..feat"))
+
+    def test_hostile_target_gets_no_changed_paths(self):
+        repo = self.repo()
+        self.commit_file(repo, "a.txt", "1")
+        for target in ("main..x; rm -rf ~", "$(id)", "--output=/tmp/x", "main..-x",
+                       "main..x\n", "a b", ""):
+            out = self.call({"name": "gk-review", "args": {"target": target}}, cwd=repo)
+            self.assertNotIn("changedPaths", self.args_of(out), target)
 
     # -- scratchpad ----------------------------------------------------------------------
 
@@ -461,7 +686,7 @@ class ProfileHookTests(unittest.TestCase):
               "args": {"plan": "p"}, "somethingNew": [1, {"a": 2}]}
         out = self.call(ti)
         upd = out["hookSpecificOutput"]["updatedInput"]
-        self.assertEqual(upd, dict(ti, args={"plan": "p", "profile": "opus"}))
+        self.assertEqual(upd, dict(ti, args={"plan": "p", "seat": "opus-high"}))
 
     def test_never_permission_decision(self):
         # Runs every other case in this class, then checks every stdout they produced.
@@ -483,6 +708,89 @@ class ProfileHookTests(unittest.TestCase):
         self.cdir.mkdir()
         self.norepo = self.tmp / "norepo"
         self.norepo.mkdir()
+
+
+def load_profile_module():
+    spec = importlib.util.spec_from_file_location("gk_profile_under_test", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class ChangedPathsTests(unittest.TestCase):
+    """In-process: the target check and the git calls behind changedPaths."""
+
+    def setUp(self):
+        self.mod = load_profile_module()
+        self.top = Path(tempfile.gettempdir())
+
+    def test_target_pattern_is_gk_reviews(self):
+        src = (Path(ROOT) / "workflows" / "gk-review.js").read_text(encoding="utf-8")
+        m = re.search(r"!/(\^.*?\$)/\.test\(target\)", src)
+        self.assertIsNotNone(m, "gk-review.js no longer tests target with a regex literal")
+        self.assertEqual(self.mod.TARGET_PATTERN, m.group(1))
+        # and the extra rule beside it
+        self.assertIn("target.includes('..-')", src)
+        self.assertIn("target !== 'working-tree'", src)
+
+    def test_target_check(self):
+        ok = ("working-tree", "main..HEAD", "main...feat/x", "HEAD~2", "v1.2^{commit}",
+              "HEAD@{1}..HEAD", "a", "origin/develop..HEAD")
+        bad = ("main..x; rm -rf ~", "$(id)", "--output=/tmp/x", "main..-x", "-x", "a b",
+               "main..x\n", "x\n", "", "\u00e9", None, 5, ["main"],
+               "working-tree\n", ".x", "a:b")
+        for t in ok:
+            self.assertTrue(self.mod.target_ok(t), t)
+        for t in bad:
+            self.assertFalse(self.mod.target_ok(t), repr(t))
+
+    def test_hostile_targets_run_no_git(self):
+        for t in ("main..x; rm -rf ~", "$(id)", "--output=/tmp/x", "main..-x", None):
+            with mock.patch.object(gk_common, "_git") as git, \
+                    mock.patch.object(gk_common.subprocess, "run") as run:
+                self.assertIsNone(self.mod.changed_paths(self.top, t), t)
+            git.assert_not_called()
+            run.assert_not_called()
+
+    def fake_git(self, outputs):
+        calls = []
+
+        def git(start, args):
+            calls.append(args)
+            out = outputs.pop(0)
+            if out is None:
+                return None
+            code, text = out
+            return subprocess.CompletedProcess(["git"] + args, code, text, "")
+        return git, calls
+
+    def test_git_arguments(self):
+        git, calls = self.fake_git([(0, "a\0b c\0")])
+        with mock.patch.object(gk_common, "_git", git):
+            self.assertEqual(self.mod.changed_paths(self.top, "main...feat"), ["a", "b c"])
+        git_c = ["-c", "core.fsmonitor=false"]
+        diff = git_c + ["diff", "--no-ext-diff", "--no-renames", "--name-only", "-z"]
+        self.assertEqual(calls, [diff + ["main...feat", "--"]])
+        git, calls = self.fake_git([(0, "a\0b\0"), (0, "b\0n\0")])
+        with mock.patch.object(gk_common, "_git", git):
+            self.assertEqual(self.mod.changed_paths(self.top, "working-tree"), ["a", "b", "n"])
+        self.assertEqual(calls, [diff + ["HEAD", "--"],
+                                 git_c + ["ls-files", "--others", "--exclude-standard", "-z"]])
+
+    def test_git_failure_gives_none(self):
+        for outputs in ([None], [(128, "")], [(0, "a\0"), (1, "")], [(0, "a\0"), None]):
+            git, _ = self.fake_git(list(outputs))
+            target = "working-tree" if len(outputs) == 2 else "main..x"
+            with mock.patch.object(gk_common, "_git", git):
+                self.assertIsNone(self.mod.changed_paths(self.top, target), outputs)
+
+    def test_capped_at_2000(self):
+        many = "".join("f%d\0" % i for i in range(2500))
+        git, calls = self.fake_git([(0, many), (0, "u\0")])
+        with mock.patch.object(gk_common, "_git", git):
+            got = self.mod.changed_paths(self.top, "working-tree")
+        self.assertEqual(len(got), 2000)
+        self.assertEqual(got[:2], ["f0", "f1"])
 
 
 if __name__ == "__main__":

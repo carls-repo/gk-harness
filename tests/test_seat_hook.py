@@ -87,108 +87,198 @@ class SeatHookBase(unittest.TestCase):
     def card_of(self, out):
         return out["hookSpecificOutput"]["additionalContext"]
 
+    def settings(self, obj):
+        (self.cdir / "settings.json").write_text(json.dumps(obj), encoding="utf-8")
+
+    def save(self, model, effort, source, effort_from=None, sid="s1"):
+        with mock.patch.dict(os.environ, {"GK_CLAUDE_DIR": str(self.cdir)}):
+            self.assertTrue(gk_model.save_seat(sid, model, effort, source, effort_from))
+
+
+def card(model, effort, *notes):
+    """The card text for a reported model under the checkout's routes.json (v2)."""
+    head = "gk-harness seat: %s at %s \u00b7 routes v2" % (model, effort)
+    return head + (". " + " ".join(notes) if notes else "")
+
+
+UNREPORTED = ("gk-harness seat: the model was not reported \u00b7 routes v2. Read the model named "
+              "in your system prompt and pass seat (its tier, e.g. opus-medium) on gk Workflow "
+              "calls.")
+FABLE_OFF = "Fable is off: run gkh fable on to restore it."
+
 
 class SeatHookTests(SeatHookBase):
     def test_start_with_model(self):
-        out = self.start(model="claude-opus-5-5", effort="xhigh")
+        out = self.start(model="claude-opus-5-5")
         self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "SessionStart")
-        self.assertEqual(self.card_of(out), gk_model.seat_card("claude-opus-5-5", "opus", "xhigh"))
+        self.assertEqual(self.card_of(out),
+                         "gk-harness seat: claude-opus-5-5 at medium \u00b7 routes v2")
         st = self.state()
-        self.assertEqual((st["profile"], st["model"], st["effort"], st["source"]),
-                         ("opus", "claude-opus-5-5", "xhigh", "clear"))
+        self.assertEqual((st["model"], st["effort"], st["source"], st["effortFrom"]),
+                         ("claude-opus-5-5", "medium", "clear", "routes"))
+        self.assertNotIn("profile", st)
 
-    def test_start_effort_object_form(self):
+    def test_input_effort_is_never_read(self):
+        # Neither SessionStart nor PostModelSwitch carries an effort (Stage 0 proof 5).
+        out = self.start(model="claude-opus-5-5", effort="xhigh")
+        self.assertEqual(self.card_of(out), card("claude-opus-5-5", "medium"))
         out = self.start(model="claude-opus-5-5", effort={"level": "xhigh"})
-        self.assertEqual(self.card_of(out), gk_model.seat_card("claude-opus-5-5", "opus", "xhigh"))
-        self.assertEqual(self.state()["effort"], "xhigh")
+        self.assertEqual(self.card_of(out), card("claude-opus-5-5", "medium"))
+        out = self.out(self.run_hook({"hook_event_name": "PostModelSwitch", "session_id": "s1",
+                                      "to_model": "claude-sonnet-5-5", "effort": "max"}))
+        self.assertEqual(self.card_of(out), card("claude-sonnet-5-5", "medium"))
+        self.assertEqual(self.state()["effort"], "medium")
+
+    def test_effort_from_user_settings(self):
+        self.settings({"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"},
+                                         "opus": {"effortLevel": "low"},
+                                         "fable": {"effortLevel": "xhigh"}}})
+        out = self.start(model="claude-opus-5-5")
+        self.assertEqual(self.card_of(out), card("claude-opus-5-5", "high",
+                                                 "routes.json puts the opus seat at medium."))
+        self.assertEqual((self.state()["effort"], self.state()["effortFrom"]),
+                         ("high", "settings"))
+        out = self.out(self.run_hook({"hook_event_name": "PostModelSwitch", "session_id": "s1",
+                                      "to_model": "claude-fable-5-2"}))
+        self.assertEqual(self.card_of(out), card("claude-fable-5-2", "xhigh",
+                                                 "routes.json puts the fable seat at medium."))
+
+    def test_card_notes_fable_off_and_saved_default(self):
+        (self.cdir / "state").mkdir()
+        (self.cdir / "state" / "gk-fable-off.json").write_text('{"since": "x"}')
+        self.settings({"model": "fable"})
+        out = self.start(model="claude-opus-5-5")
+        self.assertEqual(self.card_of(out), card(
+            "claude-opus-5-5", "medium", "The saved default model is fable, not opus (a /model "
+            "choice is saved as the default).", FABLE_OFF))
 
     def test_start_without_model_keeps_state(self):
-        self.start(model="claude-sonnet-5-5", effort="high")
-        out = self.start(source="clear", effort={"level": "high"})
-        self.assertEqual(self.card_of(out), gk_model.seat_card("claude-sonnet-5-5", "sonnet", "high"))
-        self.assertEqual(self.state()["profile"], "sonnet")
+        self.start(model="claude-sonnet-5-5")
+        out = self.start(source="clear")
+        self.assertEqual(self.card_of(out), card("claude-sonnet-5-5", "medium"))
+        self.assertEqual(self.state()["model"], "claude-sonnet-5-5")
 
     def test_start_without_model_reads_transcript(self):
         tp = self.tmp / "t.jsonl"
         tp.write_text(json.dumps({"type": "assistant",
-                                  "message": {"model": "claude-fable-5-1"}}) + "\n")
-        out = self.start(transcript_path=str(tp), effort="high")
-        self.assertEqual(self.card_of(out), gk_model.seat_card("claude-fable-5-1", "fable", "high"))
-        self.assertEqual(self.state()["profile"], "fable")
+                                  "message": {"model": "claude-fable-5-2"}}) + "\n")
+        out = self.start(transcript_path=str(tp))
+        self.assertEqual(self.card_of(out), card("claude-fable-5-2", "medium"))
+        self.assertEqual(self.state()["model"], "claude-fable-5-2")
 
     def test_start_nothing_known(self):
         out = self.start()
-        self.assertEqual(self.card_of(out), gk_model.seat_card(None, None, None))
-        self.assertIn("not reported", self.card_of(out))
+        self.assertEqual(self.card_of(out), UNREPORTED)
         self.assertIsNone(self.state())
 
     def test_start_model_default_is_treated_as_missing(self):
-        out = self.start(model="default", effort="high")
-        self.assertIn("not reported", self.card_of(out))
+        out = self.start(model="default")
+        self.assertEqual(self.card_of(out), UNREPORTED)
         self.assertIsNone(self.state())
 
     def test_switch_updates_state(self):
-        self.start(model="claude-opus-5-5", effort="xhigh")
+        self.start(model="claude-opus-5-5")
         out = self.out(self.run_hook({
             "hook_event_name": "PostModelSwitch", "session_id": "s1",
             "to_model": "claude-sonnet-5-5", "from_model": "claude-opus-5-5",
-            "effort": {"level": "high"}}))
+            "requested_model": "sonnet", "source": "command"}))
         self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "PostModelSwitch")
-        self.assertEqual(self.card_of(out), gk_model.seat_card("claude-sonnet-5-5", "sonnet", "high"))
+        self.assertEqual(self.card_of(out), card("claude-sonnet-5-5", "medium"))
         st = self.state()
-        self.assertEqual((st["profile"], st["effort"]), ("sonnet", "high"))
+        self.assertEqual((st["model"], st["effort"], st["source"]),
+                         ("claude-sonnet-5-5", "medium", "command"))
 
-    def test_switch_without_effort_uses_stored(self):
-        self.start(model="claude-opus-5-5", effort="xhigh")
+    def test_switch_keeps_a_launch_effort_only(self):
+        # A launch --effort beats settings, so it stays with the session across /model; an
+        # effort worked out from settings or routes is worked out again for the new model.
+        self.save("claude-opus-5-5", "xhigh", "startup", "launch")
         out = self.out(self.run_hook({"hook_event_name": "PostModelSwitch", "session_id": "s1",
-                                      "to_model": "claude-fable-5-1"}))
-        self.assertEqual(self.card_of(out), gk_model.seat_card("claude-fable-5-1", "fable", "xhigh"))
+                                      "to_model": "claude-fable-5-2"}))
+        self.assertEqual(self.card_of(out), card("claude-fable-5-2", "xhigh",
+                                                 "routes.json puts the fable seat at medium."))
+        self.assertEqual(self.state()["effortFrom"], "launch")
+        self.save("claude-opus-5-5", "high", "startup", "settings")
+        out = self.out(self.run_hook({"hook_event_name": "PostModelSwitch", "session_id": "s1",
+                                      "to_model": "claude-fable-5-2"}))
+        self.assertEqual(self.card_of(out), card("claude-fable-5-2", "medium"))
+
+    def test_clear_keeps_a_launch_effort(self):
+        self.save("claude-opus-5-5", "xhigh", "startup", "launch")
+        out = self.start(source="compact")
+        self.assertEqual(self.card_of(out), card("claude-opus-5-5", "xhigh",
+                                                 "routes.json puts the opus seat at medium."))
 
     def test_switch_falls_back_to_requested_model(self):
-        self.start(model="claude-opus-5-5", effort="xhigh")
+        self.start(model="claude-opus-5-5")
         out = self.out(self.run_hook({"hook_event_name": "PostModelSwitch", "session_id": "s1",
-                                      "to_model": "default", "requested_model": "sonnet",
-                                      "effort": {"level": "high"}}))
-        self.assertEqual(self.card_of(out), gk_model.seat_card("sonnet", "sonnet", "high"))
-        self.assertEqual(self.state()["profile"], "sonnet")
+                                      "to_model": "default", "requested_model": "sonnet"}))
+        self.assertEqual(self.card_of(out), card("sonnet", "medium"))
+        self.assertEqual(self.state()["model"], "sonnet")
+
+    def test_switch_to_haiku_is_recorded_with_a_note(self):
+        self.start(model="claude-opus-5-5")
+        out = self.out(self.run_hook({"hook_event_name": "PostModelSwitch", "session_id": "s1",
+                                      "to_model": "claude-haiku-5-5"}))
+        self.assertEqual(self.card_of(out), card(
+            "claude-haiku-5-5", "unknown effort", "haiku is not a seat model in routes.json; "
+            "say so to Carl in your first reply."))
+        self.assertEqual(self.state()["model"], "claude-haiku-5-5")
 
     def test_switch_unmapped_clears_state(self):
         for to_model, requested in (("default", "<synthetic>"), (None, None),
                                     ("gw-model-7", "default")):
-            self.start(model="claude-opus-5-5", effort="xhigh")
-            self.assertEqual(self.state()["profile"], "opus")
-            d = {"hook_event_name": "PostModelSwitch", "session_id": "s1",
-                 "effort": {"level": "high"}}
+            self.start(model="claude-opus-5-5")
+            self.assertEqual(self.state()["model"], "claude-opus-5-5")
+            d = {"hook_event_name": "PostModelSwitch", "session_id": "s1"}
             if to_model is not None:
                 d["to_model"] = to_model
             if requested is not None:
                 d["requested_model"] = requested
             out = self.out(self.run_hook(d))
             self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "PostModelSwitch")
-            self.assertEqual(self.card_of(out), gk_model.seat_card(None, None, None))
+            self.assertEqual(self.card_of(out), UNREPORTED)
             self.assertIsNone(self.state(), (to_model, requested))
             self.assertFalse((self.cdir / "state" / "gk-seat" / "s1.json").exists())
 
     def test_switch_unmapped_without_state(self):
         out = self.out(self.run_hook({"hook_event_name": "PostModelSwitch", "session_id": "s1",
                                       "to_model": "default"}))
-        self.assertEqual(self.card_of(out), gk_model.seat_card(None, None, None))
+        self.assertEqual(self.card_of(out), UNREPORTED)
         self.assertIsNone(self.state())
 
     def test_input_model_beats_stored_model(self):
-        self.start(model="claude-sonnet-5-5", effort="high")
-        out = self.start(model="claude-opus-5-5", effort="high")
-        self.assertEqual(self.card_of(out), gk_model.seat_card("claude-opus-5-5", "opus", "high"))
-        self.assertEqual(self.state()["profile"], "opus")
+        self.start(model="claude-sonnet-5-5")
+        out = self.start(model="claude-opus-5-5")
+        self.assertEqual(self.card_of(out), card("claude-opus-5-5", "medium"))
+        self.assertEqual(self.state()["model"], "claude-opus-5-5")
 
     def test_stored_model_beats_transcript(self):
-        self.start(model="claude-sonnet-5-5", effort="high")
+        self.start(model="claude-sonnet-5-5")
         tp = self.tmp / "t.jsonl"
         tp.write_text(json.dumps({"type": "assistant",
-                                  "message": {"model": "claude-fable-5-1"}}) + "\n")
-        out = self.start(transcript_path=str(tp), effort="high")
-        self.assertEqual(self.card_of(out), gk_model.seat_card("claude-sonnet-5-5", "sonnet", "high"))
-        self.assertEqual(self.state()["profile"], "sonnet")
+                                  "message": {"model": "claude-fable-5-2"}}) + "\n")
+        out = self.start(transcript_path=str(tp))
+        self.assertEqual(self.card_of(out), card("claude-sonnet-5-5", "medium"))
+        self.assertEqual(self.state()["model"], "claude-sonnet-5-5")
+
+    def test_routes_unusable_card(self):
+        # The hook reads routes.json beside itself: run a copy of the hooks with none there.
+        hooks = self.tmp / "hooks-copy"
+        hooks.mkdir()
+        for f in ("gk-seat.py", "gk_model.py", "gk_common.py"):
+            (hooks / f).write_bytes((Path(ROOT) / "hooks" / f).read_bytes())
+        env = dict(os.environ, GK_CLAUDE_DIR=str(self.cdir), GK_NO_LAUNCH_ARGS="1", **GIT_ENV)
+        payload = {"hook_event_name": "SessionStart", "session_id": "s1", "source": "clear",
+                   "model": "claude-opus-5-5"}
+        for text in (None, "{nope", '{"version": 2}'):
+            if text is not None:
+                (hooks / "routes.json").write_text(text, encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(hooks / "gk-seat.py")],
+                                  input=json.dumps(payload).encode(), capture_output=True,
+                                  env=env, timeout=30)
+            self.assertEqual(self.card_of(self.out(proc)),
+                             "gk-harness seat: claude-opus-5-5 at unknown effort \u00b7 routes "
+                             "unavailable; tell Carl", text)
 
     def test_other_events_noop(self):
         for ev in ("PreToolUse", "Stop", "UserPromptSubmit", None):
@@ -207,6 +297,7 @@ class SeatHookTests(SeatHookBase):
             self.assertEqual((proc.returncode, proc.stdout), (0, b""), raw)
 
     def test_output_under_cap(self):
+        self.settings({"model": "m" * 5000})
         out = self.start(model="claude-opus-5-5" + "x" * 5000, effort="y" * 5000)
         self.assertLess(len(json.dumps(out)), 10000)
 
@@ -227,11 +318,12 @@ class LaunchFallbackTests(SeatHookBase):
         return json.loads(buf.getvalue())["hookSpecificOutput"]["additionalContext"]
 
     def test_startup_takes_model_and_effort_from_launch(self):
-        card = self.run_handle({"source": "startup"}, lambda: ("claude-opus-5-5", "xhigh"))
-        self.assertEqual(card, gk_model.seat_card("claude-opus-5-5", "opus", "xhigh"))
+        card_text = self.run_handle({"source": "startup"}, lambda: ("claude-opus-5-5", "xhigh"))
+        self.assertEqual(card_text, card("claude-opus-5-5", "xhigh",
+                                         "routes.json puts the opus seat at medium."))
         st = self.state()
-        self.assertEqual((st["model"], st["profile"], st["effort"]),
-                         ("claude-opus-5-5", "opus", "xhigh"))
+        self.assertEqual((st["model"], st["effort"], st["effortFrom"]),
+                         ("claude-opus-5-5", "xhigh", "launch"))
 
     def _boom(self):
         def boom():
@@ -240,24 +332,29 @@ class LaunchFallbackTests(SeatHookBase):
 
     def test_clear_and_compact_never_read_launch(self):
         for source in ("clear", "compact"):
-            card = self.run_handle({"source": source}, self._boom())
-            self.assertEqual(card, gk_model.seat_card(None, None, None), source)
+            card_text = self.run_handle({"source": source}, self._boom())
+            self.assertEqual(card_text, UNREPORTED, source)
             self.assertIsNone(self.state(), source)
+        card_text = self.run_handle({"source": "clear", "model": "claude-opus-5-5"}, self._boom())
+        self.assertEqual(card_text, card("claude-opus-5-5", "medium"))
 
     def test_resume_reads_launch(self):
-        card = self.run_handle({"source": "resume"}, lambda: ("claude-opus-5-5", "xhigh"))
-        self.assertEqual(card, gk_model.seat_card("claude-opus-5-5", "opus", "xhigh"))
+        card_text = self.run_handle({"source": "resume"}, lambda: ("claude-opus-5-5", "high"))
+        self.assertEqual(card_text, card("claude-opus-5-5", "high",
+                                         "routes.json puts the opus seat at medium."))
 
     def test_input_model_beats_launch_model(self):
-        card = self.run_handle({"source": "startup", "model": "claude-sonnet-5-5"},
-                               lambda: ("claude-opus-5-5", "high"))
-        self.assertEqual(card, gk_model.seat_card("claude-sonnet-5-5", "sonnet", "high"))
+        card_text = self.run_handle({"source": "startup", "model": "claude-sonnet-5-5"},
+                                    lambda: ("claude-opus-5-5", "high"))
+        self.assertEqual(card_text, card("claude-sonnet-5-5", "high",
+                                         "routes.json puts the sonnet seat at medium."))
 
     def test_stored_model_beats_launch_model(self):
-        with mock.patch.dict(os.environ, {"GK_CLAUDE_DIR": str(self.cdir)}):
-            gk_model.save_seat("s1", "claude-sonnet-5-5", "sonnet", "high", "startup")
-        card = self.run_handle({"source": "startup"}, lambda: ("claude-opus-5-5", None))
-        self.assertEqual(card, gk_model.seat_card("claude-sonnet-5-5", "sonnet", "high"))
+        self.save("claude-sonnet-5-5", "high", "startup", "launch")
+        card_text = self.run_handle({"source": "startup"}, lambda: ("claude-opus-5-5", None))
+        # a fresh process: the stored launch effort belongs to the process before it
+        self.assertEqual(card_text, card("claude-sonnet-5-5", "medium"))
+        self.assertEqual(self.state()["effortFrom"], "routes")
 
     def _transcript(self, model):
         path = self.cdir / "t.jsonl"
@@ -265,27 +362,27 @@ class LaunchFallbackTests(SeatHookBase):
         return str(path)
 
     def test_launch_model_beats_transcript_model(self):
-        card = self.run_handle({"source": "startup",
-                                "transcript_path": self._transcript("claude-sonnet-5-5")},
-                               lambda: ("claude-opus-5-5", "high"))
-        self.assertEqual(card, gk_model.seat_card("claude-opus-5-5", "opus", "high"))
+        card_text = self.run_handle({"source": "startup",
+                                     "transcript_path": self._transcript("claude-sonnet-5-5")},
+                                    lambda: ("claude-opus-5-5", "medium"))
+        self.assertEqual(card_text, card("claude-opus-5-5", "medium"))
 
     def test_empty_launch_falls_back_to_transcript(self):
-        card = self.run_handle({"source": "startup",
-                                "transcript_path": self._transcript("claude-sonnet-5-5")},
-                               lambda: (None, None))
-        self.assertEqual(card, gk_model.seat_card("claude-sonnet-5-5", "sonnet", None))
+        card_text = self.run_handle({"source": "startup",
+                                     "transcript_path": self._transcript("claude-sonnet-5-5")},
+                                    lambda: (None, None))
+        self.assertEqual(card_text, card("claude-sonnet-5-5", "medium"))
 
-    def test_full_input_never_reads_launch(self):
-        card = self.run_handle({"source": "startup", "model": "claude-opus-5-5",
-                                "effort": "high"}, self._boom())
-        self.assertEqual(card, gk_model.seat_card("claude-opus-5-5", "opus", "high"))
-
-    def test_startup_effort_only_from_launch(self):
-        card = self.run_handle({"source": "startup", "model": "claude-sonnet-5-5"},
-                               lambda: (None, "high"))
-        self.assertEqual(card, gk_model.seat_card("claude-sonnet-5-5", "sonnet", "high"))
-        self.assertIn("at high", card)
+    def test_launch_effort_beats_settings(self):
+        self.settings({"modelSettings": {"claude-opus-5-5": {"effortLevel": "low"}}})
+        card_text = self.run_handle({"source": "startup", "model": "claude-opus-5-5"},
+                                    lambda: (None, "high"))
+        self.assertEqual(card_text, card("claude-opus-5-5", "high",
+                                         "routes.json puts the opus seat at medium."))
+        card_text = self.run_handle({"source": "startup", "model": "claude-opus-5-5"},
+                                    lambda: (None, None))
+        self.assertEqual(card_text, card("claude-opus-5-5", "low",
+                                         "routes.json puts the opus seat at medium."))
 
     def test_launch_called_at_most_once(self):
         calls = []
@@ -295,6 +392,8 @@ class LaunchFallbackTests(SeatHookBase):
             return (None, None)
         self.run_handle({"source": "startup"}, once)
         self.assertEqual(len(calls), 1)
+        self.run_handle({"source": "startup", "model": "claude-opus-5-5"}, once)
+        self.assertEqual(len(calls), 2)
 
 
 class UpdateCheckTests(SeatHookBase):
@@ -327,22 +426,21 @@ class UpdateCheckTests(SeatHookBase):
 
     def test_update_check_once_a_day(self):
         self.make_repos()
-        out = self.start(source="startup", model="claude-opus-5-5", effort="high")
-        card = self.card_of(out)
-        self.assertTrue(card.startswith(gk_model.seat_card("claude-opus-5-5", "opus", "high")))
-        self.assertIn(self.expected_line(), card)
+        out = self.start(source="startup", model="claude-opus-5-5")
+        text = self.card_of(out)
+        self.assertEqual(text, card("claude-opus-5-5", "medium") + "\n" + self.expected_line())
         self.assertTrue(self.stamp()["available"])
         # Origin is now unreachable: a fresh check would find nothing, so the line can only
         # come from the stamp.
         self.bare.rename(self.tmp / "gone.git")
-        out = self.start(source="startup", model="claude-opus-5-5", effort="high")
+        out = self.start(source="startup", model="claude-opus-5-5")
         self.assertIn(self.expected_line(), self.card_of(out))
         self.assertTrue(self.stamp()["available"])
 
     @unittest.skipIf(os.name == "nt", "POSIX only: PATH shim")
     def test_second_start_runs_no_git(self):
         self.make_repos()
-        self.start(source="startup", model="claude-opus-5-5", effort="high")
+        self.start(source="startup", model="claude-opus-5-5")
         shim = self.tmp / "shim"
         shim.mkdir()
         log = self.tmp / "git.log"
@@ -382,11 +480,11 @@ class UpdateCheckTests(SeatHookBase):
         self.make_repos()
         for source in ("startup", None):
             d = {"hook_event_name": "PostModelSwitch", "session_id": "s1",
-                 "to_model": "claude-opus-5-5", "effort": {"level": "high"}}
+                 "to_model": "claude-opus-5-5"}
             if source:
                 d["source"] = source
             out = self.out(self.run_hook(d))
-            self.assertEqual(self.card_of(out), gk_model.seat_card("claude-opus-5-5", "opus", "high"))
+            self.assertEqual(self.card_of(out), card("claude-opus-5-5", "medium"))
             self.assertNotIn("update available", self.card_of(out))
         self.assertFalse((self.cdir / "state" / "gk-harness-update.json").exists())
 

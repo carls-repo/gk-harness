@@ -52,6 +52,45 @@ def claude_dir() -> Path:
     return Path(env) if env else Path.home() / ".claude"
 
 
+ROUTES_NAME = "routes.json"
+
+
+def routes_file() -> Path:
+    """routes.json beside the hook files, where the installer puts it. In the gk-harness
+    checkout the hooks live in hooks/ and routes.json one level up, so that copy is used
+    while there is none beside them."""
+    here = Path(os.path.abspath(__file__)).parent
+    beside = here / ROUTES_NAME
+    if here.name == "hooks" and not beside.exists() and (here.parent / ROUTES_NAME).exists():
+        return here.parent / ROUTES_NAME
+    return beside
+
+
+def load_routes() -> dict | None:
+    """The parsed routes.json, or None when it is missing, unreadable or lacks an integer
+    `version` and a `seat.effort` object (the parts the hooks read)."""
+    data = read_json(routes_file())
+    if not isinstance(data, dict) or type(data.get("version")) is not int:
+        return None
+    seat = data.get("seat")
+    if not isinstance(seat, dict) or not isinstance(seat.get("effort"), dict):
+        return None
+    return data
+
+
+def fable_off_file() -> Path:
+    """The Fable switch: `gkh fable off` writes this file and `gkh fable on` removes it."""
+    return claude_dir() / "state" / "gk-fable-off.json"
+
+
+def fable_off() -> bool:
+    """Whether Fable is switched off (the switch file exists)."""
+    try:
+        return fable_off_file().exists()
+    except (OSError, ValueError):
+        return False
+
+
 def safe_sid(v: Any) -> str | None:
     """v when it is a session id that is safe to use as a file name, else None."""
     return v if isinstance(v, str) and _SID_RE.fullmatch(v) else None

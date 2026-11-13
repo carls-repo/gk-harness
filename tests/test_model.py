@@ -14,9 +14,16 @@ from unittest import mock
 HOOKS = Path(__file__).resolve().parents[1] / "hooks"
 sys.path.insert(0, str(HOOKS))
 
+import gk_common  # noqa: E402
 import gk_model  # noqa: E402
 
 FIX = Path(__file__).resolve().parent / "fixtures" / "transcripts"
+ROUTES = {"version": 2, "models": {"opus": {"id": "claude-opus-5-5"},
+                                    "fable": {"id": "claude-fable-5-2"},
+                                    "sonnet": {"id": "claude-sonnet-5-5"},
+                                    "haiku": {"id": "claude-haiku-5-5"}},
+          "seat": {"default": "opus-medium",
+                   "effort": {"opus": "medium", "fable": "medium", "sonnet": "medium"}}}
 
 
 class ModelTest(unittest.TestCase):
@@ -27,30 +34,77 @@ class ModelTest(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("GK_PROFILE", None)
+        os.environ["GK_NO_LAUNCH_ARGS"] = "1"
 
-    def test_profile_for_model_table(self):
+    def test_alias_for_model_table(self):
         pairs = [
-            ("claude-fable-5-1", "fable"), ("claude-opus-5-5", "opus"),
-            ("claude-sonnet-5-5", "sonnet"), ("claude-opus-5-5[1m]", "opus"),
-            ("opus", "opus"), ("fable", "fable"),
-            ("us.anthropic.claude-opus-5-5-v1:0", "opus"),
-            ("Claude-OPUS-5-5", "opus"), ("claude-haiku-5-5", "sonnet"), ("claude-next-7", "sonnet"),
+            ("claude-fable-5-2", "fable"), ("claude-opus-5-5", "opus"),
+            ("claude-sonnet-5-5", "sonnet"), ("claude-haiku-5-5", "haiku"),
+            ("claude-opus-5-5[1m]", "opus"), ("opus", "opus"), ("fable", "fable"),
+            ("haiku", "haiku"), ("us.anthropic.claude-opus-5-5-v1:0", "opus"),
+            ("Claude-OPUS-5-5", "opus"), ("claude-next-7", None),
             ("default", None), ("", None), (None, None), ("<synthetic>", None), (42, None),
         ]
         for inp, want in pairs:
-            self.assertEqual(gk_model.profile_for_model(inp), want, inp)
+            self.assertEqual(gk_model.alias_for_model(inp), want, inp)
 
-    def test_in_lineup(self):
-        self.assertTrue(gk_model.in_lineup("claude-opus-5-5"))
-        self.assertFalse(gk_model.in_lineup("claude-haiku-5-5"))
-        self.assertFalse(gk_model.in_lineup(None))
+    def test_profile_language_is_gone(self):
+        # The seat is a tier from routes.json now; hooks receive no effort field (Stage 0
+        # proof 5), so nothing reads one.
+        for name in ("MODE", "RANK", "profile_for_model", "resolve_profile", "effort_of",
+                     "in_lineup"):
+            self.assertFalse(hasattr(gk_model, name), name)
 
-    def test_effort_of(self):
-        self.assertEqual(gk_model.effort_of({"effort": "xhigh"}), "xhigh")
-        self.assertEqual(gk_model.effort_of({"effort": {"level": "high"}}), "high")
-        self.assertIsNone(gk_model.effort_of({"effort": {"level": 3}}))
-        self.assertIsNone(gk_model.effort_of({"effort": 5}))
-        self.assertIsNone(gk_model.effort_of({}))
+    def test_seat_tier(self):
+        t = gk_model.seat_tier
+        with mock.patch.object(gk_model.gk_common, "load_routes", return_value=ROUTES):
+            self.assertEqual(t("claude-opus-5-5", "xhigh"), "opus-xhigh")
+            self.assertEqual(t("claude-opus-5-5", None), "opus-medium")
+            self.assertEqual(t("claude-opus-5-5"), "opus-medium")
+            self.assertEqual(t("claude-fable-5-2", None), "fable-medium")
+            self.assertEqual(t("sonnet", "high"), "sonnet-high")
+            self.assertEqual(t("claude-haiku-5-5", "low"), "haiku-low")
+            self.assertIsNone(t("claude-haiku-5-5", None))  # no seat effort for haiku
+            self.assertEqual(t("claude-opus-5-5", "turbo"), "opus-medium")
+            self.assertEqual(t("claude-opus-5-5", "medium+ultracode"), "opus-medium")
+            for bad in ("claude-next-7", None, "", 42):
+                self.assertIsNone(t(bad, "high"), bad)
+        with mock.patch.object(gk_model.gk_common, "load_routes", return_value=None):
+            self.assertIsNone(t("claude-opus-5-5", None))
+            self.assertEqual(t("claude-opus-5-5", "high"), "opus-high")
+
+    def write_settings(self, obj):
+        Path(self.tmp, "settings.json").write_text(json.dumps(obj), encoding="utf-8")
+
+    def test_settings_effort_order(self):
+        self.write_settings({"effortLevel": "max", "modelSettings": {
+            "claude-opus-5-5": {"effortLevel": "xhigh"}, "opus": {"effortLevel": "low"},
+            "sonnet": {"effortLevel": "high"}, "claude-fable-5-2": {"effort": "max"},
+            "claude-haiku-5-5": {"effortLevel": "turbo"}, "haiku": {"effortLevel": "low"}}})
+        e = gk_model.settings_effort
+        self.assertEqual(e("claude-opus-5-5", ROUTES), "xhigh")  # the full id beats the alias
+        self.assertEqual(e("opus", ROUTES), "xhigh")  # an alias reaches the id through routes
+        self.assertEqual(e("opus", None), "low")
+        self.assertEqual(e("claude-opus-5-5[1m]", ROUTES), "xhigh")
+        self.assertEqual(e("claude-sonnet-5-5", ROUTES), "high")  # the alias key
+        # `effort` is not the key Claude Code reads, and the top-level value is not used
+        self.assertIsNone(e("claude-fable-5-2", ROUTES))
+        self.assertEqual(e("claude-haiku-5-5", ROUTES), "low")  # a bad value falls through
+        self.assertIsNone(e("claude-next-7", ROUTES))
+        self.write_settings([1])
+        self.assertIsNone(e("claude-opus-5-5", ROUTES))
+
+    def test_resolve_effort_order(self):
+        r = gk_model.resolve_effort
+        self.assertEqual(r("claude-opus-5-5", "max", ROUTES), ("max", "launch"))
+        self.assertEqual(r("claude-opus-5-5", None, ROUTES), ("medium", "routes"))
+        self.assertEqual(r("claude-opus-5-5", "turbo", ROUTES), ("medium", "routes"))
+        self.write_settings({"modelSettings": {"opus": {"effortLevel": "high"}}})
+        self.assertEqual(r("claude-opus-5-5", None, ROUTES), ("high", "settings"))
+        self.assertEqual(r("claude-opus-5-5", "low", ROUTES), ("low", "launch"))
+        self.assertEqual(r("claude-haiku-5-5", None, ROUTES), (None, None))
+        self.assertEqual(r(None, None, ROUTES), (None, None))
+        self.assertEqual(r("claude-sonnet-5-5", None, None), (None, None))
 
     def test_transcript_last_assistant_model(self):
         self.assertEqual(gk_model.model_from_transcript(FIX / "opus_then_sonnet.jsonl"),
@@ -130,77 +184,152 @@ class ModelTest(unittest.TestCase):
     def test_non_path_transcript_never_touches_fds(self):
         for bad in (1, 2, True, 0, 3.5, [], {}):
             self.assertIsNone(gk_model.model_from_transcript(bad))
-            self.assertIsNone(gk_model.resolve_profile({"session_id": "x1", "transcript_path": bad}))
+            self.assertIsNone(gk_model.resolve_seat({"session_id": "x1", "transcript_path": bad}))
         for fd in (0, 1, 2):
             os.fstat(fd)
 
     def test_seat_roundtrip(self):
-        self.assertTrue(gk_model.save_seat("s1", "claude-opus-5-5", "opus", "high", "SessionStart"))
+        self.assertTrue(gk_model.save_seat("s1", "claude-opus-5-5", "high", "startup", "launch"))
         rec = gk_model.load_seat("s1")
-        self.assertEqual({k: rec[k] for k in ("model", "profile", "effort", "source")},
-                         {"model": "claude-opus-5-5", "profile": "opus", "effort": "high",
-                          "source": "SessionStart"})
+        self.assertEqual({k: rec[k] for k in ("model", "effort", "source", "effortFrom")},
+                         {"model": "claude-opus-5-5", "effort": "high", "source": "startup",
+                          "effortFrom": "launch"})
+        self.assertNotIn("profile", rec)
         self.assertRegex(rec["updated"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertEqual(gk_model.seat_path("s1"), Path(self.tmp) / "state" / "gk-seat" / "s1.json")
+        self.assertTrue(gk_model.save_seat("s4", "claude-sonnet-5-5", None, "clear"))
+        self.assertIsNone(gk_model.load_seat("s4")["effortFrom"])
 
     def test_seat_bad_sid_and_bad_record(self):
-        self.assertFalse(gk_model.save_seat("../x", "m", "opus", None, "s"))
+        self.assertFalse(gk_model.save_seat("../x", "claude-opus-5-5", None, "s"))
         self.assertIsNone(gk_model.load_seat("../x"))
         self.assertIsNone(gk_model.load_seat("absent"))
-        gk_model.save_seat("s2", "m", "haiku", None, "s")
+        gk_model.save_seat("s2", "m", None, "s")  # a model with no known alias
         self.assertIsNone(gk_model.load_seat("s2"))
         gk_model.seat_path("s3").write_text("[1]")
         self.assertIsNone(gk_model.load_seat("s3"))
+        gk_model.save_seat("s5", "claude-haiku-5-5", "low", "s")
+        self.assertEqual(gk_model.load_seat("s5")["model"], "claude-haiku-5-5")
+        # a record from the profile era loads by its model
+        gk_model.seat_path("s6").write_text(json.dumps(
+            {"model": "claude-opus-5-5", "profile": "opus", "effort": "high", "source": "x"}))
+        self.assertEqual(gk_model.load_seat("s6")["effort"], "high")
 
-    def test_seat_card_exact(self):
-        c = gk_model.seat_card
+    # -- the seat card -----------------------------------------------------------------
+
+    def card(self, model, effort, routes=ROUTES):
+        return gk_model.seat_card(model, effort, routes, gk_model.seat_notes(model, effort, routes))
+
+    def test_card_each_alias_at_its_routes_effort(self):
+        for model in ("claude-opus-5-5", "claude-fable-5-2", "claude-sonnet-5-5", "opus"):
+            self.assertEqual(self.card(model, "medium"),
+                             "gk-harness seat: %s at medium \u00b7 routes v2" % model)
         self.assertEqual(
-            c("claude-opus-5-5", "opus", "xhigh"),
-            "gk-harness seat: claude-opus-5-5 at xhigh \u2192 Mode B (profile 'opus'). "
-            "Pass profile: 'opus' on every Workflow call. The policy expects effort high.")
-        high = c("claude-opus-5-5", "opus", "high")
-        self.assertNotIn("The policy expects", high)
-        self.assertTrue(high.endswith("on every Workflow call."))
-        none = c("claude-opus-5-5", "opus", None)
-        self.assertIn("at unknown effort", none)
-        self.assertIn("The policy expects effort high.", none)
-        self.assertTrue(c("claude-next-7", "sonnet", "high").endswith(
-            " claude-next-7 is not in the lineup, so Mode C rules apply; "
-            "say so to Carl in your first reply."))
+            self.card("claude-haiku-5-5", "low"),
+            "gk-harness seat: claude-haiku-5-5 at low \u00b7 routes v2. haiku is not a seat "
+            "model in routes.json; say so to Carl in your first reply.")
         self.assertEqual(
-            c(None, None, None),
-            "gk-harness seat: the model was not reported. Read the model named in your system "
-            "prompt, apply that mode, and pass profile explicitly on every Workflow call.")
-        for model in (None, "", "default", "<synthetic>", 42):
-            card = c(model, "opus", "high")
-            self.assertIn("an unreported model at high", card, model)
+            self.card("claude-haiku-5-5", None),
+            "gk-harness seat: claude-haiku-5-5 at unknown effort \u00b7 routes v2. haiku is not "
+            "a seat model in routes.json; say so to Carl in your first reply.")
+
+    def test_card_effort_off_the_routes_value(self):
+        self.assertEqual(self.card("claude-opus-5-5", "xhigh"),
+                         "gk-harness seat: claude-opus-5-5 at xhigh \u00b7 routes v2. "
+                         "routes.json puts the opus seat at medium.")
+        self.assertEqual(self.card("claude-fable-5-2", "high"),
+                         "gk-harness seat: claude-fable-5-2 at high \u00b7 routes v2. "
+                         "routes.json puts the fable seat at medium.")
+
+    def test_card_fable_off(self):
+        gk_common.write_json(gk_common.fable_off_file(), {"since": "2026-11-13T00:00:00Z"})
+        self.assertEqual(self.card("claude-opus-5-5", "medium"),
+                         "gk-harness seat: claude-opus-5-5 at medium \u00b7 routes v2. "
+                         "Fable is off: run gkh fable on to restore it.")
+
+    def test_card_routes_missing(self):
+        self.assertEqual(self.card("claude-opus-5-5", "high", None),
+                         "gk-harness seat: claude-opus-5-5 at high \u00b7 routes unavailable; "
+                         "tell Carl")
+        self.assertEqual(gk_model.seat_notes("claude-opus-5-5", "high", None), [])
+
+    def test_card_saved_default_model(self):
+        for default in ("opus", "claude-opus-5-5"):
+            self.write_settings({"model": default})
+            self.assertEqual(self.card("claude-opus-5-5", "medium"),
+                             "gk-harness seat: claude-opus-5-5 at medium \u00b7 routes v2")
+        self.write_settings({"model": "fable"})
+        self.assertEqual(self.card("claude-opus-5-5", "medium"),
+                         "gk-harness seat: claude-opus-5-5 at medium \u00b7 routes v2. The saved "
+                         "default model is fable, not opus (a /model choice is saved as the "
+                         "default).")
+        gk_common.write_json(gk_common.fable_off_file(), {})
+        self.write_settings({"model": "sonnet"})
+        self.assertEqual(self.card("claude-sonnet-5-5", "high"),
+                         "gk-harness seat: claude-sonnet-5-5 at high \u00b7 routes v2. "
+                         "routes.json puts the sonnet seat at medium. The saved default model is "
+                         "sonnet, not opus (a /model choice is saved as the default). Fable is "
+                         "off: run gkh fable on to restore it.")
+        self.write_settings({})  # no saved default: no note
+        self.assertEqual(self.card("claude-opus-5-5", "medium"),
+                         "gk-harness seat: claude-opus-5-5 at medium \u00b7 routes v2. "
+                         "Fable is off: run gkh fable on to restore it.")
+
+    def test_card_model_not_reported(self):
+        want = ("gk-harness seat: the model was not reported \u00b7 routes v2. Read the model "
+                "named in your system prompt and pass seat (its tier, e.g. opus-medium) on gk "
+                "Workflow calls.")
+        for model in (None, "", "default", "<synthetic>", 42, "claude-next-7"):
+            card = self.card(model, "high")
+            self.assertEqual(card, want, model)
             self.assertNotIn("None", card)
-            self.assertNotIn("not in the lineup", card)
-        self.assertIn("The policy expects", c(None, "opus", "low"))
-        self.assertEqual(c(None, ["opus"], "high"), c(None, None, None))
-        self.assertEqual(c("x", {}, "high"), c(None, None, None))
-        long_model = "claude-next-" + "m" * 300
-        card = c(long_model, "sonnet", "e" * 300)
+
+    def test_card_clips_and_stays_short(self):
+        long_model = "claude-opus-" + "m" * 300
+        card = self.card(long_model, "high")
         self.assertLess(len(card), 600)
         self.assertIn("\u2026", card)
         self.assertNotIn("m" * 100, card)
+        self.write_settings({"model": "x" * 300 + "\n# injected"})
+        gk_common.write_json(gk_common.fable_off_file(), {})
+        card = self.card(long_model, "e" * 300)
+        self.assertLess(len(card), 600)
+        self.assertNotIn("x" * 100, card)
         self.assertNotIn("e" * 100, card)
-        self.assertLess(len(c(long_model, "sonnet", "high")), 600)
-        for card in (c("claude-fable-5-1", "fable", "xhigh"), c("claude-next-7", "sonnet", None),
-                     c(None, None, None)):
+        self.assertNotIn("\n", card)
+        for card in (self.card("claude-fable-5-2", "xhigh"), self.card(None, None),
+                     self.card("claude-haiku-5-5", None, None)):
             self.assertLess(len(card), 600)
+            self.assertNotIn("Mode ", card)  # no CLAUDE.md vocabulary: modes or profiles
+            self.assertNotIn("profile", card)
 
-    def test_resolve_profile_order(self):
+    # -- the seat for a Workflow call -------------------------------------------------
+
+    def test_resolve_seat_order(self):
         data = {"session_id": "r1", "transcript_path": str(FIX / "opus_then_sonnet.jsonl")}
-        self.assertIsNone(gk_model.resolve_profile({}))
-        os.environ["GK_PROFILE"] = "fable"
-        self.assertEqual(gk_model.resolve_profile({}), "fable")
-        os.environ["GK_PROFILE"] = "bogus"
-        self.assertIsNone(gk_model.resolve_profile({}))
-        os.environ["GK_PROFILE"] = "fable"
-        self.assertEqual(gk_model.resolve_profile(data), "sonnet")
-        gk_model.save_seat("r1", "claude-opus-5-5", "opus", None, "s")
-        self.assertEqual(gk_model.resolve_profile(data), "opus")
+        with mock.patch.object(gk_model.gk_common, "load_routes", return_value=ROUTES):
+            self.assertIsNone(gk_model.resolve_seat({}))
+            self.assertIsNone(gk_model.resolve_seat(None))
+            os.environ["GK_PROFILE"] = "fable"  # retired: never read
+            self.assertIsNone(gk_model.resolve_seat({"session_id": "r1"}))
+            self.assertEqual(gk_model.resolve_seat(data), "sonnet-medium")
+            # a hook-input effort field is never read
+            self.assertEqual(gk_model.resolve_seat(dict(data, effort="max")), "sonnet-medium")
+            self.assertEqual(gk_model.resolve_seat(dict(data, effort={"level": "max"})),
+                             "sonnet-medium")
+            self.write_settings({"modelSettings": {"claude-sonnet-5-5": {"effortLevel": "high"}}})
+            self.assertEqual(gk_model.resolve_seat(data), "sonnet-high")
+            with mock.patch.object(gk_model, "launch_args", return_value=(None, "xhigh")):
+                self.assertEqual(gk_model.resolve_seat(data), "sonnet-xhigh")
+            with mock.patch.object(gk_model, "launch_args",
+                                   return_value=("claude-fable-5-2", None)):
+                self.assertEqual(gk_model.resolve_seat({"session_id": "r1"}), "fable-medium")
+            gk_model.save_seat("r1", "claude-opus-5-5", "xhigh", "startup", "launch")
+            self.assertEqual(gk_model.resolve_seat(data), "opus-xhigh")
+            gk_model.save_seat("r1", "claude-opus-5-5", None, "clear")
+            self.assertEqual(gk_model.resolve_seat(data), "opus-medium")
+            gk_model.save_seat("r1", "claude-haiku-5-5", None, "clear")
+            self.assertIsNone(gk_model.resolve_seat(data))
 
 
 DESKTOP_ARGV = ["/home/carls/.claude/remote/ccd-cli/2.1.317-a5bf08beebc8", "--output-format",

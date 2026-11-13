@@ -1,7 +1,9 @@
 """SessionStart / PostModelSwitch hook: record the seat and print the seat card.
 
-Standard library only, Python 3.9+. Writes ~/.claude/state/gk-seat/<sid>.json, and on a
-fresh start (at most once a day) checks whether the gk-harness checkout's origin is ahead.
+Standard library only, Python 3.9+. Writes ~/.claude/state/gk-seat/<sid>.json (model,
+effort and where the effort came from), prints the card from routes.json (installed beside
+this file), and on a fresh start (at most once a day) checks whether the gk-harness
+checkout's origin is ahead.
 """
 from __future__ import annotations
 
@@ -139,39 +141,44 @@ def handle(data: Any) -> None:
     sid = data.get("session_id")
     if event not in ("SessionStart", "PostModelSwitch") or gk_common.safe_sid(sid) is None:
         return
+    known = gk_model.alias_for_model
+    routes = gk_common.load_routes()
     seat = gk_model.load_seat(sid) or {}
-    effort = gk_model.effort_of(data)
     source = data.get("source")
+    # The input never carries an effort (Stage 0 proof 5). A launch --effort beats settings
+    # for the life of the process, so a stored one carries over /clear, compaction and
+    # /model; a fresh process (startup, resume) reads its own command line instead.
+    fresh = event == "SessionStart" and source in ("startup", "resume")
+    launch_effort = seat.get("effort") if seat.get("effortFrom") == "launch" and not fresh else None
     if event == "PostModelSwitch":
         model = data.get("to_model")
-        if gk_model.profile_for_model(model) is None:
+        if known(model) is None:
             model = data.get("requested_model")
-        if gk_model.profile_for_model(model) is None:
+        if known(model) is None:
             # The new seat is unknown: drop the old record so nothing keeps acting on it.
             gk_common._remove_quietly(str(gk_model.seat_path(sid)))
-            _reply(event, gk_model.seat_card(None, None, None))
+            _reply(event, gk_model.seat_card(None, None, routes,
+                                             gk_model.seat_notes(None, None, routes)))
             return
-        effort = effort or seat.get("effort")
     else:
         model = data.get("model")
-        if gk_model.profile_for_model(model) is None:
+        if known(model) is None:
             model = seat.get("model")
-        effort = effort or seat.get("effort")
         # The launch command is read at startup or resume (a desktop relaunch is a fresh
-        # process), at most once, and never after /clear or a compaction: that process may
-        # have switched model since it was launched.
-        if source in ("startup", "resume") and (
-                gk_model.profile_for_model(model) is None or not effort):
+        # process), once, and never after /clear or a compaction: that process may have
+        # switched model since it was launched.
+        if fresh:
             launch = gk_model.launch_args()
-            if gk_model.profile_for_model(model) is None:
+            if known(model) is None:
                 model = launch[0]
-            effort = effort or launch[1]
-        if gk_model.profile_for_model(model) is None:
+            launch_effort = launch[1]
+        if known(model) is None:
             model = gk_model.model_from_transcript(data.get("transcript_path"))
-    profile = gk_model.profile_for_model(model)
-    if profile is not None:
-        gk_model.save_seat(sid, model, profile, effort, source if isinstance(source, str) else event)
-    card = gk_model.seat_card(model, profile, effort)
+    effort, effort_from = gk_model.resolve_effort(model, launch_effort, routes)
+    if known(model) is not None:
+        gk_model.save_seat(sid, model, effort, source if isinstance(source, str) else event,
+                           effort_from)
+    card = gk_model.seat_card(model, effort, routes, gk_model.seat_notes(model, effort, routes))
     if event == "SessionStart" and source == "startup":
         line = update_notice()
         if line:

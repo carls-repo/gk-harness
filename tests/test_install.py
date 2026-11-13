@@ -1054,7 +1054,7 @@ class CommandTests(InstallBase):
         base = {"session_id": "s1", "hook_event_name": event, "cwd": str(self.tmp),
                 "transcript_path": "", "permission_mode": "default"}
         if event == "SessionStart":
-            base.update(source="resume", model="claude-fable-5-1", effort={"level": "high"})
+            base.update(source="resume", model="claude-fable-5-1")
         elif event == "PostModelSwitch":
             base.update(to_model="claude-opus-5-5", from_model="claude-fable-5-1")
         elif event == "UserPromptSubmit":
@@ -1112,7 +1112,9 @@ class CommandTests(InstallBase):
                     if event == "SessionStart" and command.endswith('gk-seat.py"'):
                         reply = json.loads(proc.stdout.decode("utf-8"))
                         card = reply["hookSpecificOutput"]["additionalContext"]
-                        self.assertIn("gk-harness seat: claude-fable-5-1 at high", card)
+                        # the installed hook reads the routes.json installed beside it
+                        self.assertRegex(card, r"^gk-harness seat: claude-fable-5-1 at \w+ "
+                                               "\u00b7 routes v2")
                         seen_card += 1
         self.assertEqual(seen_card, 2 if bash else 1)
         # The hooks have run, so Python left a __pycache__ beside them; uninstall still removes

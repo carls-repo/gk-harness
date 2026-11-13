@@ -153,6 +153,53 @@ class SidAndDirTests(unittest.TestCase):
             self.assertEqual(gk_common.claude_dir(), Path.home() / ".claude")
 
 
+class RoutesAndFableOffTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix=TMP_PREFIX)
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        env = mock.patch.dict(os.environ, {"GK_CLAUDE_DIR": self.tmp})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_routes_file_in_the_checkout_is_the_repo_root_copy(self):
+        # Installed, routes.json sits beside the hooks; in the checkout the hooks live in
+        # hooks/ and routes.json one level up.
+        self.assertEqual(gk_common.routes_file().resolve(),
+                         (HOOKS.parent / "routes.json").resolve())
+        routes = gk_common.load_routes()
+        self.assertIsInstance(routes, dict)
+        self.assertEqual(routes["version"], 2)
+        self.assertEqual(routes["seat"]["effort"]["opus"], "medium")
+
+    def test_routes_file_beside_installed_hooks(self):
+        hooks = Path(self.tmp) / "hooks" / "gk-harness"
+        hooks.mkdir(parents=True)
+        fake = hooks / "gk_common.py"
+        with mock.patch.object(gk_common, "__file__", str(fake)):
+            self.assertEqual(gk_common.routes_file(), hooks / "routes.json")
+
+    def test_load_routes_unusable(self):
+        p = Path(self.tmp) / "routes.json"
+        with mock.patch.object(gk_common, "routes_file", return_value=p):
+            self.assertIsNone(gk_common.load_routes())  # missing
+            for text in ("{nope", "[1]", '{"version": "2", "seat": {"effort": {}}}',
+                         '{"version": 2}', '{"version": 2, "seat": {"effort": []}}',
+                         '{"version": true, "seat": {"effort": {}}}'):
+                p.write_text(text, encoding="utf-8")
+                self.assertIsNone(gk_common.load_routes(), text)
+            p.write_text('{"version": 3, "seat": {"effort": {"opus": "high"}}}', encoding="utf-8")
+            self.assertEqual(gk_common.load_routes()["version"], 3)
+
+    def test_fable_off(self):
+        self.assertEqual(gk_common.fable_off_file(),
+                         Path(self.tmp) / "state" / "gk-fable-off.json")
+        self.assertFalse(gk_common.fable_off())
+        gk_common.write_json(gk_common.fable_off_file(), {"since": "2026-11-13T00:00:00Z"})
+        self.assertTrue(gk_common.fable_off())
+        os.unlink(gk_common.fable_off_file())
+        self.assertFalse(gk_common.fable_off())
+
+
 class JsonFileTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix=TMP_PREFIX)

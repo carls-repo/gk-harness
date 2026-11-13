@@ -1,18 +1,28 @@
-"""PreToolUse hook on the Workflow tool: run gk-* workflows under the seat's profile.
+"""PreToolUse hook on the Workflow tool: fill in what a gk-* workflow call left out of `args`.
 
-Standard library only, Python 3.9+. For a gk-* call it fills in what the seat left out of
-`args`: the seat's profile, the project file (`.claude/gk-project.json` at the session's git
-top level, plus `root`), and for gk-diagnose the session scratchpad. An explicit value is
-always kept; a profile above the seat without `escalate: true` draws a warning. It never
-blocks: there is no permissionDecision, only updatedInput and warnings.
+Standard library only, Python 3.9+. The filename is historical: the hook no longer deals in
+profiles for current scripts. It never blocks: there is no permissionDecision, only
+updatedInput and warnings. An explicit value is always kept, except `project.legal`.
 
-The hook injects only into a script that carries the gk-harness marker (`gk-harness:args-v1`
-in its first 16 KB, on the line after `meta`), because an older copy may reject keys it does
-not know. The script is the one the call runs: for a `name`, the first regular file of
+What a gk call gets depends on the marker in the script it runs (the first MARKER_SCAN
+bytes, on the line after `meta`):
+
+- `gk-harness:args-v2` (the current scripts): `seat`, the seat's tier from routes.json
+  (`opus-medium`; none when unknown); `dials`, the caller's list plus `nofable` while
+  `gkh fable off` holds; `project`, the project file (`.claude/gk-project.json` at the
+  session's git top level, plus `root`), whose `legal` always comes from that file, even into
+  a project the caller passed; `scratchpad` for gk-diagnose; and `changedPaths` for gk-review,
+  from git, only for a target that passes gk-review's own pattern. No `profile`.
+- `gk-harness:args-v1` (an older copy still on disk): exactly what it always got, `profile`
+  from the seat's model, `project` and `scratchpad`, with the warning for a profile above the
+  seat; nothing it might reject as unknown.
+- no marker: nothing is injected, only a note in the context saying so.
+
+The script is the one the call runs: for a `name`, the first regular file of
 `<git top level>/.claude/workflows/<name>.js`, `<cwd>/.claude/workflows/<name>.js` and
 `<claude dir>/workflows/<name>.js`; for a `scriptPath`, that path (against `cwd` when
-relative). A script found without the marker gets nothing injected, only a note in the
-context saying so; when no script is found, the hook injects as usual.
+relative). When no script is found the hook injects as for args-v2, the version the
+installer puts in place.
 
 The name also comes from the script the runtime saves for each run
 (`gk-review-wf_<id>.js`), so a call that re-runs or resumes by `scriptPath` is a gk call too.
@@ -31,8 +41,21 @@ import gk_model
 
 _NAME_RE = re.compile(r"gk-[a-z0-9-]+")
 _SCRIPT_RE = re.compile(r"(gk-[a-z0-9-]+?)(?:-wf_[0-9a-z]+(?:-[0-9a-z]+)*)?\.js")
-MARKERS = (b"gk-harness:args-v1", b"gk-harness:args-v2")  # the scripts that take profile, project and scratchpad
+# args-v1 scripts take profile, project and scratchpad; args-v2 scripts take seat, dials,
+# project, scratchpad and changedPaths instead of profile.
+MARKERS = (b"gk-harness:args-v1", b"gk-harness:args-v2")
 MARKER_SCAN = 16384  # bytes read from the head of a script when looking for the marker
+WORKING_TREE = "working-tree"
+# gk-review's own target check (workflows/gk-review.js), the same source text; a test keeps
+# them equal. A target must also not contain "..-", so no range end reads as an option.
+TARGET_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._\/~^@{}-]*(\.\.\.?[A-Za-z0-9][A-Za-z0-9._\/~^@{}-]*)?$"
+TARGET_RE = re.compile(TARGET_PATTERN)
+CHANGED_MAX = 2000
+_MISSING = object()
+
+# args-v1 only: the profile an old script expects, by the seat model's alias (none for haiku).
+_V1_PROFILE = {"fable": "fable", "opus": "opus", "sonnet": "sonnet"}
+_V1_RANK = {"sonnet": 1, "opus": 2, "fable": 3}
 
 HIGHER = ("gk-harness: this Workflow call asks for profile '{p}' above the seat ('{seat}') "
           "without escalate: true. The policy allows that only on Carl's word.")
@@ -108,8 +131,9 @@ def _script_file(tool_input: dict, top: Path | None, cwd: Any) -> Path | None:
     return None
 
 
-def _marked(path: Path) -> bool:
-    """True when the script's first MARKER_SCAN bytes carry the gk-harness marker.
+def _marker_version(path: Path) -> int | None:
+    """2 when the script's first MARKER_SCAN bytes carry the args-v2 marker, 1 when they carry
+    only the args-v1 one, None when they carry neither.
 
     The file is opened without blocking and checked again once open, so a FIFO swapped in
     after the stat is never read; anything unreadable counts as unmarked.
@@ -118,15 +142,147 @@ def _marked(path: Path) -> bool:
     try:
         fd = os.open(str(path), flags)
     except (OSError, ValueError):
-        return False
+        return None
     try:
         with os.fdopen(fd, "rb") as f:
             if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                return False
+                return None
             head = f.read(MARKER_SCAN)
-            return any(m in head for m in MARKERS)
     except (OSError, ValueError):
+        return None
+    if MARKERS[1] in head:
+        return 2
+    return 1 if MARKERS[0] in head else None
+
+
+def target_ok(target: Any) -> bool:
+    """Whether gk-review would accept this target: "working-tree", or a ref-shaped range."""
+    if not isinstance(target, str):
         return False
+    if target == WORKING_TREE:
+        return True
+    return TARGET_RE.fullmatch(target) is not None and "..-" not in target
+
+
+def changed_paths(top: Path, target: str) -> list[str] | None:
+    """The paths gk-review's target changes, relative to the top level, at most CHANGED_MAX.
+
+    A range is diffed as gk-review's finders diff it (`git diff <target>`, so `A...B` runs
+    from the merge base); "working-tree" is `git diff HEAD` plus the untracked files git does
+    not ignore. None when the target fails gk-review's pattern (and then no git runs at all)
+    or when git fails.
+    """
+    if not target_ok(target):
+        return None
+    # No fsmonitor or external diff program runs; --no-renames: a renamed file counts at
+    # both paths; "--" ends the revisions, so the target can never be read as a path.
+    git = ["-c", "core.fsmonitor=false"]
+    diff = git + ["diff", "--no-ext-diff", "--no-renames", "--name-only", "-z"]
+    if target == WORKING_TREE:
+        runs = [diff + ["HEAD", "--"], git + ["ls-files", "--others", "--exclude-standard", "-z"]]
+    else:
+        runs = [diff + [target, "--"]]
+    paths: list = []
+    seen: set = set()
+    for git_args in runs:
+        r = gk_common._git(top, git_args)
+        if r is None or r.returncode != 0:
+            return None
+        for p in r.stdout.split("\0"):
+            if p and p not in seen:
+                seen.add(p)
+                paths.append(p)
+                if len(paths) >= CHANGED_MAX:
+                    return paths
+    return paths
+
+
+def _v1_profile(data: dict) -> str | None:
+    """args-v1 scripts only: the seat state's model, then the transcript's, then
+    $GK_PROFILE, mapped to the profile an old script expects."""
+    rec = gk_model.load_seat(data.get("session_id"))
+    p = _V1_PROFILE.get(gk_model.alias_for_model(rec["model"])) if rec else None
+    if p:
+        return p
+    model = gk_model.model_from_transcript(data.get("transcript_path"))
+    p = _V1_PROFILE.get(gk_model.alias_for_model(model))
+    if p:
+        return p
+    env = os.environ.get("GK_PROFILE")
+    return env if env in _V1_RANK else None
+
+
+def _inject_project(args: dict, top: Path | None, warnings: list) -> bool:
+    """Add the project file (plus root) when args has no project key. True when added."""
+    if "project" in args or top is None:
+        return False
+    root = top.as_posix()
+    project, reason = gk_common.load_project(top)
+    args["project"] = dict(project or {}, root=root)
+    if reason is not None:
+        warnings.append(UNREADABLE.format(root=root, reason=reason))
+    return True
+
+
+def _set_legal(args: dict, top: Path | None) -> bool:
+    """Make `project.legal` the project file's: set it from the file, or remove it when the
+    file has none (no repository, no file, an unreadable file). True when args changed."""
+    project = args.get("project")
+    if not isinstance(project, dict):
+        return False  # absent, or malformed: the script rejects what it cannot use
+    data = gk_common.load_project(top)[0] if top is not None else None
+    if isinstance(data, dict) and "legal" in data:
+        legal = data["legal"]
+        cur = project.get("legal", _MISSING)
+        if cur is not _MISSING and type(cur) is type(legal) and cur == legal:
+            return False
+        args["project"] = dict(project, legal=legal)
+        return True
+    if "legal" in project:
+        args["project"] = {k: v for k, v in project.items() if k != "legal"}
+        return True
+    return False
+
+
+def _inject_v2(name: str, args: dict, data: dict, top: Path | None, warnings: list) -> bool:
+    changed = False
+    if _absent(args, "seat"):
+        seat = gk_model.resolve_seat(data)
+        if seat is not None:
+            args["seat"] = seat
+            changed = True
+    if gk_common.fable_off():
+        dials = args.get("dials")
+        if dials is None:
+            args["dials"] = ["nofable"]
+            changed = True
+        elif isinstance(dials, list) and "nofable" not in dials:
+            args["dials"] = dials + ["nofable"]
+            changed = True
+    changed = _inject_project(args, top, warnings) or changed
+    changed = _set_legal(args, top) or changed
+    if name == "gk-review" and _absent(args, "changedPaths") and top is not None:
+        paths = changed_paths(top, args.get("target"))
+        if paths is not None:
+            args["changedPaths"] = paths
+            changed = True
+    return changed
+
+
+def _inject_v1(args: dict, data: dict, top: Path | None, warnings: list) -> bool:
+    """Today's behaviour for an old args-v1 copy: profile, project, nothing new."""
+    changed = False
+    seat = _v1_profile(data)
+    if _absent(args, "profile"):
+        if seat is not None:
+            args["profile"] = seat
+            changed = True
+    else:
+        p = args["profile"]
+        if (isinstance(p, str) and p in _V1_RANK and seat is not None
+                and _V1_RANK[p] > _V1_RANK[seat] and args.get("escalate") is not True):
+            warnings.append(HIGHER.format(p=p, seat=seat))
+    return _inject_project(args, top, warnings) or changed
 
 
 def handle(data: Any) -> None:
@@ -144,7 +300,8 @@ def handle(data: Any) -> None:
     cwd = data.get("cwd")
     top = gk_common.git_toplevel(cwd) if isinstance(cwd, str) and cwd else None
     script_file = _script_file(tool_input, top, cwd)
-    if script_file is not None and not _marked(script_file):
+    version = 2 if script_file is None else _marker_version(script_file)
+    if version is None:
         # An older copy runs (the repo's own, as a rule) and may reject keys it does not know.
         gk_common.emit({"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                                "additionalContext": PROJECT_COPY.format(
@@ -154,27 +311,11 @@ def handle(data: Any) -> None:
     if args is None:
         return
 
-    changed = False
-    warnings = []
-
-    seat = gk_model.resolve_profile(data)
-    if _absent(args, "profile"):
-        if seat is not None:
-            args["profile"] = seat
-            changed = True
+    warnings: list = []
+    if version == 1:
+        changed = _inject_v1(args, data, top, warnings)
     else:
-        p = args["profile"]
-        if (isinstance(p, str) and p in gk_model.RANK and seat is not None
-                and gk_model.RANK[p] > gk_model.RANK[seat] and args.get("escalate") is not True):
-            warnings.append(HIGHER.format(p=p, seat=seat))
-
-    if "project" not in args and top is not None:
-        root = top.as_posix()
-        project, reason = gk_common.load_project(top)
-        args["project"] = dict(project or {}, root=root)
-        changed = True
-        if reason is not None:
-            warnings.append(UNREADABLE.format(root=root, reason=reason))
+        changed = _inject_v2(name, args, data, top, warnings)
 
     scratch = data.get("scratchpad_dir")
     if (name == "gk-diagnose" and _absent(args, "scratchpad") and isinstance(scratch, str)
