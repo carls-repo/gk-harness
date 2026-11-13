@@ -930,3 +930,122 @@ test('degraded results keep signOff null, gk-design: too few proposals or no jud
   assert.ok(none.calls.every((c) => c.label !== 'sign-off'))
   assert.deepEqual(none.result.routing.offTier.map((o) => [o.label, o.reason]), [['judge:1', 'onFail'], ['judge:2', 'onFail']])
 })
+
+// ---------------- tiers live only in the routes block (Task 13) ----------------
+
+// src without its comments; strings, template literals and regular expressions are kept as
+// written, so a quoted tier name in any of them still counts.
+function withoutComments(src) {
+  let out = ''
+  let i = 0
+  let last = '' // the last significant code character: tells a regex literal from division
+  const KEYWORD_BEFORE_VALUE = /(?:^|[^\w$])(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)\s*$/
+  const regexAllowed = () => !last || !/[\w$)\]]/.test(last) || KEYWORD_BEFORE_VALUE.test(out)
+  const braces = [] // one open-brace counter per ${ ... } we are inside
+  const template = () => { // i is just past a backtick, or the } that closes a ${ ... }
+    while (i < src.length) {
+      if (src[i] === '\\') { out += src.slice(i, i + 2); i += 2; continue }
+      if (src[i] === '`') { out += '`'; i++; last = ')'; return }
+      if (src[i] === '$' && src[i + 1] === '{') { out += '${'; i += 2; braces.push(0); last = '{'; return }
+      out += src[i++]
+    }
+  }
+  while (i < src.length) {
+    const c = src[i]
+    const d = src[i + 1]
+    if (c === '/' && d === '/') { while (i < src.length && src[i] !== '\n') i++; continue }
+    if (c === '/' && d === '*') { const e = src.indexOf('*/', i + 2); i = e < 0 ? src.length : e + 2; out += ' '; continue }
+    if (c === '"' || c === "'") {
+      const start = i++
+      while (i < src.length && src[i] !== c && src[i] !== '\n') i += src[i] === '\\' ? 2 : 1
+      i++
+      out += src.slice(start, i)
+      last = ')'
+      continue
+    }
+    if (c === '`') { out += '`'; i++; template(); continue }
+    if (c === '/' && regexAllowed()) {
+      const start = i++
+      let inClass = false
+      while (i < src.length && src[i] !== '\n') {
+        if (src[i] === '\\') { i += 2; continue }
+        if (src[i] === '[') inClass = true
+        else if (src[i] === ']') inClass = false
+        else if (src[i] === '/' && !inClass) break
+        i++
+      }
+      i++
+      while (i < src.length && /[a-z]/.test(src[i])) i++
+      out += src.slice(start, i)
+      last = ')'
+      continue
+    }
+    if (braces.length && c === '{') braces[braces.length - 1]++
+    if (braces.length && c === '}') {
+      if (braces[braces.length - 1] === 0) { braces.pop(); out += '}'; i++; template(); continue }
+      braces[braces.length - 1]--
+    }
+    out += c
+    if (!/\s/.test(c)) last = c
+    i++
+  }
+  return out
+}
+
+test('withoutComments: drops comments, keeps strings, templates and regular expressions', () => {
+  const cases = [
+    ["const a = 'x' // model: 'opus'", "const a = 'x' "],
+    ["/* effort: 'high' */ f('xhigh')", "  f('xhigh')"],
+    ["const u = 'https://example.com' + \"//kept\"", "const u = 'https://example.com' + \"//kept\""],
+    ['const t = `a ${b /* gone */} // kept ${`in ${"x"}`}` // gone', 'const t = `a ${b  } // kept ${`in ${"x"}`}` '],
+    ["const r = /\\/\\/ not a comment/g.test(s) // gone", "const r = /\\/\\/ not a comment/g.test(s) "],
+    ['const q = a / b // gone', 'const q = a / b '],
+  ]
+  for (const [src, want] of cases) assert.equal(withoutComments(src), want, src)
+})
+
+// A tier is named by model and effort in the routes block only, which gen writes from
+// routes.json; a stage takes its route from runStage or routeOf. meta.phases[].model is gen's
+// too (gen --check covers it), so the phase labels are left out.
+const TIER_LITERALS = ["model: '", "effort: '", "'xhigh'", "'max'"]
+const PHASE_MODEL = /(^\s*\{ title: '[^'\\]*'.*), model: '[a-z0-9-]+'( \},?)$/gm
+// The lines of a script that name a tier literal, once its routes block, its comments and its
+// meta.phases model labels are removed.
+function tierLiteralLines(src) {
+  const { at } = markerAt(src)
+  const blk = blockOf(src)
+  // The block comes after the marker, so removing it leaves meta (everything before) in place.
+  const noBlock = blk.count ? [...blk.lines.slice(0, blk.begin), ...blk.lines.slice(blk.end + 1)].join('\n') : src
+  const code = withoutComments(noBlock.slice(0, at).replace(PHASE_MODEL, '$1$2') + noBlock.slice(at))
+  return code.split('\n').filter((l) => TIER_LITERALS.some((lit) => l.includes(lit)))
+}
+
+test('tierLiteralLines: finds a tier literal in code, not in the routes block, a comment or a phase label', () => {
+  const block = blockOf(readFileSync(join(workflowsDir, 'gk-design.js'), 'utf8')).text
+  const script = (body) => [
+    'export const meta = {',
+    '  phases: [',
+    "    { title: 'Judge', detail: 'd', model: 'fable' },",
+    '  ],',
+    '}',
+    '// gk-harness:args-v2',
+    "// ================= gk-project block: END =================",
+    block,
+    "// agent(p, { model: 'opus', effort: 'xhigh' })",
+    body,
+  ].join('\n')
+  assert.deepEqual(tierLiteralLines(script("runStage('s', {}, p, { label: 'x' })")), [])
+  for (const lit of ["agent(p, { model: 'opus' })", "agent(p, { effort: 'high' })", "const e = 'xhigh'", "if (x === 'max') y()", "const m = { title: 'T', model: 'fable' }"]) {
+    assert.deepEqual(tierLiteralLines(script(lit)), [lit], lit)
+  }
+})
+
+test('no tier literals outside the routes block: in every gk script, with the block, comments and meta.phases model labels removed', () => {
+  const files = scripts()
+  assert.ok(files.length >= 6)
+  for (const f of files) {
+    const src = readFileSync(join(workflowsDir, f), 'utf8')
+    assert.ok(markerAt(src).at > 0, `${f}: the marker`)
+    assert.deepEqual(tierLiteralLines(src), [], `${f}: tier literals outside the routes block`)
+  }
+})
