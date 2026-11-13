@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "priceSource": "/tmp/claude-1000/bundled-skills/2.1.321/b65716ee1119fb9975c64126fa926707/claude-api/shared/models.md (lines 78-91); cache writes are the 5-minute rate, 1.25x input, from shared/cost-optimization.md line 25; prices per million tokens",
+  "efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ],
+  "models": {
+    "haiku": {
+      "id": "claude-haiku-5-5",
+      "rank": 1,
+      "display": "Haiku 5.5",
+      "price": {
+        "input": 0.1,
+        "output": 0.5,
+        "cacheWrite": 0.125,
+        "cacheRead": 0.01,
+        "derived": [
+          "cacheRead"
+        ]
+      },
+      "priceOver100k": {
+        "input": 0.5,
+        "output": 2.5,
+        "cacheWrite": 0.625,
+        "cacheRead": 0.05,
+        "derived": [
+          "cacheRead"
+        ]
+      },
+      "priceDate": "2026-11-13"
+    },
+    "sonnet": {
+      "id": "claude-sonnet-5-5",
+      "rank": 2,
+      "display": "Sonnet 5.5",
+      "price": {
+        "input": 2,
+        "output": 10,
+        "cacheWrite": 2.5,
+        "cacheRead": 0.1
+      },
+      "priceDate": "2026-11-13"
+    },
+    "opus": {
+      "id": "claude-opus-5-5",
+      "rank": 3,
+      "display": "Opus 5.5",
+      "price": {
+        "input": 4,
+        "output": 20,
+        "cacheWrite": 5,
+        "cacheRead": 0.2
+      },
+      "priceDate": "2026-11-13"
+    },
+    "fable": {
+      "id": "claude-fable-5-2",
+      "rank": 4,
+      "display": "Fable 5.2",
+      "price": {
+        "input": 8,
+        "output": 40,
+        "cacheWrite": 10,
+        "cacheRead": 0.2
+      },
+      "priceDate": "2026-11-13"
+    }
+  },
+  "tiers": {
+    "haiku-low": {
+      "model": "haiku",
+      "effort": "low",
+      "agent": "worker-haiku-low",
+      "description": "Cheapest worker (Haiku 5.5, low effort). Use for run-and-report chores — running tests, builds or audits and reporting the output, renames, formatting, find-and-replace, dependency bumps, generating boilerplate from an exact specification. The brief must fit well inside 100k tokens (a handful of named files, never a sweep). Not for anything requiring judgement.",
+      "body": "\nYou are a mechanical-task worker receiving a self-contained brief from an orchestrator.\n\n- Do exactly what the brief says; do not expand scope or \"improve\" things beyond it.\n- Read only the files the brief names. If you would need to read more than that to proceed, stop and report it — do not sweep the tree.\n- If the brief is ambiguous or you hit a blocker, stop and report it — do not guess.\n- Match the conventions of the surrounding code.\n- Your final message is consumed by the orchestrator, not a human: report what you did, files touched, and command output (including failures, verbatim, piped through `tail` if long). No pleasantries.\n"
+    },
+    "haiku-high": {
+      "model": "haiku",
+      "effort": "high",
+      "agent": "worker-haiku",
+      "description": "Cheap worker (Haiku 5.5, high effort). Use for simple tasks that fit inside ~100k tokens of context — boilerplate from an exact spec, changelog entries, doc touch-ups, bounded recon with a named file list returning a structured answer, multi-file mechanical chores, and the reader / classifier / dedup / cheap-refuter stages inside workflows. The brief names the files; a worker that would need to sweep, or that stalls, is escalated to worker-sonnet rather than retried here.",
+      "body": "\nYou are a cost-efficient worker receiving a self-contained brief from an orchestrator.\n\n- Follow the brief exactly; do not expand scope. If something is ambiguous or blocked, stop and report rather than guessing.\n- Read only the files the brief names, plus what is strictly necessary to make the change compile. If the task turns out to need a wider read or real design judgement, stop and say so — the orchestrator will escalate; do not push on.\n- Match the conventions, naming and idiom of the surrounding code.\n- Verify your work before reporting: run the check the brief names (or the obvious project check if none is named).\n- Your final message is consumed by the orchestrator: what changed, files touched, verification output (honestly, including failures), and anything the orchestrator must know. Keep it to ~20 lines; no file dumps.\n"
+    },
+    "sonnet-medium": {
+      "model": "sonnet",
+      "effort": "medium",
+      "agent": "worker-sonnet",
+      "description": "Routine implementation worker (Sonnet 5.5, medium effort). Use for well-specified work — bug fixes with a known cause, CRUD endpoints, tests for existing behaviour, bounded refactors, and the finder and refuter stages inside review workflows. The escalation rung above worker-haiku. Not for design decisions or unclear problems.",
+      "body": "\nYou are an implementation worker receiving a self-contained brief from an orchestrator.\n\n- Follow the brief exactly; do not expand scope. If something is ambiguous or blocked, stop and report rather than guessing.\n- Match the conventions, naming and idiom of the surrounding code.\n- Verify your work before reporting: run the tests/build the brief names (or the obvious project check if none named).\n- Your final message is consumed by the orchestrator: state what changed, files touched, verification results (honestly, including failures), and anything the orchestrator must know.\n"
+    },
+    "opus-high": {
+      "model": "opus",
+      "effort": "high",
+      "agent": "worker-opus",
+      "description": "Standard heavyweight worker (Opus 5.5, high effort). Use for typical feature implementation, multi-file changes, debugging with an unclear cause, code review, and refactors that require understanding intent. The default for substantial non-UI coding work.",
+      "body": "\nYou are a senior implementation worker receiving a self-contained brief from an orchestrator.\n\n- Deliver the brief's goal; surface (don't silently absorb) anything you discover that changes the picture.\n- Read enough surrounding code to fit the existing architecture; match its conventions.\n- Verify your work before reporting: run the relevant tests/build and confirm behaviour.\n- Your final message is consumed by the orchestrator: what changed and why, files touched, verification evidence (honest, including failures), open risks or follow-ups.\n"
+    },
+    "opus-xhigh": {
+      "model": "opus",
+      "effort": "xhigh",
+      "agent": "worker-opus-xhigh",
+      "description": "Deep heavyweight worker (Opus 5.5, xhigh effort). Use for complex multi-file implementation, tricky debugging, performance investigation, and intricate refactors — work that needs sustained reasoning but not the absolute top tier.",
+      "body": "\nYou are a senior implementation worker on a hard task, receiving a self-contained brief from an orchestrator.\n\n- Reason carefully before editing: trace the actual code paths involved; do not pattern-match to a plausible fix.\n- Deliver the brief's goal; surface anything you discover that changes the picture.\n- Verify with evidence before reporting: failing case reproduced, then shown fixed; tests/build run.\n- Your final message is consumed by the orchestrator: root cause / design rationale, what changed, files touched, verification evidence (honest, including failures), open risks.\n"
+    },
+    "opus-max": {
+      "model": "opus",
+      "effort": "max",
+      "agent": "worker-opus-max",
+      "description": "Maximum-effort Opus worker (Opus 5.5, max effort). Escalation option when a failed xhigh attempt warrants max effort at Opus cost rather than the Fable tier — deep correctness work, hostile debugging with no leads, subtle state/concurrency bugs, security-sensitive design. Expensive; never the first choice.",
+      "body": "\nYou are a maximum-effort reasoning tier (Opus 5.5 at maximum effort), receiving a self-contained brief from an orchestrator. A previous attempt has often failed — the brief should include what was tried and how it failed; weigh that evidence rather than repeating it.\n\n- Build a precise model of the problem before acting: reproduce it, instrument it, prove the mechanism.\n- Question the premises in the brief if the evidence contradicts them, and say so.\n- Verify with evidence before reporting; your final message is consumed by the orchestrator: the mechanism found / decision made, what changed, files touched, verification evidence (honest, including failures), residual uncertainty.\n"
+    },
+    "fable-xhigh": {
+      "model": "fable",
+      "effort": "xhigh",
+      "agent": "worker-fable",
+      "description": "Apex worker (Fable 5.2, xhigh effort). Use for the hardest reasoning — architecture, gnarly concurrency/correctness bugs, security-sensitive code — for ALL UI/UX build and design-review work (visual design, styling, component polish, UX flows), and for judge stages that must outrank an Opus-xhigh implementer. Runs in parallel to the seat; when the question is the very thing under discussion, the seat does it inline.",
+      "body": "\nYou are a top-tier worker receiving a self-contained brief from an orchestrator.\n\n- For design/architecture briefs: weigh real alternatives, then commit to a recommendation with rationale — not a survey.\n- For UI/UX briefs: production-grade polish; match the project's existing design language and tokens unless the brief says otherwise.\n- For bugs: find the root cause with evidence before changing anything.\n- Verify before reporting; your final message is consumed by the orchestrator: decision/diagnosis, what changed, files touched, verification evidence (honest, including failures), open risks.\n"
+    },
+    "fable-max": {
+      "model": "fable",
+      "effort": "max",
+      "agent": "worker-fable-max",
+      "description": "Maximum-effort worker (Fable 5.2, max effort). Last resort — use only when an xhigh-effort attempt has failed or the problem is exceptionally hard (deep correctness proofs, hostile debugging with no leads, subtle distributed/state bugs). Expensive; never the first choice.",
+      "body": "\nYou are the escalation tier. A previous attempt has usually failed — the brief should include what was tried and how it failed; weigh that evidence rather than repeating it.\n\n- Build a precise model of the problem before acting: reproduce it, instrument it, prove the mechanism.\n- Question the premises in the brief if the evidence contradicts them, and say so.\n- Verify with evidence before reporting; your final message is consumed by the orchestrator: the mechanism found, what changed, files touched, verification evidence (honest, including failures), residual uncertainty.\n"
+    }
+  }
+}
