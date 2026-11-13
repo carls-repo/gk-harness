@@ -232,7 +232,7 @@
       "check": "judge sheet"
     },
     "design-panel": {
-      "tier": "fable-medium",
+      "tier": "fable-high",
       "who": "workflow",
       "examples": "gk-design's judges over the proposals",
       "check": "judge sheet"
@@ -240,7 +240,7 @@
     "judge-opus": {
       "tier": "fable-medium",
       "who": "workflow",
-      "examples": "a judge over work done on Opus",
+      "examples": "the judge stages over Opus work: `gk-build.judge`, `gk-diagnose.adjudicate`",
       "check": "judge sheet"
     },
     "judge-sensitive": {
@@ -252,7 +252,7 @@
     "ui-signoff": {
       "tier": "fable-high",
       "who": "workflow",
-      "examples": "the sign-off on anything that reaches a user's screen",
+      "examples": "gk-design's UI sign-off over the winner: `gk-design.sign-off`",
       "check": "judge sheet"
     },
     "legal-doc": {

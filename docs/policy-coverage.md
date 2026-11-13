@@ -21,7 +21,7 @@ longer a rule anywhere, for the reason given.
 | 15–16 | A seat card arrives at start and after `/model` | first paragraph | kept: the card now reads `gk-harness seat: <model> at <effort> · routes v<N>`, with its notes |
 | 16–17 | After `/model`, re-read the model and switch mode | first paragraph | replaced: the card after `/model` gives the new model and effort; there is no mode to switch |
 | 17–19 | The profile hook injects `profile` and `project`; the seat passes `profile` on every call | When to orchestrate — Project rules | replaced: profiles are retired. The hook injects `project`, `seat`, `dials` and `changedPaths`; the workflows log and ignore a stray `profile` for one version (design 8.1) |
-| 20–21 | `gk`, `gk-opus`, `gk-sonnet` are launch shortcuts | The seat and routing — Launchers; README "Launchers" | replaced: `gk` (Opus `medium`), `gk-fable`, `gk-ultra`, and `gkh` |
+| 20–21 | `gk`, `gk-opus`, `gk-sonnet` are launch shortcuts | README "Launchers"; The seat and routing — Ultracode (`gk-ultra`) | replaced: `gk` (Opus `medium`), `gk-fable`, `gk-ultra`, and `gkh` |
 | 21–22 | Policy approved 2026-10-13; Mode A the standing posture of 2026-10-08 | — | dropped, because the dated history is not a rule (design 7, "Dropped") |
 | 24–29 | Lineup: four models, ids, prices, default efforts | `routes.json` `models` | moved: prices and ids live in `routes.json`, where `gkh report` reads them; the policy carries no prices (design 7, "Dropped") |
 | 29–31 | Worker agents use the aliases; never pin dated model ids in agents or workflow scripts | generated: `gkh gen` writes the agents and the workflow routes blocks from `routes.json` with aliases; When to orchestrate — a bespoke script's `agent()` calls name "a model alias and an effort from the table" | replaced |
@@ -32,7 +32,7 @@ longer a rule anywhere, for the reason given.
 |---|---|---|---|
 | 35–38 | The seat orchestrates and does no heavy lifting; cheapest tier that does it excellently; escalate on failure | The seat and routing — Inline first; Escalation and judging | replaced: the seat does a class's work itself when its tier is at or above the class tier and the work is one chain of steps; otherwise it delegates at the class tier. Escalation is check, effort +1, next model up |
 | 38–39 | Seat tokens go on judgement, not muscle | The seat and routing — "A Fable seat also hands separable implementation chunks… It plans, orchestrates and judges"; "Verbose reading goes to a worker" | replaced |
-| 39–40 | Ultracode is on in every mode | The seat and routing — Launchers; README "Settings the installer owns" | replaced: ultracode is off by default (Carl's decision 3); `gk-ultra` turns it on per session |
+| 39–40 | Ultracode is on in every mode | The seat and routing — Ultracode; README "Settings the installer owns" | replaced: ultracode is off by default (Carl's decision 3); `gk-ultra` turns it on per session |
 | 40–41 | Cost control in Modes B and C comes from the tier map | — | dropped, because there are no modes; cost comes from the class tiers |
 | 41 | Every seat runs at `high` | `routes.json` `seat.effort`; README | replaced: the default seat is Opus at `medium` (Carl's decision 2); `/effort high` raises it for a hard turn |
 
@@ -51,7 +51,7 @@ longer a rule anywhere, for the reason given.
 |---|---|---|---|
 | 60–61 | Five pipelines installed at `~/.claude/workflows/`, invoked as `Workflow({name, args})` | When to orchestrate | kept |
 | 61 | Author a bespoke script only when none fits | When to orchestrate | kept |
-| 62–65 | Every one takes `profile`; `escalate: true` routes the apex judge to Fable | The seat and routing — Dials | replaced: profiles retire; `#fable` lifts every apex stage to `fable-high`, `#nofable` and `gkh fable off` keep Fable out, passed in `args.dials` |
+| 62–65 | Every one takes `profile`; `escalate: true` routes the apex judge to Fable | The seat and routing — Dials | replaced: profiles retire; `#fable` lifts every apex stage to `fable-high`, `#nofable` and `gkh fable off` keep Fable out; dials go to workflows as bare words in `args.dials` (`['nofable']`) |
 | 69 | `gk-review`: what it is for, and its stage routing | When to orchestrate (review size rule, `author`); class table (`judge-sensitive`, `judge-opus`); `routes.json` `stages` | replaced: the stage tiers come from `routes.json`; the judge is raised to the author's tier |
 | 70 | `gk-diagnose`: what it is for, and its routing | When to orchestrate ("a diagnosis after two failed attempts"); `routes.json` | replaced |
 | 71 | `gk-build`: what it is for; `pieces[].hard` lifts a piece; Fable judge on UI or `uiJudge` | When to orchestrate (pieces carry `class`); Escalation and judging — UI sign-off; `routes.json` | replaced: `hard` gives way to `class` (`spec`, `judgement`, `hard`, `security`) |
@@ -76,8 +76,8 @@ longer a rule anywhere, for the reason given.
 |---|---|---|---|
 | 102–104 | Every `agent()` names `model` and `effort`, or it inherits the session model | When to orchestrate (bespoke scripts); the gk workflows take every stage's tier from their generated routes block, and a test checks there is no tier literal elsewhere | kept |
 | 105–107 | The judge is at least as capable as what it judges | Escalation and judging; `routes.json` `judges`, checked by `judge_violations` in `tests/test_routes.py` | kept |
-| 107–113 | Modes B/C: a second Opus-xhigh judge; security, client-facing and architecture judges go to Fable on Carl's word only | Escalation and judging; class table (`judge-sensitive` on `fable-high`) | replaced: sensitive work always gets a Fable judge, with no approval needed (No approval needed: "gk workflows, including every Fable stage the table names"); with Fable off it runs on `opus-xhigh` and is listed in the result. "Fable on Carl's word" is dropped (design 7, "Dropped") |
-| 114–116 | Fable stages die under usage limits; re-run the stage on `worker-opus-xhigh`; say so | Escalation and judging — "A failed stage follows its `onFail`"; `routes.json` `onFail` | replaced: each Fable stage declares `rerun`, `unfinished` or `hold`; the result reports the drop. A re-run on a declared tier needs no approval |
+| 107–113 | Modes B/C: a second Opus-xhigh judge; security, client-facing and architecture judges go to Fable on Carl's word only | When to orchestrate — review size rule; Escalation and judging; class table (`judge-sensitive` on `fable-high`) | replaced: security or client-facing work goes through gk-review with `security: true` or `clientFacing: true` whatever its size, so it always gets a `fable-high` judge, with no approval needed (No approval needed: "gk workflows, including every Fable stage the table names"). Other small diffs get one reviewer on the higher of `opus-high` and the author's tier. With Fable off the judge runs on `opus-xhigh` and is listed in the result. "Fable on Carl's word" is dropped (design 7, "Dropped"); architecture decisions are `hard`-class work on Fable |
+| 114–116 | Fable stages die under usage limits; re-run the stage on `worker-opus-xhigh`; say so | Escalation and judging — "A stage whose agent dies follows its `onFail`"; `routes.json` `onFail` | replaced: each Fable stage declares `rerun` (once more on its `noFable` tier, only when it died on a Fable tier), `unfinished` or `hold`; the result reports the drop. A re-run on a declared tier needs no approval |
 
 ## UI/UX sign-off rule (old lines 118–127)
 
@@ -88,7 +88,7 @@ longer a rule anywhere, for the reason given.
 | 122–123 | Not triggered: the build itself in Modes B/C | class table (`ui-build` on `opus-high`) | replaced: UI built to a fixed design is `ui-build` work on `opus-high`; its judge is Fable |
 | 123–126 | Not triggered: internal surfaces and mechanical UI changes, judged on the diff and the project's sign-off checks | Escalation and judging — UI sign-off | kept; the examples keep a copy fix, a prop rename and a token swap, and drop "scroll-container fix", a Goodricke case its own `CLAUDE.md` covers |
 | 126–127 | Any audit runs first (Haiku run-and-report) and its verdict goes into the sign-off brief | Escalation and judging — UI sign-off ("Any audit the project names runs first…") | kept; the audit's tier is the `run-report` class |
-| 127 | The sign-off is the last stage; the die-and-re-run rule applies | Escalation and judging — Fable off; failed stage | replaced: with Fable off, a UI change's Fable sign-off is reported as pending and still owed; gk-design's `ui-signoff` has `onFail: hold` and no `noFable` tier |
+| 127 | The sign-off is the last stage; the die-and-re-run rule applies | Escalation and judging — Fable off; failed stage | replaced: with Fable off, the seat reports a UI change's Fable sign-off as pending and still owed; gk-design's sign-off has no `noFable` tier, so under Fable off it is owed, not run, and `hold` applies only when its agent dies. When every gk-design judge that returned a sheet ran on Fable, the panel itself is the sign-off |
 
 ## Worker ladder and routing (old lines 129–166)
 
@@ -107,18 +107,18 @@ longer a rule anywhere, for the reason given.
 
 | Old line(s) | Rule | Home | Status |
 |---|---|---|---|
-| 170–172 | Workers start with a fresh context; briefs are self-contained | When to orchestrate | kept |
+| 170–172 | Workers start with a fresh context (they do get the CLAUDE.md files); briefs are self-contained | When to orchestrate | kept, the CLAUDE.md clause included |
 | 173–175 | Independent subtasks run in parallel (several Agent calls, or `pipeline()`) | When to orchestrate | kept; the `parallel()` barrier clause is dropped, because it is a workflow-authoring detail covered by the workflow-authoring skill |
 | 176–178 | Quality gate: every output is judged; a weak result is re-briefed or moved up a tier, never silently accepted | Escalation and judging — the judge bullet | kept |
 | 179–180 | Workers do not expand scope; the seat owns the plan, the final verification and the summary | Briefs and reports | kept |
 | 181–182 | A failed attempt's report goes verbatim into the escalation brief | Escalation and judging | kept |
 | 183–185 | Workers return about 20 lines; no file dumps or diffs | Briefs and reports | kept |
-| 185–186 | Test output through `tail` or a dot reporter; test runs foreground only | Briefs and reports | kept |
-| 186–187 | Recon goes to `Explore` or a Haiku reader with a file list | The seat and routing — Verbose reading goes to a worker; class table (`search`) | kept |
+| 185–186 | Test output through `tail` or a dot reporter; test runs foreground only, because background runs have stalled | Briefs and reports | kept, with its reason |
+| 186–187 | Recon goes to `Explore` or a Haiku reader with a file list | The seat and routing — Verbose reading goes to a worker; class table (`search`) | replaced: searches with no file list go to `Explore` on `haiku-medium`; long logs and big test output go to a worker; Haiku readers get named files under the 100K rule |
 | 187–188 | Do not install plugins or edit CLAUDE.md or memory mid-session | Briefs and reports | kept, in positive form with its exception: "between sessions…; mid-session, do so when Carl asks" |
 | 188 | `/clear` between unrelated tasks, `/compact` at natural breaks | — | dropped, because they are Carl's commands, which the seat cannot run |
 | 189–196 | Specs, plans and reports reach Carl in the turn they are written; Stop gate; `REMOTE-LINKS.tsv`; the skip command | House rules | kept |
-| 197–202 | Questions to Carl one at a time; bundle only when linked or asked; overrides batching skills | House rules | kept |
+| 197–202 | Questions to Carl one at a time; where the app shows a next-step box, that one question is the box's question (old 199); bundle only when linked or asked; overrides batching skills | House rules | kept, the next-step box clause included |
 
 ## Working beside other sessions (old lines 204–221)
 
@@ -135,7 +135,7 @@ longer a rule anywhere, for the reason given.
 
 | Old line(s) | Rule | Home | Status |
 |---|---|---|---|
-| 225–228 | Fable boots at `high` with ultracode on | `routes.json` `seat`; Launchers | replaced: `gk-fable` is Fable at `medium`; ultracode is per session through `gk-ultra` |
+| 225–228 | Fable boots at `high` with ultracode on | `routes.json` `seat`; README "Launchers" | replaced: `gk-fable` is Fable at `medium`; ultracode is per session through `gk-ultra` |
 | 228–231 | Where Fable appears inside a workflow | class table (`plan-check`, `design-panel`, `judge-opus`, `judge-sensitive`, `ui-signoff`) | replaced |
 | 232–239 | Fable-brained workflows: Fable plans and judges, Opus and Sonnet build | class table; `routes.json` `stages`; "A Fable seat also hands separable implementation chunks to their class tier" | replaced |
 | 241–244 | Fable-credit fallback: Carl types `/model opus`; pass `profile: 'opus'` | The seat and routing — The Fable switch; Dials (`#nofable`) | replaced: `gkh fable off` stays set; the hook adds `nofable` to every gk workflow |
@@ -144,7 +144,7 @@ longer a rule anywhere, for the reason given.
 
 | Old line(s) | Rule | Home | Status |
 |---|---|---|---|
-| 248–251 | Opus seat at `high`; may judge routine pieces inline; a separate judge for the shared branch | Escalation and judging — the judge bullet; When to orchestrate — review size rule | replaced: the seat judges work at or below its tier; a review before merging to the shared branch is one `worker-opus-high` reviewer or gk-review by size |
+| 248–251 | Opus seat at `high`; may judge routine pieces inline; a separate judge for the shared branch | Escalation and judging — the judge bullet; When to orchestrate — review size rule | replaced: the seat judges work at or below its tier; a review before merging to the shared branch is one reviewer (the higher of `opus-high` and the author's tier) or gk-review, by size and sensitivity |
 | 251–252 | Implementation to Sonnet, Opus for the hard tail | class table | replaced |
 | 252–256 | Fable only on the UI sign-off and on Carl's word; the hard boundary named in the synthesis | Escalation and judging — UI sign-off; class table | dropped: "Fable on Carl's word" goes (design 7, "Dropped"); `judge-sensitive` covers security, client wording and UI |
 | 258–267 | Sonnet seat: never judges Opus output, never makes an architecture call; stop for a mode switch | Inline first; the judge bullet | replaced: a seat below a class tier delegates to that tier, so no stop is needed. Sonnet is no longer a launch option |

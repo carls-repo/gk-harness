@@ -158,6 +158,24 @@ class PolicyTest(unittest.TestCase):
         lines = POLICY.read_text(encoding="utf-8").splitlines()
         self.assertLessEqual(len(lines), 140)
 
+    def test_policy_is_at_most_15500_characters(self):
+        self.assertLessEqual(len(POLICY.read_text(encoding="utf-8")), 15500)
+
+    def test_policy_names_only_tiers_and_agents_in_routes(self):
+        text = POLICY.read_text(encoding="utf-8")
+        tiers = set(ROUTES["tiers"])
+        agents = set(agent_names(ROUTES))
+        names = re.findall(r"`([a-z]+-[a-z]+|worker-[a-z0-9-]+)`", text)
+        checked = 0
+        for name in names:
+            if name.startswith("worker-"):
+                checked += 1
+                self.assertIn(name, agents, "policy names an unknown agent %s" % name)
+            elif name.split("-", 1)[0] in ROUTES["models"]:
+                checked += 1
+                self.assertIn(name, tiers, "policy names an unknown tier %s" % name)
+        self.assertGreater(checked, 5)
+
     def test_policy_keeps_the_old_title(self):
         # The installer's old-policy detection keys on this first line (gkh/claude_md.py).
         first = POLICY.read_text(encoding="utf-8").splitlines()[0]
@@ -194,7 +212,8 @@ class PolicyTest(unittest.TestCase):
     def test_policy_names_dials_route_line_and_switch(self):
         text = POLICY.read_text(encoding="utf-8")
         for needle in ("#nofable", "#fable", "#deep", "#solo", "args.dials", "gkh fable off",
-                       "gkh fable on", "Route: <class>", "150 changed lines"):
+                       "gkh fable on", "Route: <class>", "150 changed lines",
+                       "args.dials: ['nofable']"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)
 

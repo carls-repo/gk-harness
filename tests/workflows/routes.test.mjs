@@ -226,6 +226,24 @@ test('DIALS: only fable, nofable, deep and solo are kept; anything else is logge
   assert.deepEqual(evalBlock(withRoutes(helperSource), { ARGS: 'not json' }).DIALS, [])
 })
 
+test('DIALS: one leading # is stripped, so [\'#nofable\'] behaves exactly like [\'nofable\']', async () => {
+  const hashed = helper(['#nofable', '#fable', '#deep', '#solo', 'nofable'])
+  assert.deepEqual(hashed.DIALS, ['nofable', 'fable', 'deep', 'solo'])
+  assert.deepEqual(hashed.logs, [])
+  const odd = helper(['##nofable', '#turbo'])
+  assert.deepEqual(odd.DIALS, [])
+  assert.equal(odd.logs.length, 2)
+  for (const [stage, ctx] of [['wf.plan', {}], ['wf.implement', { cls: 'hard' }], ['wf.sign-off', {}], ['wf.judge', { sensitive: true }], ['wf.base', {}]]) {
+    assert.deepEqual(tierOf(helper(['#nofable']).routeOf(stage, ctx)), tierOf(helper(['nofable']).routeOf(stage, ctx)), stage)
+  }
+  for (const wf of ['gk-research', 'gk-diagnose', 'gk-review', 'gk-build', 'gk-design']) {
+    const bare = await runFull(wf, { dials: ['nofable'] })
+    const hash = await runFull(wf, { dials: ['#nofable'] })
+    assert.deepEqual(hash.calls.map((c) => [c.label, c.model, c.effort]), bare.calls.map((c) => [c.label, c.model, c.effort]), wf)
+    assert.deepEqual(hash.result.routing, bare.result.routing, wf)
+  }
+})
+
 // ---------------- runStage ----------------
 
 // An agent stub that records (model, effort, label) and answers from a list, in order.

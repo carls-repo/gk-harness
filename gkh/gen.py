@@ -227,13 +227,14 @@ def _class_tier(c: dict) -> str:
 def render_policy_table(routes: dict) -> str:
     """The policy's class table, from TABLE_BEGIN to TABLE_END (each line ending in "\n"): one
     row per class in routes.json order (class, examples, who, tier with its next or floor tier,
-    evidence), then the escalation ladder."""
+    check, evidence), then the escalation ladder."""
     evidence = routes.get("evidence") or {}
-    rows = [TABLE_BEGIN, "| Class | Examples | Who | Tier | Evidence |", "|---|---|---|---|---|"]
+    rows = [TABLE_BEGIN, "| Class | Examples | Who | Tier | Check | Evidence |",
+            "|---|---|---|---|---|---|"]
     for name, c in (routes.get("classes") or {}).items():
-        rows.append("| %s | %s | %s | %s | %s |" % (
+        rows.append("| %s | %s | %s | %s | %s | %s |" % (
             name, _cell(c.get("examples", "")), c.get("who", ""), _class_tier(c),
-            _cell(evidence.get(name, ""))))
+            _cell(c.get("check", "")), _cell(evidence.get(name, ""))))
     ladder = routes.get("ladder") or []
     if ladder:
         rows += ["", "Ladder: " + " → ".join("`%s`" % t for t in ladder) + "."]

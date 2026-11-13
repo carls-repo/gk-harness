@@ -358,6 +358,9 @@ class RoutesTests(unittest.TestCase):
         self.assertEqual(r["stages"]["gk-build.plan-check"]["tier"], "fable-medium")
         self.assertEqual(r["stages"]["gk-review.judge"]["when"]["sensitive"], "fable-high")
         self.assertEqual(r["seat"]["default"], "opus-medium")
+        # Fix round 1, ruling A: the design panel class matches gk-design.judge.
+        self.assertEqual(r["classes"]["design-panel"]["tier"], r["stages"]["gk-design.judge"]["tier"])
+        self.assertEqual(r["classes"]["design-panel"]["tier"], "fable-high")
 
     def test_phases_validated(self):
         r = repo()

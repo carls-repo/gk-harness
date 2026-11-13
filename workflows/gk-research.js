@@ -185,6 +185,7 @@ const ROUTES = {
 //     when the agent returns null: rerun (once, on the noFable tier, only from a Fable tier),
 //     unfinished (null) or hold (null, recorded).
 //   routingResult() -> {routes, dials, offTier}: every stage that ran off its tier, or did not run.
+// A dial is a bare word ('nofable'); one leading '#' ('#nofable') is stripped first.
 const ROUTE_FLOOR = 'opus-high'
 const ROUTE_APEX = 'fable-high'
 const KNOWN_DIALS = ['fable', 'nofable', 'deep', 'solo']
@@ -196,8 +197,10 @@ const DIALS = (() => {
     return []
   }
   const kept = []
-  for (const d of given) {
-    if (KNOWN_DIALS.includes(d)) { if (!kept.includes(d)) kept.push(d) } else log(`routes: unknown dial ${JSON.stringify(d)} dropped`)
+  for (const raw of given) {
+    // A dial typed as in Carl's prompt ('#nofable') counts as the bare word.
+    const d = typeof raw === 'string' && raw.startsWith('#') ? raw.slice(1) : raw
+    if (KNOWN_DIALS.includes(d)) { if (!kept.includes(d)) kept.push(d) } else log(`routes: unknown dial ${JSON.stringify(raw)} dropped`)
   }
   return kept
 })()

@@ -128,11 +128,11 @@ class GenTests(unittest.TestCase):
         lines = table.splitlines()
         self.assertEqual(lines[0], gen.TABLE_BEGIN)
         self.assertEqual(lines[-1], gen.TABLE_END)
-        self.assertEqual(lines[1], "| Class | Examples | Who | Tier | Evidence |")
+        self.assertEqual(lines[1], "| Class | Examples | Who | Tier | Check | Evidence |")
         rows = [ln for ln in lines[3:] if ln.startswith("| ")]
         self.assertEqual([r.split(" | ")[0][2:] for r in rows], list(routes["classes"]))
-        self.assertIn("| feature | %s | worker | `opus-medium`, then `opus-high` | guide |"
-                      % routes["classes"]["feature"]["examples"], lines)
+        self.assertIn("| feature | %s | worker | `opus-medium`, then `opus-high` | %s | guide |"
+                      % (routes["classes"]["feature"]["examples"], routes["classes"]["feature"]["check"]), lines)
         self.assertTrue(any(r.startswith("| legal-doc |") and "seat, at least `opus-medium`" in r
                             for r in rows))
         self.assertIn("Ladder: " + " → ".join("`%s`" % t for t in routes["ladder"]) + ".", lines)
