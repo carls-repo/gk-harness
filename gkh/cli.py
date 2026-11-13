@@ -1,5 +1,7 @@
 """The installer's commands: install [--retire-legacy] [--ignore-busy], uninstall, update
-[--retire-legacy] [--ignore-busy], status, gen [--check] and fable off|on|status.
+[--retire-legacy] [--ignore-busy], status, gen [--check], fable off|on|status, and report
+[--since YYYY-MM-DD] [--session ID] [--config-dir DIR] [--json] (read-only: it prices the
+transcripts, see report.py).
 
 install reads everything and decides every write before it makes the first one, so a problem
 found then (the preflight) stops it with nothing changed (exit 2). The writes then run in a fixed
@@ -26,19 +28,27 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from . import VERSION, claude_md, gen, legacy, manifest, paths, peers, shell
+from . import VERSION, claude_md, gen, legacy, manifest, paths, peers, report, shell
 from .routes import RoutesError, agent_names, load as load_routes
 from . import settings_merge as sm
 
-COMMANDS = ("install", "uninstall", "update", "status", "gen", "fable")
+COMMANDS = ("install", "uninstall", "update", "status", "gen", "fable", "report")
 RETIRE = "--retire-legacy"
 CHECK = "--check"
 IGNORE_BUSY = "--ignore-busy"
 FABLE_WORDS = ("off", "on", "status")
+JSON = "--json"
+SINCE = "--since"
+SESSION = "--session"
+CONFIG_DIR = "--config-dir"
+# Flags (and fable's words), each at most once.
 OPTIONS = {"install": (RETIRE, IGNORE_BUSY), "update": (RETIRE, IGNORE_BUSY), "gen": (CHECK,),
-           "fable": FABLE_WORDS}
+           "fable": FABLE_WORDS, "report": (JSON,)}
+# Options that take a value, as "--name value" or "--name=value", each at most once.
+VALUE_OPTIONS = {"report": (SINCE, SESSION, CONFIG_DIR)}
 USAGE = ("usage: install [install [%s] [%s] | uninstall | update [%s] [%s] | status | gen [%s] "
-         "| fable off|on|status]\n" % (RETIRE, IGNORE_BUSY, RETIRE, IGNORE_BUSY, CHECK))
+         "| fable off|on|status | report [%s YYYY-MM-DD] [%s ID] [%s DIR] [%s]]\n"
+         % (RETIRE, IGNORE_BUSY, RETIRE, IGNORE_BUSY, CHECK, SINCE, SESSION, CONFIG_DIR, JSON))
 BUSY_EXIT = 3
 # Sources install will not run without. It deploys every hooks/*.py, agents/worker-*.md,
 # agents/Explore.md and workflows/gk-*.js present; there may be no workflows yet.
@@ -1105,17 +1115,69 @@ def _gen(check: bool) -> int:
     return 0
 
 
+def _price_report(values: dict, as_json: bool) -> int:
+    since = values.get(SINCE)
+    if since is not None and not report.valid_date(since):
+        sys.stderr.write("gk-harness: %s wants a date as YYYY-MM-DD, not '%s'.\n" % (SINCE, since))
+        return 2
+    cdir = Path(os.path.abspath(values[CONFIG_DIR])) if CONFIG_DIR in values \
+        else paths.claude_dir()
+    try:
+        routes = load_routes(paths.harness_root() / "routes.json")
+    except RoutesError as e:
+        sys.stderr.write("gk-harness: %s\n" % e)
+        return 2
+    summary = report.summarise(report.iter_calls(cdir, since, values.get(SESSION)), routes)
+    summary.update(since=since, session=values.get(SESSION))
+    try:
+        sys.stdout.write(report.render(summary, as_json))
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # Piped into head: the reader has what it wanted. Point stdout at nothing so the
+        # interpreter's own flush at exit does not complain.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    return 0
+
+
+def _parse(command: str, options: list) -> tuple | None:
+    """(flags, {option: value}) for the command's options; None when one is not allowed, comes
+    twice, or lacks its value."""
+    allowed, takes_value = OPTIONS.get(command, ()), VALUE_OPTIONS.get(command, ())
+    flags: list = []
+    values: dict = {}
+    rest = list(options)
+    while rest:
+        option = rest.pop(0)
+        name, eq, value = option.partition("=")
+        if name in takes_value:
+            if not eq:
+                if not rest:
+                    return None
+                value = rest.pop(0)
+            if name in values:
+                return None
+            values[name] = value
+        elif option in allowed and option not in flags:
+            flags.append(option)
+        else:
+            return None
+    return flags, values
+
+
 def main(argv: list[str]) -> int:
     args = list(argv)
     if not args or args[0].startswith("-"):
         args.insert(0, "install")
-    command, options = args[0], args[1:]
-    allowed = OPTIONS.get(command, ())
-    if command not in COMMANDS or any(o not in allowed for o in options) \
-            or len(set(options)) != len(options) or (command == "fable" and len(options) != 1):
+    command, parsed = args[0], _parse(args[0], args[1:])
+    if command not in COMMANDS or parsed is None \
+            or (command == "fable" and len(parsed[0]) != 1):
         sys.stderr.write(USAGE)
         return 2
+    options, values = parsed
     _forgiving_output()
+    if command == "report":
+        return _price_report(values, JSON in options)
     if command == "install":
         return install(RETIRE in options, IGNORE_BUSY in options)
     if command == "fable":
