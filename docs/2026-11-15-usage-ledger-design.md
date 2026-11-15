@@ -30,7 +30,8 @@ On 15 November Carl asked for automatic token and cost tracking on every model c
   - the model and effort;
   - the token counts: input, output, cache read, and cache write (5-minute and 1-hour);
   - the cost in dollars and the duration;
-  - the ids that tie the call to its session, agent and workflow run.
+  - the ids that tie the call to its session, agent and workflow run;
+  - the project (repository), folder and branch the session was working in (section 4.8).
 - **G3.** `gkh report` reads the ledger, so background calls and same-day totals show up.
   Transcripts still fill any gap.
 - **G4.** Nothing leaves the machine.
@@ -211,6 +212,7 @@ One JSON object per line, keys in this order. Absent values are `null`.
  "effort": "medium", "speed": "normal", "source": "<query_source>",
  "agent": "<agent_id>", "parent": "<parent_agent_id>", "agent_name": "<agent.name>",
  "workflow_run": "<workflow.run_id>", "workflow": "<workflow.name>",
+ "project": "Goodricke", "root": "/home/carls/apps/mike-dev", "branch": "develop",
  "input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
  "cache_write_5m": 0, "cache_write_1h": 0, "cost_usd": 0.0, "duration_ms": 0,
  "status": null, "attempt": null}
@@ -270,7 +272,7 @@ transcript backfill.
 
 - The receiver also serves `GET /metrics` on `127.0.0.1:4318`, in Prometheus text format.
 - Every counter carries the labels `model`, `effort`, `agent_name`, `workflow` (the name, not the
-  run id) and `source`. No session, request or agent ids go into labels, so the label sets stay
+  run id), `source` and `project`. No session, request or agent ids go into labels, so the label sets stay
   small. The counters:
   - `gk_ledger_requests_total`, plus the label `event` (`api_request` or `api_error`);
   - `gk_ledger_tokens_total`, plus the label `kind` (`input`, `output`, `cache_read`,
@@ -322,11 +324,54 @@ transcript backfill.
 - spend per day by model;
 - Fable's share of spend;
 - tokens per hour by kind;
-- spend by workflow and by agent;
+- spend by project, by workflow and by agent;
 - background calls' spend;
 - errors per hour;
 - Haiku calls over 100K tokens;
 - whether the receiver is up (Prometheus's `up`).
+
+### 4.8 Projects
+
+Carl asked on 15 November for usage broken down by project. Claude Code's events carry the
+session id but not the folder the session works in, so the harness records that itself.
+
+**The session map**
+
+- On every SessionStart and every UserPromptSubmit, the hooks write
+  `state/gk-ledger/sessions/<session id>.json`, holding:
+  - `cwd`, from the hook input;
+  - `root`: the git top level of `cwd`, or `cwd` itself outside a repository;
+  - `project`;
+  - `branch`, the current git branch.
+- Refreshing it on every prompt follows a branch switch or a worktree change mid-session.
+- The map is kept after the session ends, and the receiver deletes entries older than 90 days
+  when it starts.
+- Subagents and workflow agents send their parent session's `session.id` (Proof P3), so they take
+  that session's project.
+
+**The project name**, in order:
+
+1. the `name` in `.claude/gk-project.json` at the top level (for example "Goodricke");
+2. otherwise the main repository's folder name, so every worktree of one repository shares a
+   name, with a leading dot dropped (`.gk-harness` becomes "gk-harness");
+3. outside a repository, "(no repo)".
+
+**Where it shows**
+
+- **The ledger.** The receiver looks up each event's `session.id` in the map, caching it and
+  re-reading a file when it changes. It writes `project`, `root` and `branch` into the line. A
+  session with no map entry gets `null`, shown as "(unknown project)". An example is a `claude -p`
+  run that keeps no session record.
+- **The report.**
+  - It adds "By project" and "By folder" tables.
+  - A transcript-only call takes its project from the transcript line's own `cwd` and
+    `gitBranch`, resolved the same way. If that folder no longer exists, the project falls back
+    to the folder's name.
+- **Grafana.** Every counter gains a `project` label. Branch and folder stay out of the labels,
+  because branches keep growing in number.
+
+**Privacy.** The ledger now holds folder paths and branch names. They are Carl's own names, never
+prompt or file content.
 
 ## 5. Proofs to run before building
 
@@ -339,7 +384,8 @@ in the scratchpad records what arrives.
 - **P2. Request ids.** The event's `request_id` equals the transcript line's `requestId` for the
   same call.
 - **P3. Agent ids.** For a subagent and for a workflow agent, `agent_id` equals the transcript's
-  `agent-<id>`, and `workflow.run_id` equals the `wf_` folder name.
+  `agent-<id>`, and `workflow.run_id` equals the `wf_` folder name. Their events also carry the
+  main session's `session.id`, which the project lookup relies on.
 - **P4. Exit.** A short `claude -p` delivers its last events before it exits, with nothing lost
   in the final five-second window.
 - **P5. Receiver down.** With no listener, a `-p` run shows no error and no slowdown. Compare
@@ -412,6 +458,14 @@ labels the gap. If P1 shows content in default records, the allowlist already dr
   - a hand change is listed;
   - `on` refuses on Windows;
   - the status line.
+- **Projects:**
+  - the map is written at session start and refreshed on a prompt after a branch switch;
+  - the three naming rules: a `gk-project.json` name, a worktree named after its main repository,
+    and "(no repo)";
+  - the receiver stamps the project from the map;
+  - an unknown session gives `null`;
+  - an entry over 90 days old is pruned;
+  - the report's by-project table, including transcript-only calls.
 - **Metrics:**
   - `/metrics` parses as Prometheus text;
   - labels carry no ids;
@@ -450,6 +504,8 @@ labels the gap. If P1 shows content in default records, the allowlist already dr
 - That day's report total is at least the transcript-only total, and the difference is labelled
   background.
 - The ledger holds no content: a search for a known prompt phrase finds nothing.
+- Every call from a session started after the switch carries a project, and the day's report
+  splits spend by project.
 - Stage 4's live checks pass.
 
 ## 8. Calls made, and what is Carl's
@@ -487,9 +543,15 @@ labels the gap. If P1 shows content in default records, the allowlist already dr
   than adding Carl to the `docker` group.
 - **Anonymous viewers, and an admin password kept in a root-only file.**
 - **400 days of Prometheus data in Docker volumes.**
+- **A project is a repository, and its worktrees share its name.** The folder and branch are
+  kept in the ledger and the report.
+- **A session map written by the hooks.** Claude Code's events carry no folder.
+- **`project` as a Grafana label, but not branch or folder.** That keeps the label sets small.
 
 **Carl's**
 
 - **Decided 15 November:** no Grafana Cloud and no phone access. Grafana is local only.
+- **Decided 15 November:** usage is broken down by project. A breakdown by Goodricke's own
+  features stays out (section 2).
 - Nothing else is left to decide. The builder check raised five questions, and each is settled
   above.
