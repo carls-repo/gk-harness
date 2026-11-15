@@ -303,6 +303,9 @@ its variables on the command line.
   - `test_idle_exit_removes_pidfile`, with `idle_seconds=1` and `live=lambda: False`.
   - `test_live_session_keeps_it_running`, with `live=lambda: True` for 2 seconds.
   - `test_prunes_old_session_maps`: one map aged 91 days by `os.utime`, and one fresh.
+  - `test_disk_full_logged_once_keeps_serving`: patch `os.write` to raise
+    `OSError(errno.ENOSPC)`. Two posts each reply 200, `receiver.log` names the error once, and
+    a health check still answers.
 - [ ] **Step 2: Run the tests.** Expected: they fail.
 - [ ] **Step 3: Implement** the server as listed under Produces.
 - [ ] **Step 4: Run the tests.** Expected: PASS, and the full suite OK.
@@ -410,8 +413,8 @@ its variables on the command line.
   - `ledger(word: str, options: list) -> int` for `on`, `off` and `status`:
     - **on:** refuses on Windows (exit 2), then runs the busy check unless `--ignore-busy`. It
       writes the switch file `{"since": UTC ISO}`, then runs `install(False, ignore_busy=True)`,
-      then `ledger_ctl.restart()`. It prints the switch-on line plus "restart sessions to start
-      recording".
+      which starts the receiver because the switch is now on. It prints the switch-on line plus
+      "restart sessions to start recording".
     - **off:** runs the busy check, removes the switch file, `ledger_ctl.stop()`, then
       `install(False, ignore_busy=True)`.
     - **status:** prints `ledger_ctl.status_lines()`.
@@ -485,6 +488,8 @@ its variables on the command line.
     - it yields calls with the same token keys as `iter_calls`, plus `request_id`, `source`,
       `agent_id`, `agent_name`, `workflow`, `workflow_run`, `project`, `root`, `branch` and
       `cc_cost`;
+    - it maps the ledger keys onto those names: `request` becomes `request_id`, `agent`
+      becomes `agent_id`, `cost_usd` becomes `cc_cost`, and the rest keep their names;
     - it skips day files before `since`;
     - it skips an unparseable line, counting it in a `bad` tally that it exposes.
   - `merge_sources(transcript, ledger, source="both") -> Iterator[dict]`:
