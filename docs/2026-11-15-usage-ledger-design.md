@@ -2,6 +2,9 @@
 
 Draft for Carl, 15 November 2026. Branch `feat/usage-ledger`.
 
+Updated later on 15 November with Stage 4, a local Grafana dashboard. Carl ruled out Grafana Cloud
+and phone access.
+
 ## 1. Why
 
 On 15 November Carl asked for automatic token and cost tracking on every model call. Today
@@ -31,10 +34,13 @@ On 15 November Carl asked for automatic token and cost tracking on every model c
 - **G3.** `gkh report` reads the ledger, so background calls and same-day totals show up.
   Transcripts still fill any gap.
 - **G4.** Nothing leaves the machine.
+- **G5.** A local Grafana dashboard of token use and cost (Stage 4). It runs on the box only, and
+  Carl views it from the Mac through an SSH port forward.
 
 **Non-goals**
 
-- Dashboards, Prometheus or Grafana.
+- Grafana Cloud, or any dashboard reachable from off the box, the phone included (Carl, 15
+  November).
 - Budgets or alerts.
 - A status line: the desktop app does not show a custom one.
 - The laptop and the cloud. They follow with October Tasks 14 and 15, once the box works.
@@ -255,6 +261,73 @@ While the ledger is on and no healthy receiver answers after SessionStart, the c
 `Ledger: receiver not running, calls are not being recorded (gkh ledger status)`. Otherwise
 the card is unchanged.
 
+### 4.7 The Grafana dashboard (Stage 4)
+
+Grafana is a live view. `gkh report` stays the exact record, with stage labels and the
+transcript backfill.
+
+**Metrics from the receiver**
+
+- The receiver also serves `GET /metrics` on `127.0.0.1:4318`, in Prometheus text format.
+- Every counter carries the labels `model`, `effort`, `agent_name`, `workflow` (the name, not the
+  run id) and `source`. No session, request or agent ids go into labels, so the label sets stay
+  small. The counters:
+  - `gk_ledger_requests_total`, plus the label `event` (`api_request` or `api_error`);
+  - `gk_ledger_tokens_total`, plus the label `kind` (`input`, `output`, `cache_read`,
+    `cache_write_5m` or `cache_write_1h`);
+  - `gk_ledger_cost_usd_total`, from Claude Code's `cost_usd`, which equals the `routes.json`
+    price for the current models;
+  - `gk_ledger_large_prompts_total`: calls whose prompt (input plus cache read plus cache write)
+    is over 100,000 tokens.
+- The counters start at zero each time the receiver starts, and Prometheus treats that as a
+  counter reset. Calls between the last scrape and a restart are missing from the charts only.
+  The ledger and `gkh report` stay exact.
+
+**Prometheus and Grafana in Docker**
+
+- `deploy/grafana/` holds:
+  - `compose.yml`;
+  - `prometheus.yml`;
+  - Grafana's provisioning: the data source and the dashboard JSON.
+- Both containers use host networking, so Prometheus can reach the receiver on `127.0.0.1`.
+  - Prometheus listens on `127.0.0.1:9090`.
+  - Grafana listens on `127.0.0.1:3300`. Ports 3000 and 3001 are Goodricke's. Ports 9090 and 3300
+    were free on 15 November.
+- Prometheus scrapes every 15 seconds and keeps data for 400 days.
+- Data sits in Docker named volumes, not on `/srv/gkdata`, so the stack comes back after a reboot
+  without the LUKS unlock. Both containers are `restart: unless-stopped`.
+- Image versions are pinned exactly at build time. Pulling them is a download, so it happens on
+  Carl's go.
+
+**Running it**
+
+- Carl's user is not in the `docker` group (checked 15 November), and joining it would amount to
+  root. So the stack follows the mikeref pattern:
+  - the compose files are installed root-owned in `/etc/gk-grafana/`;
+  - an exact-command sudoers rule, `/etc/sudoers.d/gk-grafana`, allows only
+    `docker compose -f /etc/gk-grafana/compose.yml` with `up -d`, `down` or `ps`;
+  - `gkh grafana up|down|status` runs those commands.
+- Setting this up needs Carl at the box.
+
+**Access**
+
+- Anonymous viewers can see the dashboard.
+- The admin password is generated at setup into `/etc/gk-grafana/grafana.env` (root, mode 0600),
+  and is never printed into a session.
+- From the Mac: `ssh -L 3300:127.0.0.1:3300 <box>`, then open `http://localhost:3300`.
+
+**The dashboard, "gk-harness usage"**
+
+- spend today and over the last 7 days;
+- spend per day by model;
+- Fable's share of spend;
+- tokens per hour by kind;
+- spend by workflow and by agent;
+- background calls' spend;
+- errors per hour;
+- Haiku calls over 100K tokens;
+- whether the receiver is up (Prometheus's `up`).
+
 ## 5. Proofs to run before building
 
 These run in short `claude -p` runs on the subscription, with no API spend. A throwaway receiver
@@ -275,6 +348,9 @@ in the scratchpad records what arrives.
 - **P7. Endpoint.** `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is used exactly as given, path included,
   and no metrics or traces go anywhere.
 
+- **P8. Docker (before Stage 4, with Carl at the box).** Both containers work with host
+  networking, Prometheus can scrape `127.0.0.1:4318`, and ports 3300 and 9090 are still free.
+
 If P4 or P5 fails, the design still holds: the transcripts are the backstop, and the report
 labels the gap. If P1 shows content in default records, the allowlist already drops it.
 
@@ -293,6 +369,7 @@ labels the gap. If P1 shows content in default records, the allowlist already dr
 - **Bad or oversized body.** The receiver replies 400 and writes nothing; `receiver.log` keeps a
   count.
 - **Disk full.** The write fails. The receiver logs it once and keeps serving.
+- **Prometheus or Grafana down.** Only the charts stop. The ledger carries on.
 
 **Privacy**
 
@@ -335,6 +412,12 @@ labels the gap. If P1 shows content in default records, the allowlist already dr
   - a hand change is listed;
   - `on` refuses on Windows;
   - the status line.
+- **Metrics:**
+  - `/metrics` parses as Prometheus text;
+  - labels carry no ids;
+  - the counters add up line by line, including the large-prompt threshold;
+  - label values are escaped;
+  - the counters start at zero on restart.
 - Like the rest of the harness: Python 3.9 or later, standard library only.
 
 **Stages**
@@ -349,6 +432,16 @@ labels the gap. If P1 shows content in default records, the allowlist already dr
     within 10 seconds;
   - `gkh report --since <today>` shows background calls;
   - a killed receiver comes back on the next prompt.
+- **Stage 4, Grafana, on Carl's go and with Carl at the box.**
+  1. Run Proof P8.
+  2. Install `/etc/gk-grafana/` and the sudoers rule.
+  3. Pull the pinned images.
+  4. Run `gkh grafana up`.
+  5. Run the live checks:
+     - `ss -ltn` shows 9090 and 3300 on `127.0.0.1` only;
+     - a new call shows in Grafana within a minute;
+     - one day's spend in Grafana agrees with `gkh report --source ledger` within 1%;
+     - `gkh grafana down` stops both containers and keeps their data.
 
 **Done when**
 
@@ -357,6 +450,7 @@ labels the gap. If P1 shows content in default records, the allowlist already dr
 - That day's report total is at least the transcript-only total, and the difference is labelled
   background.
 - The ledger holds no content: a search for a known prompt phrase finds nothing.
+- Stage 4's live checks pass.
 
 ## 8. Calls made, and what is Carl's
 
@@ -382,6 +476,20 @@ labels the gap. If P1 shows content in default records, the allowlist already dr
 - **The Goodricke app's calls are out of scope.** They skip user settings, and the app's audit
   log already holds their tokens and cost.
 
+- **Grafana fed from the receiver's own `/metrics`,** not from Claude Code's metrics through a
+  collector. There is one pipeline, so Grafana and `gkh report` count the same calls.
+- **Grafana cost from Claude Code's `cost_usd`.** This saves a second copy of the price code in
+  the receiver. It equals `routes.json` for the current models.
+- **Counters start at zero on restart.** If they were rebuilt from the day's file, Prometheus
+  would count the day twice.
+- **Host networking, loopback-bound, on ports 9090 and 3300.**
+- **The mikeref pattern for Docker:** root-owned files plus an exact-command sudoers rule, rather
+  than adding Carl to the `docker` group.
+- **Anonymous viewers, and an admin password kept in a root-only file.**
+- **400 days of Prometheus data in Docker volumes.**
+
 **Carl's**
 
-- Nothing is left to decide. The builder check raised five questions, and each is settled above.
+- **Decided 15 November:** no Grafana Cloud and no phone access. Grafana is local only.
+- Nothing else is left to decide. The builder check raised five questions, and each is settled
+  above.
