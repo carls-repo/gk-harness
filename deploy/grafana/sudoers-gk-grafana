@@ -1,0 +1,18 @@
+# /etc/sudoers.d/gk-grafana: PERMANENT. Lets `gkh grafana up|down|status` start, stop and look at
+# the local Prometheus and Grafana without Carl's password (deploy/grafana/README.md).
+#
+# Installed by Carl at the box:
+#   sudo visudo -cf deploy/grafana/sudoers-gk-grafana
+#   sudo install -m 440 -o root -g root deploy/grafana/sudoers-gk-grafana /etc/sudoers.d/gk-grafana
+#
+# Why this is not root-equivalent: the three commands are exact, with fixed arguments; they act on
+# the root-owned compose file in /etc/gk-grafana and never on a file carls can write; sudo resets
+# the environment; and HOME is pinned to root's for docker, so no file under /home/carls can
+# supply docker's configuration or its compose plugin. It stays true only while /etc/gk-grafana
+# and its files are root-owned and not writable by carls.
+
+Defaults!/usr/bin/docker always_set_home
+
+carls ALL=(root) NOPASSWD: /usr/bin/docker compose -f /etc/gk-grafana/compose.yml up -d, \
+	/usr/bin/docker compose -f /etc/gk-grafana/compose.yml down, \
+	/usr/bin/docker compose -f /etc/gk-grafana/compose.yml ps

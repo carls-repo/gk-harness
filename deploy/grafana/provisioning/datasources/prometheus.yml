@@ -1,0 +1,11 @@
+# The one data source every panel of the gk-harness usage dashboard names by uid.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: gk-prometheus
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:9090
+    isDefault: true
+    editable: false

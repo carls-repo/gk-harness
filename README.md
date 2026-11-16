@@ -156,6 +156,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.gk-harness\install.p
 | `gkh report [--since YYYY-MM-DD] [--session ID] [--config-dir DIR] [--source ledger\|transcripts\|both] [--json]` | price the usage ledger and the session, subagent and workflow transcripts from the `routes.json` prices, merged by request id (`--source` picks one side; the default is both), by session, day, workflow, stage, agent, model, project and folder, with Fable's share and Haiku calls over the 100K-token prompt. Cost per class comes from the seat's `Route:` lines and is best effort. It reads only; on a subscription, cost is a proxy for your share of the usage limits |
 | `gkh fable off`, `gkh fable on`, `gkh fable status` | the Fable switch, below |
 | `gkh ledger on [--ignore-busy]`, `gkh ledger off [--ignore-busy]`, `gkh ledger status` | the usage ledger, below |
+| `gkh grafana up`, `gkh grafana down`, `gkh grafana status` | start, stop or check the local Prometheus and Grafana that chart the usage ledger, through an exact-command sudoers rule. Linux only; set up once at the box with [deploy/grafana/README.md](deploy/grafana/README.md) |
 
 Without `gkh`, run the same commands as `~/.gk-harness/install.sh <command>`, or `install.ps1 <command>` on Windows.
 

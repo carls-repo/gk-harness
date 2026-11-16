@@ -1,8 +1,9 @@
 """The installer's commands: install [--retire-legacy] [--ignore-busy], uninstall, update
 [--retire-legacy] [--ignore-busy], status, gen [--check], fable off|on|status, ledger
-on|off|status [--ignore-busy] (the usage ledger, see ledger_ctl.py), and report [--since
+on|off|status [--ignore-busy] (the usage ledger, see ledger_ctl.py), report [--since
 YYYY-MM-DD] [--session ID] [--config-dir DIR] [--source ledger|transcripts|both] [--json]
-(read-only: it prices the usage ledger and the transcripts, merged by request id, see report.py).
+(read-only: it prices the usage ledger and the transcripts, merged by request id, see report.py),
+and grafana up|down|status (the local Prometheus and Grafana, see deploy/grafana/README.md).
 
 install reads everything and decides every write before it makes the first one, so a problem
 found then (the preflight) stops it with nothing changed (exit 2). The writes then run in a fixed
@@ -26,6 +27,8 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,25 +36,29 @@ from . import VERSION, claude_md, gen, ledger_ctl, legacy, manifest, paths, peer
 from .routes import RoutesError, agent_names, load as load_routes
 from . import settings_merge as sm
 
-COMMANDS = ("install", "uninstall", "update", "status", "gen", "fable", "ledger", "report")
+COMMANDS = ("install", "uninstall", "update", "status", "gen", "fable", "ledger", "report",
+            "grafana")
 RETIRE = "--retire-legacy"
 CHECK = "--check"
 IGNORE_BUSY = "--ignore-busy"
 FABLE_WORDS = ("off", "on", "status")
 LEDGER_WORDS = ("on", "off", "status")
+GRAFANA_WORDS = ("up", "down", "status")
 JSON = "--json"
 SINCE = "--since"
 SESSION = "--session"
 CONFIG_DIR = "--config-dir"
 SOURCE = "--source"
-# Flags (and fable's and ledger's words), each at most once.
+# Flags (and the fable, ledger and grafana words), each at most once.
 OPTIONS = {"install": (RETIRE, IGNORE_BUSY), "update": (RETIRE, IGNORE_BUSY), "gen": (CHECK,),
-           "fable": FABLE_WORDS, "ledger": LEDGER_WORDS + (IGNORE_BUSY,), "report": (JSON,)}
+           "fable": FABLE_WORDS, "ledger": LEDGER_WORDS + (IGNORE_BUSY,), "report": (JSON,),
+           "grafana": GRAFANA_WORDS}
 # Options that take a value, as "--name value" or "--name=value", each at most once.
 VALUE_OPTIONS = {"report": (SINCE, SESSION, CONFIG_DIR, SOURCE)}
 USAGE = ("usage: install [install [%s] [%s] | uninstall | update [%s] [%s] | status | gen [%s] "
          "| fable off|on|status | ledger on|off|status [%s] "
-         "| report [%s YYYY-MM-DD] [%s ID] [%s DIR] [%s ledger|transcripts|both] [%s]]\n"
+         "| report [%s YYYY-MM-DD] [%s ID] [%s DIR] [%s ledger|transcripts|both] [%s] "
+         "| grafana up|down|status]\n"
          % (RETIRE, IGNORE_BUSY, RETIRE, IGNORE_BUSY, CHECK, IGNORE_BUSY, SINCE, SESSION,
             CONFIG_DIR, SOURCE, JSON))
 BUSY_EXIT = 3
@@ -1218,6 +1225,66 @@ def ledger(word: str, options: list) -> int:
     return 0
 
 
+# --- grafana --------------------------------------------------------------------------------
+
+# The stack in deploy/grafana/, installed root-owned in /etc/gk-grafana/ (README.md there). Carl's
+# user is not in the docker group, so each command goes through the exact-command sudoers rule
+# /etc/sudoers.d/gk-grafana; -n makes sudo fail rather than ask for a password.
+GRAFANA_COMPOSE = ["sudo", "-n", "/usr/bin/docker", "compose", "-f", "/etc/gk-grafana/compose.yml"]
+GRAFANA_ARGS = {"up": ["up", "-d"], "down": ["down"], "status": ["ps"]}
+GRAFANA_HOST = "127.0.0.1"
+GRAFANA_PORT = 3300
+PROMETHEUS_PORT = 9090
+HEALTH_TIMEOUT = 2.0  # seconds, per URL
+
+
+def _compose_run(argv: list) -> int:
+    """Run one compose command with the terminal attached; its exit code (127 when sudo is
+    missing)."""
+    try:
+        return subprocess.run(argv, stdin=subprocess.DEVNULL).returncode
+    except OSError as e:
+        _warn("%s: %s" % (argv[0], e.strerror or e))
+        return 127
+
+
+def _health(url: str) -> str:
+    """"up" when url answers 200 within HEALTH_TIMEOUT seconds, else "down (why)"."""
+    try:
+        with urllib.request.urlopen(url, timeout=HEALTH_TIMEOUT) as resp:
+            code = resp.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    except (OSError, ValueError) as e:
+        reason = getattr(e, "reason", None) or e
+        return "down (%s)" % (getattr(reason, "strerror", None) or reason)
+    return "up" if code == 200 else "down (HTTP %d)" % code
+
+
+def grafana(word: str) -> int:
+    """up: start both containers (docker compose up -d); down: stop and remove them, keeping
+    their named volumes (docker compose down); status: docker compose ps, then Grafana's
+    /api/health and Prometheus's /-/ready. Linux only (exit 2 elsewhere). Exit 0 when the
+    command (and for status, both health checks) succeeded, else 1."""
+    if not sys.platform.startswith("linux"):
+        sys.stderr.write("gk-harness: gkh grafana runs only on Linux, where the stack is "
+                         "installed; nothing was run.\n")
+        return 2
+    code = _compose_run(GRAFANA_COMPOSE + GRAFANA_ARGS[word])
+    if code != 0:
+        _warn("grafana: docker compose %s failed (exit %d); is /etc/sudoers.d/gk-grafana "
+              "installed? (deploy/grafana/README.md)" % (" ".join(GRAFANA_ARGS[word]), code))
+        if word != "status":
+            return 1
+    if word != "status":
+        return 0
+    grafana_state = _health("http://%s:%d/api/health" % (GRAFANA_HOST, GRAFANA_PORT))
+    prometheus_state = _health("http://%s:%d/-/ready" % (GRAFANA_HOST, PROMETHEUS_PORT))
+    print("grafana: %s on http://%s:%d" % (grafana_state, GRAFANA_HOST, GRAFANA_PORT))
+    print("prometheus: %s on http://%s:%d" % (prometheus_state, GRAFANA_HOST, PROMETHEUS_PORT))
+    return 0 if code == 0 and grafana_state == prometheus_state == "up" else 1
+
+
 # --- entry point ----------------------------------------------------------------------------
 
 def _forgiving_output() -> None:
@@ -1310,7 +1377,7 @@ def main(argv: list[str]) -> int:
         args.insert(0, "install")
     command, parsed = args[0], _parse(args[0], args[1:])
     if command not in COMMANDS or parsed is None \
-            or (command == "fable" and len(parsed[0]) != 1) \
+            or (command in ("fable", "grafana") and len(parsed[0]) != 1) \
             or (command == "ledger" and len([o for o in parsed[0] if o in LEDGER_WORDS]) != 1):
         sys.stderr.write(USAGE)
         return 2
@@ -1324,6 +1391,8 @@ def main(argv: list[str]) -> int:
         return fable(options[0])
     if command == "ledger":
         return ledger(next(o for o in options if o in LEDGER_WORDS), options)
+    if command == "grafana":
+        return grafana(options[0])
     if command == "gen":
         return _gen(CHECK in options)
     if command == "uninstall":

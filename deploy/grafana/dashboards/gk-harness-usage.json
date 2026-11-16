@@ -1,0 +1,662 @@
+{
+  "uid": "gk-harness-usage",
+  "title": "gk-harness usage",
+  "description": "Live view of Claude Code usage from the gk-harness usage-ledger receiver. gkh report stays the exact record.",
+  "tags": [
+    "gk-harness"
+  ],
+  "timezone": "browser",
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {
+    "from": "now/d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "fiscalYearStartMonth": 0,
+  "liveNow": false,
+  "weekStart": "",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Spend today",
+      "description": "Claude Code's cost_usd over the dashboard's time range, which defaults to today so far (now/d to now). Change the range to see another period.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gk-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 5,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gk-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(increase(gk_ledger_cost_usd_total[$__range]))",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Spend, last 7 days",
+      "description": "Claude Code's cost_usd over the 7 days up to now, whatever the dashboard's time range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gk-prometheus"
+      },
+      "gridPos": {
+        "x": 5,
+        "y": 0,
+        "w": 5,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gk-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(increase(gk_ledger_cost_usd_total[7d]))",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Fable share",
+      "description": "Fable models' share of spend over the dashboard's time range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gk-prometheus"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 0,
+        "w": 5,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gk-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(increase(gk_ledger_cost_usd_total{model=~\"claude-fable.*\"}[$__range])) / sum(increase(gk_ledger_cost_usd_total[$__range]))",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Haiku calls over 100K",
+      "description": "Haiku calls over the dashboard's time range whose prompt (input + cache read + cache write) was over 100,000 tokens, where Haiku's price rises.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gk-prometheus"
+      },
+      "gridPos": {
+        "x": 15,
+        "y": 0,
+        "w": 5,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gk-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(increase(gk_ledger_large_prompts_total{model=~\"claude-haiku.*\"}[$__range])) or vector(0)",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Receiver up",
+      "description": "Whether Prometheus's last scrape of the usage-ledger receiver on 127.0.0.1:4318 worked. The receiver exits after 30 minutes with no calls and no live session, and the next session or prompt starts it, so Down while nothing runs is normal.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gk-prometheus"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gk-prometheus"
+          },
+          "refId": "A",
+          "expr": "up{job=\"gk-ledger\"}",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Down",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "Up",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "noValue": "Down"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Spend per day by model",
+      "description": "Each bar is one model's spend in the day up to that point, over the last 30 days.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gk-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gk-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (model) (increase(gk_ledger_cost_usd_total[1d]))",
+          "legendFormat": "{{model}}",
+          "range": true,
+          "instant": false,
+          "interval": "1d"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "timeFrom": "30d",
+      "interval": "1d"
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Tokens per hour by kind",
+      "description": "Tokens per hour by kind: input, output, cache_read, cache_write_5m and cache_write_1h, over the last 2 days.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gk-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gk-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (kind) (increase(gk_ledger_tokens_total[1h]))",
+          "legendFormat": "{{kind}}",
+          "range": true,
+          "instant": false,
+          "interval": "1h"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "timeFrom": "2d",
+      "interval": "1h"
+    },
+    {
+      "id": 8,
+      "type": "bargauge",
+      "title": "Spend by project",
+      "description": "Spend over the dashboard's time range by the project the session works in (the session map). A blank name is a session the map did not know.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gk-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gk-prometheus"
+          },
+          "refId": "A",
+          "expr": "sort_desc(sum by (project) (increase(gk_ledger_cost_usd_total[$__range])))",
+          "legendFormat": "{{project}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 9,
+      "type": "bargauge",
+      "title": "Spend by workflow",
+      "description": "Spend over the dashboard's time range by gk workflow name. A blank name is spend outside any workflow.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gk-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gk-prometheus"
+          },
+          "refId": "A",
+          "expr": "sort_desc(sum by (workflow) (increase(gk_ledger_cost_usd_total[$__range])))",
+          "legendFormat": "{{workflow}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 10,
+      "type": "bargauge",
+      "title": "Spend by agent",
+      "description": "Spend over the dashboard's time range by agent name. A blank name is the main session.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gk-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gk-prometheus"
+          },
+          "refId": "A",
+          "expr": "sort_desc(sum by (agent_name) (increase(gk_ledger_cost_usd_total[$__range])))",
+          "legendFormat": "{{agent_name}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 11,
+      "type": "bargauge",
+      "title": "Spend by source",
+      "description": "Spend over the dashboard's time range by Claude Code's query_source. This stands in for a background-spend panel: the receiver cannot tell a background call from a transcript one. Values seen so far: sdk (the main session of a -p run), agent:custom (a user-defined agent), agent:builtin:general-purpose and agent:builtin:workflow-subagent. The main session of an interactive or desktop session is not yet proven; the merged report saw repl_main_thread.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gk-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 21,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gk-prometheus"
+          },
+          "refId": "A",
+          "expr": "sort_desc(sum by (source) (increase(gk_ledger_cost_usd_total[$__range])))",
+          "legendFormat": "{{source}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Errors per hour",
+      "description": "API errors per hour by model, over the dashboard's time range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gk-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "gk-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (model) (increase(gk_ledger_requests_total{event=\"api_error\"}[1h]))",
+          "legendFormat": "{{model}}",
+          "range": true,
+          "instant": false,
+          "interval": "1h"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "interval": "1h"
+    }
+  ]
+}

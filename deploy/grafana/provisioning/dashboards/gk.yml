@@ -1,0 +1,13 @@
+# Loads the dashboards in /var/lib/grafana/dashboards (deploy/grafana/dashboards, mounted
+# read-only) into the "gk-harness" folder.
+apiVersion: 1
+
+providers:
+  - name: gk-harness
+    folder: gk-harness
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /var/lib/grafana/dashboards

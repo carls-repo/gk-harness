@@ -1,0 +1,10 @@
+# Scrapes the gk-harness usage-ledger receiver (hooks/gk_ledger.py) every 15 seconds. The
+# receiver's counters start at zero each time it starts; increase() treats that as a reset.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: gk-ledger
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:4318"]
