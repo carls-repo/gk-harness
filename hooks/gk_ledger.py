@@ -1,18 +1,28 @@
 """The usage ledger's receiver: OTLP log parsing, the allowlisted ledger line, day files and
 the Prometheus counters (spec docs/2026-11-15-usage-ledger-design.md, sections 4.2, 4.3, 4.7).
 
-Standard library only, Python 3.9+. This module holds the pure functions; the HTTP server
-that calls them comes in a later task. Attribute names and value types follow the Stage 0
-proofs (docs/proofs/2026-11-ledger-stage0.md).
+Standard library only, Python 3.9+. The pure functions come first, then the loopback HTTP
+server that calls them (`make_server`, `serve`, `main`). Attribute names and value types
+follow the Stage 0 proofs (docs/proofs/2026-11-ledger-stage0.md).
 """
 from __future__ import annotations
 
+import argparse
+import contextlib
 import datetime
+import errno
 import json
 import math
 import os
 import re
+import signal
+import socket
+import stat
+import sys
 import threading
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -264,19 +274,37 @@ def append_line(ledger_dir: Path, line: dict) -> bool:
     """Append one compact JSON line to its day file with a single os.write (O_APPEND, mode
     0600). Makes the folder. False on any failure, a short write included, and for a line of
     LINE_MAX_BYTES or more, which is refused unwritten."""
+    return _write_line(ledger_dir, line) is None
+
+
+LINE_REFUSED = "line_refused"
+WRITE_FAILED = "write_failed"
+
+
+def _write_line(ledger_dir: Path, line: dict) -> Optional[tuple]:
+    """append_line's work: None when written, else (error kind, detail). The detail names the
+    error only, never the line's content."""
     try:
         data = (json.dumps(line, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
-        if len(data) >= LINE_MAX_BYTES:
-            return False
+    except (TypeError, ValueError) as e:
+        return (LINE_REFUSED, "not encodable: %s" % type(e).__name__)
+    if len(data) >= LINE_MAX_BYTES:
+        return (LINE_REFUSED, "line of %d bytes, limit %d" % (len(data), LINE_MAX_BYTES))
+    try:
         path = day_file(ledger_dir, line.get("ts"))
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
         try:
-            return os.write(fd, data) == len(data)
+            n = os.write(fd, data)
         finally:
             os.close(fd)
-    except (OSError, TypeError, ValueError):
-        return False
+    except OSError as e:
+        return (WRITE_FAILED, "%s: %s" % (type(e).__name__, e))
+    except (TypeError, ValueError) as e:
+        return (WRITE_FAILED, type(e).__name__)
+    if n != len(data):
+        return (WRITE_FAILED, "short write of %d of %d bytes" % (n, len(data)))
+    return None
 
 
 class SessionLookup:
@@ -428,3 +456,318 @@ def _fmt(v: float) -> str:
     if isinstance(v, int) or (isinstance(v, float) and v.is_integer()):
         return str(int(v))
     return repr(float(v))
+
+
+# ---------------------------------------------------------------------------------------------
+# The HTTP server (spec 4.2 and 6)
+
+MAX_BODY = 4 * 1024 * 1024
+IDLE_SECONDS = 1800
+MAP_RETENTION_DAYS = 90
+LOG_NAME = "receiver.log"
+PID_NAME = "receiver.pid"
+READ_TIMEOUT = 30  # seconds a client may take to send its headers and body
+LOG_DETAIL_MAX = 300
+
+LOGS_PATH = "/v1/logs"
+HEALTH_PATH = "/gk-ledger/health"
+METRICS_PATH = "/metrics"
+METRICS_TYPE = "text/plain; version=0.0.4"
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class ErrorLog:
+    """Counts errors by kind for receiver.log. The first instance of each kind is written at
+    once; running counts are written when a kind's count reaches 10, 100, 1000 ... and by
+    flush(). Details name the error, never a request body. Writing the log never raises."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.counts: dict = {}
+        self._lock = threading.Lock()
+
+    def record(self, kind: str, detail: str) -> None:
+        with self._lock:
+            n = self.counts.get(kind, 0) + 1
+            self.counts[kind] = n
+            counts = dict(self.counts)
+        if n == 1:
+            self._write("first %s: %s" % (kind, str(detail)[:LOG_DETAIL_MAX]))
+        elif n >= 10 and str(n).rstrip("0") == "1":
+            self._write(self._counts_text(counts))
+
+    def note(self, text: str) -> None:
+        self._write(text)
+
+    def flush(self) -> None:
+        with self._lock:
+            counts = dict(self.counts)
+        if counts:
+            self._write(self._counts_text(counts))
+
+    @staticmethod
+    def _counts_text(counts: dict) -> str:
+        return "counts " + " ".join("%s=%d" % kv for kv in sorted(counts.items()))
+
+    def _write(self, text: str) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(self.path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+            with open(fd, "a", encoding="utf-8", errors="replace") as f:
+                f.write("%s %s\n" % (_now_iso(), text.replace("\n", " ")))
+        except (OSError, ValueError):
+            pass
+
+
+class _Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "gk-ledger/%d" % LEDGER_VERSION
+    sys_version = ""
+    timeout = READ_TIMEOUT
+    server: "LedgerServer"
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        pass  # no per-request log lines
+
+    def _reply(self, status: int, body: bytes = b"{}", ctype: str = "application/json",
+               close: bool = False) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        if close:
+            self.send_header("Connection", "close")
+            self.close_connection = True
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _refuse(self, status: int, kind: str, detail: str) -> None:
+        """An error reply. The body may be unread, so the connection closes after it."""
+        self.server.errors.record(kind, detail)
+        self._reply(status, close=True)
+
+    def _path(self) -> str:
+        return urllib.parse.urlsplit(self.path).path
+
+    def do_GET(self) -> None:
+        self.server.touch()
+        path = self._path()
+        if path == HEALTH_PATH:
+            self._reply(200, json.dumps({"gk-ledger": LEDGER_VERSION}).encode())
+        elif path == METRICS_PATH:
+            self._reply(200, self.server.metrics.render().encode("utf-8"), METRICS_TYPE)
+        else:
+            self._reply(404, close=True)
+
+    def do_POST(self) -> None:
+        self.server.touch()
+        if self._path() != LOGS_PATH:
+            self._reply(404, close=True)
+            return
+        ctype = self.headers.get("Content-Type") or ""
+        if "json" not in ctype.lower():
+            self._refuse(415, "wrong_type", "Content-Type %r" % ctype[:80])
+            return
+        raw = self.headers.get("Content-Length")
+        if raw is None:
+            self._refuse(411, "no_length", "no Content-Length")
+            return
+        try:
+            length = int(raw.strip())
+            if length < 0 or not raw.strip().isdigit():
+                raise ValueError
+        except ValueError:
+            self._refuse(400, "bad_length", "Content-Length %r" % raw[:40])
+            return
+        if length > MAX_BODY:
+            self._refuse(413, "too_large", "Content-Length %d over %d" % (length, MAX_BODY))
+            return
+        try:
+            body = self.rfile.read(length)
+        except OSError as e:
+            self.server.errors.record("read_failed", type(e).__name__)
+            self.close_connection = True
+            return
+        if len(body) != length:
+            self._refuse(400, "short_body", "%d of %d bytes" % (len(body), length))
+            return
+        try:
+            records = parse_logs(body)
+        except ValueError as e:
+            self._refuse(400, "parse", str(e))
+            return
+        self.server.ingest(records)
+        self._reply(200)
+
+    def _not_found(self) -> None:
+        self.server.touch()
+        self._reply(404, close=True)
+
+    do_HEAD = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _not_found
+
+
+class LedgerServer(ThreadingHTTPServer):
+    """The receiver: writes Claude Code's api_request and api_error records to the ledger."""
+
+    daemon_threads = True
+    request_queue_size = 128  # the default backlog of 5 resets bursts from many sessions
+
+    def __init__(self, ledger_dir: Path, address: tuple) -> None:
+        self.ledger_dir = Path(ledger_dir)
+        self.lookup = SessionLookup(self.ledger_dir / "sessions")
+        self.names = NameLookup(gk_common.claude_dir() / "projects")
+        self.metrics = Metrics()
+        self.errors = ErrorLog(self.ledger_dir / LOG_NAME)
+        self.last_request = time.monotonic()
+        super().__init__(address, _Handler)
+
+    def touch(self) -> None:
+        self.last_request = time.monotonic()
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """socketserver prints tracebacks to stderr; count them in receiver.log instead. A
+        client that hangs up or stalls is normal (the prompt hook's port probe does) and is
+        not counted."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionError, TimeoutError, socket.timeout)):
+            return
+        self.errors.record("handler", "%s: %s" % (type(exc).__name__, exc))
+
+    def ingest(self, records: list) -> None:
+        for res, attrs, event_name, time_ns in records:
+            line = _safe_call(to_line, res, attrs, event_name, time_ns, self.lookup, self.names)
+            if line is None:
+                continue
+            failure = _write_line(self.ledger_dir, line)
+            if failure is None:
+                self.metrics.add(line)
+            else:
+                self.errors.record(*failure)
+
+
+def make_server(ledger_dir: Path, port: int, host: str = gk_common.LEDGER_HOST
+                ) -> ThreadingHTTPServer:
+    """A bound, not yet serving, receiver on host:port. Makes ledger_dir (mode 0700)."""
+    server = LedgerServer(ledger_dir, (host, port))
+    try:
+        Path(ledger_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as e:
+        server.errors.record("ledger_dir", "%s: %s" % (type(e).__name__, e))
+    return server
+
+
+def prune_session_maps(sessions_dir: Path, days: int = MAP_RETENTION_DAYS) -> int:
+    """Remove session maps not modified for `days` days. Returns how many were removed."""
+    cutoff = time.time() - days * 86400
+    removed = 0
+    try:
+        paths = list(Path(sessions_dir).glob("*.json"))
+    except OSError:
+        return 0
+    for p in paths:
+        try:
+            st = p.lstat()
+            if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
+                p.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _write_pidfile(path: Path) -> bool:
+    tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))
+    try:
+        fd = os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        with open(fd, "w") as f:
+            f.write("%d\n" % os.getpid())
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        return False
+
+
+def _remove_own_pidfile(path: Path) -> None:
+    """Remove the pidfile only while it still names this process."""
+    try:
+        if path.read_text().strip() == str(os.getpid()):
+            path.unlink()
+    except OSError:
+        pass
+
+
+def serve(ledger_dir: Path, port: int, idle_seconds: int = IDLE_SECONDS,
+          live: Callable[[], bool] = gk_common.live_session) -> int:
+    """Run the receiver until it has had no request for idle_seconds while live() is False,
+    or until SIGTERM. Returns 0, also when the port is already in use (then it writes
+    nothing); 1 when it cannot bind for another reason."""
+    ledger_dir = Path(ledger_dir)
+    try:
+        server = make_server(ledger_dir, port)
+    except (OSError, OverflowError) as e:
+        if getattr(e, "errno", None) == errno.EADDRINUSE:
+            return 0
+        ErrorLog(ledger_dir / LOG_NAME).note("bind failed on port %s: %s" % (port, e))
+        return 1
+    pidfile = ledger_dir / PID_NAME
+    stop = threading.Event()
+    old_handler = None
+    if threading.current_thread() is threading.main_thread():
+        try:
+            old_handler = signal.signal(signal.SIGTERM, lambda signum, frame: stop.set())
+        except (ValueError, OSError):
+            old_handler = None
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.25},
+                              name="gk-ledger-server", daemon=True)
+    try:
+        prune_session_maps(ledger_dir / "sessions")
+        if not _write_pidfile(pidfile):
+            server.errors.note("could not write %s" % PID_NAME)
+        server.touch()
+        thread.start()
+        tick = max(0.05, min(5.0, idle_seconds / 4))
+        while not stop.wait(tick):
+            if time.monotonic() - server.last_request < idle_seconds:
+                continue
+            try:
+                busy = bool(live())
+            except Exception:
+                busy = False
+            if not busy:
+                break
+    finally:
+        if thread.is_alive():
+            server.shutdown()
+            thread.join(10)
+        server.server_close()
+        _remove_own_pidfile(pidfile)
+        server.errors.flush()
+        if old_handler is not None:
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(signal.SIGTERM, old_handler)
+    return 0
+
+
+def main(argv: list) -> int:
+    parser = argparse.ArgumentParser(prog="gk_ledger.py",
+                                     description="The gk-harness usage ledger's receiver.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    p_serve = sub.add_parser("serve", help="run the receiver on the loopback address")
+    p_serve.add_argument("--port", type=int, default=None)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 2
+    if args.command == "serve":
+        port = args.port if args.port is not None else gk_common.ledger_port()
+        return serve(gk_common.ledger_dir(), port)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

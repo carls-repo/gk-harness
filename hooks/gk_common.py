@@ -413,6 +413,19 @@ def ledger_on() -> bool:
     return ledger_on_file().exists()
 
 
+def live_session() -> bool:
+    """Whether any claude_dir()/sessions/*.json names a pid that is still running."""
+    try:
+        paths = sorted((claude_dir() / "sessions").glob("*.json"))
+    except OSError:
+        return False
+    for path in paths:
+        data = read_json(path)
+        if isinstance(data, dict) and pid_alive(data.get("pid")):
+            return True
+    return False
+
+
 def project_identity(cwd: str | os.PathLike) -> dict:
     """{"cwd", "root", "project", "branch"} for a working directory (spec 4.8)."""
     cwd = os.fspath(cwd)
