@@ -23,6 +23,8 @@ EVENTS = ("claude_code.api_request", "claude_code.api_error")
 SERVICE = "claude-code"
 LARGE_PROMPT = 100_000
 NAME_FILE_MAX = 32 * 1024 * 1024  # run records and meta files bigger than this are skipped
+FIELD_MAX_BYTES = 200  # each string field of a line, in UTF-8 bytes
+LINE_MAX_BYTES = 4096  # appended lines must stay below this so O_APPEND writes never interleave
 
 LINE_KEYS = (
     "ts", "event", "session", "prompt", "request", "model", "effort", "speed", "source",
@@ -72,19 +74,23 @@ def any_value(v: Any) -> Any:
     return None
 
 
+_INT_LIMIT = 2 ** 63  # OTLP integers are int64; anything wider is not a real count
+
+
 def _int(x: Any) -> Optional[int]:
+    n: Optional[int] = None
     if isinstance(x, bool):
         return None
     if isinstance(x, int):
-        return x
-    if isinstance(x, float):
-        return int(x) if math.isfinite(x) and x == int(x) else None
-    if isinstance(x, str):
+        n = x
+    elif isinstance(x, float):
+        n = int(x) if math.isfinite(x) and x == int(x) else None
+    elif isinstance(x, str) and len(x) <= 32:
         try:
-            return int(x.strip())
+            n = int(x.strip())
         except ValueError:
             return None
-    return None
+    return n if n is not None and -_INT_LIMIT <= n < _INT_LIMIT else None
 
 
 def _float(x: Any) -> Optional[float]:
@@ -179,18 +185,31 @@ def _parse_ts(ts: Any) -> Optional[datetime.datetime]:
 def _ts(attrs: dict, time_ns: Optional[int]) -> str:
     ts = attrs.get("event.timestamp")
     if _parse_ts(ts) is not None:
-        return ts
+        return ts.strip()
     if isinstance(time_ns, int) and time_ns > 0:
         try:
-            return _iso(datetime.datetime.fromtimestamp(time_ns / 1e9, datetime.timezone.utc)
-                        .replace(microsecond=(time_ns // 1000) % 1_000_000))
-        except (ValueError, OverflowError, OSError):
+            return _iso(datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+                        + datetime.timedelta(microseconds=time_ns // 1000))
+        except (ValueError, OverflowError):
             pass
     return _iso(datetime.datetime.now(datetime.timezone.utc))
 
 
 def _str(x: Any) -> Optional[str]:
-    return x if isinstance(x, str) else None
+    """x cut so its JSON-encoded form (UTF-8, quotes excluded) is at most FIELD_MAX_BYTES,
+    at a character boundary; None when x is not a str. Measuring the encoded form bounds the
+    line even for escaped control characters, which take up to six bytes each."""
+    if not isinstance(x, str):
+        return None
+    x = x.encode("utf-8", "replace").decode("utf-8")  # lone surrogates would fail the write
+    if len(x) * 6 <= FIELD_MAX_BYTES:
+        return x
+    used = 0
+    for i, c in enumerate(x):
+        used += len(json.dumps(c, ensure_ascii=False).encode("utf-8", "replace")) - 2
+        if used > FIELD_MAX_BYTES:
+            return x[:i]
+    return x
 
 
 def to_line(resource: dict, attrs: dict, event_name: Optional[str], time_ns: Optional[int],
@@ -216,10 +235,10 @@ def to_line(resource: dict, attrs: dict, event_name: Optional[str], time_ns: Opt
     session = line["session"]
     if names is not None and session:
         if line["workflow_run"] and line["workflow"] in (None, _CUSTOM):
-            line["workflow"] = _safe_call(names.workflow, session, line["workflow_run"]) \
-                or line["workflow"]
+            line["workflow"] = _str(_safe_call(names.workflow, session,
+                                               line["workflow_run"])) or line["workflow"]
         if line["agent"] and line["agent_name"] in (None, _CUSTOM):
-            line["agent_name"] = _safe_call(names.agent, session, line["agent"]) \
+            line["agent_name"] = _str(_safe_call(names.agent, session, line["agent"])) \
                 or line["agent_name"]
     ident = _safe_call(lookup, session) if lookup is not None and session else None
     if isinstance(ident, dict):
@@ -243,9 +262,12 @@ def day_file(ledger_dir: Path, ts: Any) -> Path:
 
 def append_line(ledger_dir: Path, line: dict) -> bool:
     """Append one compact JSON line to its day file with a single os.write (O_APPEND, mode
-    0600). Makes the folder. False on any failure, a short write included."""
+    0600). Makes the folder. False on any failure, a short write included, and for a line of
+    LINE_MAX_BYTES or more, which is refused unwritten."""
     try:
         data = (json.dumps(line, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+        if len(data) >= LINE_MAX_BYTES:
+            return False
         path = day_file(ledger_dir, line.get("ts"))
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)

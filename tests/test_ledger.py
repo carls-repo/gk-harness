@@ -237,6 +237,74 @@ class ToLineTests(unittest.TestCase):
             self.assertIsNone(lookup(None))
 
 
+class LineLengthTests(unittest.TestCase):
+    def _api(self):
+        res, attrs, ev, t = [r for r in gk_ledger.parse_logs(API_FIXTURE.read_bytes())
+                             if r[2] == "claude_code.api_request"][0]
+        return dict(res), dict(attrs), ev, t
+
+    def _write_and_read(self, line):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertTrue(gk_ledger.append_line(Path(tmp), line))
+            (name,) = os.listdir(tmp)
+            return (Path(tmp) / name).read_bytes()
+
+    def test_long_model_line_stays_under_4096_bytes(self):
+        res, attrs, ev, t = self._api()
+        attrs["model"] = "m" * 10_000
+        line = gk_ledger.to_line(res, attrs, ev, t, fake_lookup)
+        raw = self._write_and_read(line)
+        self.assertLess(len(raw), 4096)
+        self.assertEqual(json.loads(raw)["model"], "m" * gk_ledger.FIELD_MAX_BYTES)
+
+    def test_long_non_ascii_agent_name_stays_under_4096_and_decodes(self):
+        res, attrs, ev, t = self._api()
+        attrs["agent.name"] = "\u00e9\u4e2d\U0001F600" * 3_334  # 10,002 chars, 2-4 bytes each
+        line = gk_ledger.to_line(res, attrs, ev, t, fake_lookup)
+        raw = self._write_and_read(line)
+        self.assertLess(len(raw), 4096)
+        got = json.loads(raw.decode("utf-8"))["agent_name"]
+        self.assertTrue(attrs["agent.name"].startswith(got))
+        self.assertLessEqual(len(got.encode("utf-8")), gk_ledger.FIELD_MAX_BYTES)
+
+    def test_every_field_at_worst_case_stays_under_4096(self):
+        res, attrs, ev, t = self._api()
+        for _k, a in gk_ledger._STRINGS:
+            attrs[a] = "\x01" * 10_000  # escapes to six bytes each
+        for _k, a in gk_ledger._INTS:
+            attrs[a] = "9" * 30
+        attrs["session.id"] = "s" * 10_000
+        attrs["model"] = "\ud800" * 500  # lone surrogates
+        def big_lookup(_sid):
+            return {"project": "\"" * 5000, "root": "\\" * 5000, "branch": "b" * 5000}
+        line = gk_ledger.to_line(res, attrs, ev, t, big_lookup)
+        raw = self._write_and_read(line)
+        self.assertLess(len(raw), 4096)
+        json.loads(raw.decode("utf-8"))
+
+    def test_append_line_refuses_4096_bytes_or_more(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            line = {"ts": "2026-11-16T00:00:00.000Z", "x": ""}
+            overhead = len(json.dumps(line, separators=(",", ":")).encode()) + 1
+            line["x"] = "a" * (4096 - overhead)  # exactly 4096 bytes encoded
+            self.assertFalse(gk_ledger.append_line(Path(tmp), line))
+            line["x"] = "a" * (4095 - overhead)  # 4095 bytes: written
+            self.assertTrue(gk_ledger.append_line(Path(tmp), line))
+            self.assertEqual(os.listdir(tmp), ["2026-11-16.jsonl"])
+            self.assertEqual(len((Path(tmp) / "2026-11-16.jsonl").read_bytes()), 4095)
+
+    def test_ts_from_time_ns_is_exact(self):
+        res, attrs, ev, _t = self._api()
+        del attrs["event.timestamp"]
+        line = gk_ledger.to_line(res, attrs, ev, 1794818070999999999, fake_lookup)
+        self.assertEqual(line["ts"], "2026-11-16T08:34:30.999Z")
+        # 23:59:59.9999995 stays on its own day.
+        last = 1794873599999999500  # 2026-11-16T23:59:59.9999995Z
+        line = gk_ledger.to_line(res, attrs, ev, last, fake_lookup)
+        self.assertEqual(line["ts"], "2026-11-16T23:59:59.999Z")
+        self.assertEqual(gk_ledger.day_file(Path("/x"), line["ts"]).name, "2026-11-16.jsonl")
+
+
 class NameLookupTests(unittest.TestCase):
     SID = "5dbefd3d-e540-4c6e-92c1-765bcfee770b"
 
