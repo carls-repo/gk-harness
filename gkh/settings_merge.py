@@ -4,11 +4,12 @@ loader, and a merge whose `undo` record lets uninstall reverse it surgically.
 The installer owns a hook entry exactly when its command contains hooks/gk-harness/ (with "\\"
 read as "/"). Besides those it changes only the fixed legacy entries in gkh.legacy and the owned
 keys, which owned_desired() reads from routes.json: the default `model`, each seat model's
-`modelSettings.<model id>.effortLevel`, `env.CLAUDE_CODE_SUBAGENT_MODEL` and `ultracode`. An
-owned key is written when the installer first adopts it, and after that only while it still
-holds what the installer last wrote: a value changed by hand is never overwritten. Every other
-key and entry is left as it was. All functions here are pure: they take a settings dict and
-return a new one, never changing their input.
+`modelSettings.<model id>.effortLevel`, `env.CLAUDE_CODE_SUBAGENT_MODEL` and `ultracode`, plus
+the five LEDGER_ENV telemetry keys while the ledger is on. An owned key is written when the
+installer first adopts it, and after that only while it still holds what the installer last
+wrote: a value changed by hand is never overwritten. Every other key and entry is left as it
+was. All functions here are pure: they take a settings dict and return a new one, never changing
+their input.
 
 An owned key's path is a tuple of object keys; the journal holds it dotted ("model",
 "modelSettings.claude-opus-5-5.effortLevel"). owned_desired() refuses a key holding ".", so the
@@ -195,14 +196,27 @@ def _sweep(groups: list, event: str, event_index: int, records: list | None) -> 
 
 # --- owned keys -----------------------------------------------------------------------------
 
-def owned_desired(routes: dict) -> dict:
+# The telemetry keys the installer owns while the usage ledger is on (spec 4.1): Claude Code's
+# events go, as OTLP JSON logs, to the loopback receiver only; metrics are not exported. No
+# OTEL_LOG_* content variable is ever set.
+LEDGER_ENV = {
+    ("env", "CLAUDE_CODE_ENABLE_TELEMETRY"): "1",
+    ("env", "OTEL_LOGS_EXPORTER"): "otlp",
+    ("env", "OTEL_EXPORTER_OTLP_PROTOCOL"): "http/json",
+    ("env", "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"): "http://127.0.0.1:4318/v1/logs",
+    ("env", "OTEL_METRICS_EXPORTER"): "none",
+}
+
+
+def owned_desired(routes: dict, ledger: bool = False) -> dict:
     """{path tuple: value} for the keys the installer owns, read from routes.json:
       ("model",)                                   the seat default tier's model alias;
       ("modelSettings", <model id>, "effortLevel") seat.effort[alias], for each alias there,
                                                    keyed by models[alias].id (Stage 0 proof 5:
                                                    Claude Code reads effortLevel, not effort);
       ("env", "CLAUDE_CODE_SUBAGENT_MODEL")        seat.subagentDefault;
-      ("ultracode",)                               False.
+      ("ultracode",)                               False;
+    and, when ledger is True, the five LEDGER_ENV keys after them.
     Raises RoutesError when routes.json lacks any of them or names a model id holding "."."""
     try:
         seat = routes["seat"]
@@ -219,6 +233,8 @@ def owned_desired(routes: dict) -> dict:
             raise RoutesError("routes.json gives an unusable settings key %r = %r"
                               % (path, value))
     out[("ultracode",)] = False
+    if ledger:
+        out.update(LEDGER_ENV)
     return out
 
 
@@ -297,6 +313,29 @@ def _own(new: dict, desired: dict, last: dict, priors: dict, undo: dict) -> None
         undo["owned"][key] = {"prior": copy.deepcopy(prior), "wrote": copy.deepcopy(value)}
 
 
+def _release(new: dict, release: dict, desired: dict, undo: dict) -> None:
+    """Take the keys of release ({dotted key: {"prior", "wrote"}}, the newest owned record of
+    each) out of ownership: put the prior back where the key still holds what the installer
+    wrote (a prior of {"present": False} removes the key), and leave a value changed by hand.
+    Each key is recorded in undo["released"] (made at the first) either way, so a later merge
+    no longer owns it. A key that desired names, or whose record is not usable, is passed
+    over."""
+    wanted = {dotted(p) for p in desired}
+    for key, record in release.items():
+        path = _path(key)
+        if path is None or key in wanted or not isinstance(record, dict) \
+                or "wrote" not in record or not _valid_prior(record.get("prior")):
+            continue
+        if _same(_get(new, path), record["wrote"]):
+            parent = _get(new, path[:-1]) if len(path) > 1 else new
+            if record["prior"]["present"]:
+                parent[path[-1]] = copy.deepcopy(record["prior"]["value"])
+            else:
+                del parent[path[-1]]
+        undo.setdefault("released", {})[key] = {"prior": copy.deepcopy(record["prior"]),
+                                                "wrote": copy.deepcopy(record["wrote"])}
+
+
 def hand_changed(settings: Any, last: Any) -> list:
     """The dotted keys of last ({dotted key: the value the installer last wrote}) whose value in
     settings is now different, or absent, in last's order."""
@@ -343,7 +382,8 @@ def _unown(new: dict, undo: dict) -> None:
 
 
 def merge(settings: dict, python: Any, claude_dir: Any, desired: dict | None = None,
-          last: dict | None = None, priors: dict | None = None) -> tuple:
+          last: dict | None = None, priors: dict | None = None,
+          release: dict | None = None) -> tuple:
     """(new_settings, undo).
 
     new_settings has every legacy entry removed, any previously owned entries replaced by the
@@ -353,7 +393,9 @@ def merge(settings: dict, python: Any, claude_dir: Any, desired: dict | None = N
     ({dotted key: the value the installer last wrote}) and priors ({dotted key: the prior
     recorded then}), both from the newest journal record of each key. A key in desired that a
     new object must hold is added at the end of its parent; one on its way that is not an
-    object raises SettingsError. Running merge on its own output changes nothing.
+    object raises SettingsError. release ({dotted key: {"prior", "wrote"}}) names owned keys to
+    give up, as _release() says: the ledger's keys once it is off. Running merge on its own
+    output changes nothing.
 
     undo is JSON-ready, for the journal and unmerge():
       {"removed":   [{"event", "event_index", "group_index", "group", "group_removed",
@@ -364,7 +406,9 @@ def merge(settings: dict, python: Any, claude_dir: Any, desired: dict | None = N
        "owned":     {dotted key: {"prior": {"present": False} or {"present": True,
                                             "value": <value before the installer owned it>},
                                   "wrote": <the value the installer wrote, or last wrote>}},
-       "created_objects": [dotted keys of the objects this merge made for owned keys, in order]}
+       "created_objects": [dotted keys of the objects this merge made for owned keys, in order],
+       "released":  {dotted key: {"prior", "wrote"}}  # only when this merge took keys out of
+                                                     # ownership; unmerge() ignores them}
     Versions before the owned keys recorded "ultracode" ({"present", "value"?}) instead: the
     value before they set it to true. unmerge() still reads it.
     """
@@ -390,6 +434,7 @@ def merge(settings: dict, python: Any, claude_dir: Any, desired: dict | None = N
         if event not in hooks:
             hooks[event] = copy.deepcopy(groups)
             undo["created_events"].append(event)
+    _release(new, release or {}, desired or {}, undo)
     _own(new, desired or {}, last or {}, priors or {}, undo)
     return new, undo
 
@@ -493,7 +538,8 @@ def unmerge(settings: dict, undo: Any) -> dict:
     (undo["created_events"]) and it is now empty, and the `hooks` key only when the merge
     created it and it is now empty. Put each owned key's prior back only where the key still
     holds what the merge wrote, then remove the objects the merge created for them
-    (undo["created_objects"]) that are now empty. An old record's "ultracode" prior comes back
+    (undo["created_objects"]) that are now empty. The keys in undo["released"] are passed over:
+    the merge put their priors back already. An old record's "ultracode" prior comes back
     only while ultracode is still the true those versions wrote. Every other key, an empty
     event list the user added since included, is left as it is. Malformed parts of undo are
     ignored; with no usable created_events, only the event lists that held nothing but owned

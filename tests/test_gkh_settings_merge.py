@@ -682,6 +682,107 @@ class OwnedKeyTests(unittest.TestCase):
         self.assertEqual(sm.owned_paths(None), [])
 
 
+
+# The five telemetry keys the installer owns while the ledger is on, spelled out from spec 4.1.
+LEDGER = {
+    ("env", "CLAUDE_CODE_ENABLE_TELEMETRY"): "1",
+    ("env", "OTEL_LOGS_EXPORTER"): "otlp",
+    ("env", "OTEL_EXPORTER_OTLP_PROTOCOL"): "http/json",
+    ("env", "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"): "http://127.0.0.1:4318/v1/logs",
+    ("env", "OTEL_METRICS_EXPORTER"): "none",
+}
+LEDGER_KEYS = [sm.dotted(p) for p in LEDGER]
+
+
+class LedgerKeyTests(unittest.TestCase):
+    """The ledger's five env keys: owned only while the ledger is on, and released (their priors
+    put back, their ownership ended) when it goes off."""
+
+    def on(self, start):
+        """start merged with the ledger on: (settings, undo)."""
+        return sm.merge(start, PY, CDIR, sm.owned_desired(ROUTES, ledger=True))
+
+    def released(self, settings, undo):
+        """settings merged again with the ledger off, releasing the keys undo owns."""
+        release = {k: r for k, r in undo["owned"].items() if k in LEDGER_KEYS}
+        return sm.merge(settings, PY, CDIR, OWNED, wrote_of(undo), priors_of(undo), release)
+
+    def test_ledger_keys_desired_only_when_on(self):
+        self.assertEqual(sm.LEDGER_ENV, LEDGER)
+        self.assertEqual(sm.owned_desired(ROUTES), OWNED)
+        self.assertEqual(sm.owned_desired(ROUTES, ledger=False), OWNED)
+        on = sm.owned_desired(ROUTES, ledger=True)
+        self.assertEqual(on, {**OWNED, **LEDGER})
+        self.assertEqual(list(on), list(OWNED) + list(LEDGER))
+        # No content variable is ever owned.
+        self.assertFalse([p for p in on if p[-1].startswith("OTEL_LOG_")])
+        new, undo = self.on({})
+        self.assertEqual(new["env"], dict({"CLAUDE_CODE_SUBAGENT_MODEL": "opus"},
+                                          **{p[1]: v for p, v in LEDGER.items()}))
+        self.assertEqual(list(undo["owned"]), OWNED_KEYS + LEDGER_KEYS)
+        self.assertNotIn("released", undo)
+
+    def test_release_restores_prior_and_marks_released(self):
+        start = {"env": {"OTEL_METRICS_EXPORTER": "prometheus", "MINE": "x"}, "theme": "dark"}
+        on, undo = self.on(start)
+        self.assertEqual(on["env"]["OTEL_METRICS_EXPORTER"], "none")
+        off, undo2 = self.released(on, undo)
+        self.assertEqual(off["env"], {"OTEL_METRICS_EXPORTER": "prometheus", "MINE": "x",
+                                      "CLAUDE_CODE_SUBAGENT_MODEL": "opus"})
+        self.assertEqual(sorted(undo2["released"]), sorted(LEDGER_KEYS))
+        for key in LEDGER_KEYS:
+            self.assertEqual(undo2["released"][key], undo["owned"][key], key)
+            self.assertNotIn(key, undo2["owned"])
+        self.assertEqual(undo2["released"]["env.OTEL_METRICS_EXPORTER"]["prior"],
+                         {"present": True, "value": "prometheus"})
+        self.assertEqual(sorted(undo2["owned"]), sorted(OWNED_KEYS))
+        self.assertEqual(json.loads(json.dumps(undo2)), undo2)
+
+    def test_release_keeps_hand_changed_value(self):
+        on, undo = self.on({})
+        on["env"]["OTEL_LOGS_EXPORTER"] = "console"
+        del on["env"]["OTEL_METRICS_EXPORTER"]
+        off, undo2 = self.released(on, undo)
+        self.assertEqual(off["env"], {"CLAUDE_CODE_SUBAGENT_MODEL": "opus",
+                                      "OTEL_LOGS_EXPORTER": "console"})
+        # Released all the same: a later merge no longer owns them.
+        self.assertEqual(sorted(undo2["released"]), sorted(LEDGER_KEYS))
+
+    def test_unmerge_ignores_released(self):
+        on, undo = self.on({"theme": "dark"})
+        off, undo2 = self.released(on, undo)
+        # Carl sets a released key back by hand to the value the installer once wrote:
+        # reversing the release merge must not touch it.
+        off["env"]["OTEL_LOGS_EXPORTER"] = "otlp"
+        back = sm.unmerge(off, undo2)
+        self.assertEqual(back["env"], {"OTEL_LOGS_EXPORTER": "otlp"})
+        self.assertEqual(back["theme"], "dark")
+
+    def test_merge_with_release_is_idempotent(self):
+        for start in ({}, box_settings(), {"env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}}):
+            with self.subTest(start=json.dumps(start)[:60]):
+                on, undo = self.on(start)
+                off, undo2 = self.released(on, undo)
+                again, undo3 = sm.merge(off, PY, CDIR, OWNED, wrote_of(undo2),
+                                        priors_of(undo2), {k: undo2["released"][k]
+                                                           for k in undo2["released"]})
+                self.assertEqual(sm.dumps(again), sm.dumps(off))
+                self.assertEqual(undo3["owned"], undo2["owned"])
+                # Released once more, never owned again.
+                self.assertEqual(sorted(undo3["released"]), sorted(LEDGER_KEYS))
+                # The ledger's keys are back as they were before it went on.
+                self.assertEqual(sm.dumps(sm.unmerge(sm.unmerge(off, undo2), undo)),
+                                 sm.dumps(start))
+
+    def test_a_desired_key_is_never_released(self):
+        on, undo = self.on({})
+        again, undo2 = sm.merge(on, PY, CDIR, sm.owned_desired(ROUTES, ledger=True),
+                                wrote_of(undo), priors_of(undo),
+                                {k: undo["owned"][k] for k in LEDGER_KEYS})
+        self.assertEqual(sm.dumps(again), sm.dumps(on))
+        self.assertNotIn("released", undo2)
+
+
 class LoadStrictTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

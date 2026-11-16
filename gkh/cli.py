@@ -1,7 +1,8 @@
 """The installer's commands: install [--retire-legacy] [--ignore-busy], uninstall, update
-[--retire-legacy] [--ignore-busy], status, gen [--check], fable off|on|status, and report
-[--since YYYY-MM-DD] [--session ID] [--config-dir DIR] [--json] (read-only: it prices the
-transcripts, see report.py).
+[--retire-legacy] [--ignore-busy], status, gen [--check], fable off|on|status, ledger
+on|off|status [--ignore-busy] (the usage ledger, see ledger_ctl.py), and report [--since
+YYYY-MM-DD] [--session ID] [--config-dir DIR] [--json] (read-only: it prices the transcripts,
+see report.py).
 
 install reads everything and decides every write before it makes the first one, so a problem
 found then (the preflight) stops it with nothing changed (exit 2). The writes then run in a fixed
@@ -28,27 +29,30 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from . import VERSION, claude_md, gen, legacy, manifest, paths, peers, report, shell
+from . import VERSION, claude_md, gen, ledger_ctl, legacy, manifest, paths, peers, report, shell
 from .routes import RoutesError, agent_names, load as load_routes
 from . import settings_merge as sm
 
-COMMANDS = ("install", "uninstall", "update", "status", "gen", "fable", "report")
+COMMANDS = ("install", "uninstall", "update", "status", "gen", "fable", "ledger", "report")
 RETIRE = "--retire-legacy"
 CHECK = "--check"
 IGNORE_BUSY = "--ignore-busy"
 FABLE_WORDS = ("off", "on", "status")
+LEDGER_WORDS = ("on", "off", "status")
 JSON = "--json"
 SINCE = "--since"
 SESSION = "--session"
 CONFIG_DIR = "--config-dir"
-# Flags (and fable's words), each at most once.
+# Flags (and fable's and ledger's words), each at most once.
 OPTIONS = {"install": (RETIRE, IGNORE_BUSY), "update": (RETIRE, IGNORE_BUSY), "gen": (CHECK,),
-           "fable": FABLE_WORDS, "report": (JSON,)}
+           "fable": FABLE_WORDS, "ledger": LEDGER_WORDS + (IGNORE_BUSY,), "report": (JSON,)}
 # Options that take a value, as "--name value" or "--name=value", each at most once.
 VALUE_OPTIONS = {"report": (SINCE, SESSION, CONFIG_DIR)}
 USAGE = ("usage: install [install [%s] [%s] | uninstall | update [%s] [%s] | status | gen [%s] "
-         "| fable off|on|status | report [%s YYYY-MM-DD] [%s ID] [%s DIR] [%s]]\n"
-         % (RETIRE, IGNORE_BUSY, RETIRE, IGNORE_BUSY, CHECK, SINCE, SESSION, CONFIG_DIR, JSON))
+         "| fable off|on|status | ledger on|off|status [%s] "
+         "| report [%s YYYY-MM-DD] [%s ID] [%s DIR] [%s]]\n"
+         % (RETIRE, IGNORE_BUSY, RETIRE, IGNORE_BUSY, CHECK, IGNORE_BUSY, SINCE, SESSION,
+            CONFIG_DIR, JSON))
 BUSY_EXIT = 3
 # Sources install will not run without. It deploys every hooks/*.py, agents/worker-*.md,
 # agents/Explore.md and workflows/gk-*.js present; there may be no workflows yet.
@@ -287,10 +291,11 @@ def _config_step(root: Path, cdir: Path, python: str) -> _Step | None:
                  functools.partial(manifest.file_action, path), "gk-harness.json: written")
 
 
-def _owned_desired(root: Path) -> dict:
-    """The settings keys install owns, from the checkout's routes.json (Stop when unusable)."""
+def _owned_desired(root: Path, ledger: bool = False) -> dict:
+    """The settings keys install owns, from the checkout's routes.json (Stop when unusable),
+    with the ledger's telemetry keys when ledger is True."""
     try:
-        return sm.owned_desired(load_routes(root / "routes.json"))
+        return sm.owned_desired(load_routes(root / "routes.json"), ledger=ledger)
     except RoutesError as e:
         raise Stop("the gk-harness checkout's routes.json is unusable (%s)" % e) from None
 
@@ -308,7 +313,8 @@ def _write_happened(a: dict) -> bool:
 def _owned_last(journal: dict) -> tuple:
     """(last, priors) for settings_merge.merge: for each owned key, the value install last wrote
     and the prior recorded with it, from the newest settings action that records the key and
-    whose write was made.
+    whose write was made. A key whose newest record is under undo["released"] (the ledger's
+    keys, once it is off) is no longer owned, so it is in neither.
 
     Versions before the owned keys forced ultracode to true and recorded, in undo["ultracode"],
     the value before that. With no owned record of ultracode, the oldest such record holds the
@@ -316,6 +322,7 @@ def _owned_last(journal: dict) -> tuple:
     that prior, so that uninstall puts back the original value, not the true."""
     last: dict = {}
     priors: dict = {}
+    seen: set = set()  # the keys whose newest record has been read
     old_ultracode = None
     for a in manifest.actions_newest_first(journal):
         undo = a.get("undo") if isinstance(a, dict) and a.get("type") == "settings" else None
@@ -323,9 +330,13 @@ def _owned_last(journal: dict) -> tuple:
             continue
         owned = undo.get("owned")
         for key, record in (owned.items() if isinstance(owned, dict) else ()):
-            if key not in last and isinstance(record, dict) and "wrote" in record:
+            if key not in seen and isinstance(record, dict) and "wrote" in record:
+                seen.add(key)
                 last[key] = record["wrote"]
                 priors[key] = record.get("prior")
+        released = undo.get("released")
+        seen.update(k for k in (released if isinstance(released, dict) else ())
+                    if isinstance(k, str))
         if isinstance(undo.get("ultracode"), dict):
             old_ultracode = undo["ultracode"]
     if "ultracode" not in last and old_ultracode is not None:
@@ -334,20 +345,41 @@ def _owned_last(journal: dict) -> tuple:
     return last, priors
 
 
+def _release(last: dict, priors: dict, ledger: bool) -> dict:
+    """The ledger keys merge must release: while the switch is off, each one still owned, with
+    its record ({"prior", "wrote"})."""
+    if ledger:
+        return {}
+    return {key: {"prior": priors.get(key), "wrote": last[key]}
+            for key in map(sm.dotted, sm.LEDGER_ENV) if key in last}
+
+
+def _owned_args(root: Path, journal: dict) -> tuple:
+    """merge's (desired, last, priors, release) for this install: the ledger's keys are desired
+    while its switch is on and released once it is off. Stop when routes.json is unusable."""
+    ledger = ledger_ctl.switch_on()
+    last, priors = _owned_last(journal)
+    return _owned_desired(root, ledger), last, priors, _release(last, priors, ledger)
+
+
 def _settings_step(root: Path, cdir: Path, python: str, journal: dict) -> _Step | None:
     path = cdir / "settings.json"
-    desired = _owned_desired(root)
-    last, priors = _owned_last(journal)
+    desired, last, priors, release = _owned_args(root, journal)
     try:
         current = sm.load_strict(path)
         new, undo = sm.merge({} if current is None else current, python, cdir, desired, last,
-                             priors)
+                             priors, release)
     except ValueError as e:
         raise Stop(e) from None
     text = sm.dumps(new)
     if current is not None and text == sm.dumps(current):
         return None
     note = SETTINGS_NOTE
+    ledger_keys = set(map(sm.dotted, sm.LEDGER_ENV))
+    if ledger_keys & set(undo["owned"]):
+        note += "; the ledger's telemetry keys owned"
+    elif undo.get("released"):
+        note += "; the ledger's telemetry keys handed back"
     n = len(undo["removed"])
     if n:
         note += ", %d old gk hook %s removed" % (n, "entry" if n == 1 else "entries")
@@ -546,6 +578,13 @@ def install(retire: bool, ignore_busy: bool = False) -> int:
     _report(done, record, cdir, root)
     if _windows() and any(isinstance(s, _Step) and s.group == "rc" for s in done):
         print(EXECUTION_POLICY_NOTICE)
+    if ledger_ctl.switch_on():
+        # The receiver runs the code just copied.
+        if ledger_ctl.restart():
+            print("ledger: receiver restarted on port %d" % ledger_ctl.port())
+        else:
+            _warn("ledger: the receiver did not start on port %d (gkh ledger status)"
+                  % ledger_ctl.port())
     return 0
 
 
@@ -702,6 +741,10 @@ def _surgical_settings(path: Path, a: dict, keep: _Keep, done: set) -> None:
         keep.save(path, a["type"])
         manifest.write_text_atomic(path, sm.dumps(new))
     done.update(sm.owned_paths(a.get("undo")))
+    released = a["undo"].get("released") if isinstance(a.get("undo"), dict) else None
+    # A key released here was given up: an older record of it must not act on it either.
+    done.update(k for k in (released if isinstance(released, dict) else ())
+                if isinstance(k, str))
 
 
 def _surgical_claude_md(path: Path, a: dict, keep: _Keep) -> None:
@@ -822,12 +865,26 @@ def _undo(a: Any, keep: _Keep, done: set) -> None:
         _undo_move(a)
 
 
+def _ledger_down() -> None:
+    """Remove the ledger switch and stop the receiver, warning about what could not be done.
+    The switch goes first, so that a hook running meanwhile does not start the receiver again.
+    The ledger's day files stay."""
+    try:
+        _unlink(ledger_ctl.switch_file())
+    except OSError as e:
+        _warn("%s: %s" % (paths.posix(ledger_ctl.switch_file()), e.strerror or e))
+    if not ledger_ctl.stop():
+        _warn("ledger: the receiver did not stop; it exits by itself once idle")
+
+
 def uninstall() -> int:
     path = paths.manifest_path()
     try:
         journal = manifest.load(path)
     except manifest.ManifestError as e:
         return _stopped(e)
+    # The receiver goes first, while the code it runs is still in place; the ledger's data stay.
+    _ledger_down()
     if not journal["installs"]:
         print("gk-harness: nothing to uninstall (no install is recorded in %s)."
               % paths.posix(path))
@@ -940,8 +997,9 @@ def _hook_entry_drift(cdir: Path, settings: Any, python: Any, owned: tuple) -> l
     """Each hook entry install registers that settings lacks, as "missing: …"; settings is None
     when settings.json is absent or unreadable, so then every entry is missing. With none
     missing, "changed: …" when install would still change the hook entries or the owned keys.
-    owned is merge's (desired, last, priors); desired is None when routes.json is unusable, so
-    then only the hook entries count. A key changed by hand is not drift: install leaves it."""
+    owned is merge's (desired, last, priors, release); desired is None when routes.json is
+    unusable, so then only the hook entries count. A key changed by hand is not drift: install
+    leaves it."""
     label = paths.posix(cdir / "settings.json")
     try:
         have = sm.owned_entries(settings)
@@ -1013,8 +1071,10 @@ def status() -> int:
         journal = manifest.empty()
         drift.append("unreadable: %s" % e)
     last, priors = _owned_last(journal)
+    ledger_on = ledger_ctl.switch_on()
+    release = _release(last, priors, ledger_on)
     try:
-        desired = _owned_desired(root)
+        desired = _owned_desired(root, ledger_on)
     except Stop:
         desired = None  # routes.json is unusable: status still reports the rest
     # An absent or unreadable settings.json is drift already, not a hand change of every key.
@@ -1041,7 +1101,10 @@ def status() -> int:
     if retired:
         print("legacy: %s still in place (install %s moves them to the backups)"
               % (_plural(len(retired), "old file or folder", "old files or folders"), RETIRE))
-    drift.extend(_status_drift(root, cdir, settings, python, (desired, last, priors)))
+    print("ledger: %s" % ("on" if ledger_on else "off"))
+    for line in ledger_ctl.status_lines(short=True):
+        print("  " + line)
+    drift.extend(_status_drift(root, cdir, settings, python, (desired, last, priors, release)))
     if drift:
         print("drift:\n%s" % "\n".join("  " + d for d in drift))
         print("run %s to bring it back in line" % _command_line(root, "install"))
@@ -1087,6 +1150,62 @@ def fable(word: str) -> int:
     except OSError as e:
         _warn("%s: %s" % (paths.posix(path), e.strerror or e))
         return 1
+    return 0
+
+
+# --- ledger ---------------------------------------------------------------------------------
+
+def _installed() -> bool:
+    return paths.harness_config_path().is_file()
+
+
+def ledger(word: str, options: list) -> int:
+    """on: refuse on Windows, check for busy sessions, write the switch file ({"since": UTC
+    time}, kept when it is there already), then install, which owns the five telemetry keys and
+    starts the receiver. off: check for busy sessions, remove the switch, stop the receiver,
+    then install, which hands the keys back. status: ledger_ctl.status_lines()."""
+    if word == "status":
+        for line in ledger_ctl.status_lines():
+            print(line)
+        return 0
+    if word == "on" and _windows():
+        sys.stderr.write("gk-harness: the usage ledger is not available on Windows; nothing was "
+                         "changed.\n")
+        return 2
+    if IGNORE_BUSY not in options:
+        refused = _busy_refusal()
+        if refused is not None:
+            return refused
+    switch = ledger_ctl.switch_file()
+    if word == "on":
+        made = not switch.is_file()
+        try:
+            if made:
+                manifest.write_json_atomic(switch, {"since": paths.utc_iso()})
+        except OSError as e:
+            _warn("%s: %s" % (paths.posix(switch), e.strerror or e))
+            return 1
+        code = install(False, ignore_busy=True)
+        if code != 0:
+            if code == 2 and made:
+                _unlink(switch)  # install changed nothing, so neither does ledger on
+            return code
+        # install restarted the receiver when it changed something; start it when it did not.
+        if not ledger_ctl.start():
+            _warn("ledger: the receiver did not start on port %d (gkh ledger status)"
+                  % ledger_ctl.port())
+        print("ledger: on since %s; %s" % (ledger_ctl.since() or paths.utc_iso(),
+                                            ledger_ctl.RESTART_LINE))
+        return 0
+    _ledger_down()
+    if switch.exists():
+        return 1  # _ledger_down said why
+    if _installed():
+        code = install(False, ignore_busy=True)
+        if code != 0:
+            return code
+    print("ledger: off; the recorded lines stay in %s; restart sessions to stop sending "
+          "telemetry" % paths.posix(ledger_ctl.ledger_dir()))
     return 0
 
 
@@ -1172,7 +1291,8 @@ def main(argv: list[str]) -> int:
         args.insert(0, "install")
     command, parsed = args[0], _parse(args[0], args[1:])
     if command not in COMMANDS or parsed is None \
-            or (command == "fable" and len(parsed[0]) != 1):
+            or (command == "fable" and len(parsed[0]) != 1) \
+            or (command == "ledger" and len([o for o in parsed[0] if o in LEDGER_WORDS]) != 1):
         sys.stderr.write(USAGE)
         return 2
     options, values = parsed
@@ -1183,6 +1303,8 @@ def main(argv: list[str]) -> int:
         return install(RETIRE in options, IGNORE_BUSY in options)
     if command == "fable":
         return fable(options[0])
+    if command == "ledger":
+        return ledger(next(o for o in options if o in LEDGER_WORDS), options)
     if command == "gen":
         return _gen(CHECK in options)
     if command == "uninstall":

@@ -31,7 +31,7 @@ Run it again at any time: an install that finds nothing to change writes nothing
 | `~/.claude/gk-harness.json` | this checkout | `{version, root, python, installed_at}`; the SessionStart hook reads `root` for its once-a-day update check |
 | shell rc | `shell/aliases.*` | a block between `# >>> gk-harness >>>` and `# <<< gk-harness <<<` that exports `GK_HARNESS_ROOT` (this checkout) and sources `<root>/shell/aliases.sh`, or sets `$env:GK_HARNESS_ROOT` and runs `. "<root>/shell/aliases.ps1"` on Windows |
 
-Anything outside the `CLAUDE.md` block is this machine's own notes and is kept. In `settings.json` the installer owns the hook entries whose command runs a script under `hooks/gk-harness/`, and the four keys below. It never touches the top-level `effortLevel`, `permissions`, `autoMode` or any other entry.
+Anything outside the `CLAUDE.md` block is this machine's own notes and is kept. In `settings.json` the installer owns the hook entries whose command runs a script under `hooks/gk-harness/`, the four keys below, and, only while the usage ledger is on, five telemetry keys (see "The usage ledger"). It never touches the top-level `effortLevel`, `permissions`, `autoMode` or any other entry.
 
 ### Settings the installer owns
 
@@ -128,7 +128,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.gk-harness\install.p
 
 ```sh
 ~/.gk-harness/install.sh update    # git pull --ff-only, then install
-~/.gk-harness/install.sh status    # version, root, python, owned entries, hand-changed keys and drift
+~/.gk-harness/install.sh status    # version, root, python, owned entries, hand-changed keys, the ledger and drift
 ```
 
 `install` and `update` refuse, with exit code 3, while another Claude session on this machine is busy, so an update never swaps hooks under a working session. The message names the busy sessions. `update` checks before it pulls. Wait until they are idle and run it again, or pass `--ignore-busy`.
@@ -151,10 +151,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.gk-harness\install.p
 | `gkh install [--ignore-busy] [--retire-legacy]` | install, as above |
 | `gkh update [--ignore-busy] [--retire-legacy]` | `git pull --ff-only`, then install |
 | `gkh uninstall` | replay the journal in reverse |
-| `gkh status` | version, root, python, owned entries, hand-changed keys, drift, and a warning for a variable that forces every agent's model |
+| `gkh status` | version, root, python, owned entries, hand-changed keys, the ledger's state, drift, and a warning for a variable that forces every agent's model |
 | `gkh gen [--check]` | write every file generated from `routes.json`: the agents, each workflow's routes block and its phase labels, and the class table in `policy.md`. `--check` writes nothing, lists the stale files and exits 1 when there are any |
 | `gkh report [--since YYYY-MM-DD] [--session ID] [--config-dir DIR] [--json]` | price the session, subagent and workflow transcripts from the `routes.json` prices, by session, day, workflow, stage, agent and model, with Fable's share and Haiku calls over the 100K-token prompt. Cost per class comes from the seat's `Route:` lines and is best effort. It reads only; on a subscription, cost is a proxy for your share of the usage limits |
 | `gkh fable off`, `gkh fable on`, `gkh fable status` | the Fable switch, below |
+| `gkh ledger on [--ignore-busy]`, `gkh ledger off [--ignore-busy]`, `gkh ledger status` | the usage ledger, below |
 
 Without `gkh`, run the same commands as `~/.gk-harness/install.sh <command>`, or `install.ps1 <command>` on Windows.
 
@@ -172,6 +173,43 @@ A dial is a whole word at the start or end of a prompt. The seat passes it to gk
 | `#solo` | no workers or workflows this turn |
 
 `gkh fable off` keeps Fable out until `gkh fable on`, for a usage limit that lasts hours or days. It writes `~/.claude/state/gk-fable-off.json`. While the file is there, the Workflow hook adds `nofable` to every gk workflow's dials and the seat card says "Fable is off". `gkh fable status` says which.
+
+## The usage ledger
+
+The usage ledger records every Claude Code model call on this machine as one line, as it happens. Claude Code's own telemetry sends one event per call to a small receiver on `127.0.0.1:4318`, and the receiver writes one line per call. A line holds the time, the session and request ids, the model and effort, the agent and workflow that made the call, the token counts, the cost, and the session's project and branch. It never holds prompt text, a response, a tool input or file content: the receiver keeps only the fields it knows. Nothing is sent off the machine.
+
+The ledger is off until you switch it on. `install` and `update` never switch it on.
+
+| Command | What it does |
+|---|---|
+| `gkh ledger on` | writes the switch file, then runs `install`, which owns the five telemetry keys below in `settings.json` and starts the receiver. It refuses on Windows, and while another session is busy unless you pass `--ignore-busy` |
+| `gkh ledger off` | removes the switch file and stops the receiver, then runs `install`, which puts back the values the five keys held before and gives up owning them. The recorded lines stay. It also refuses while another session is busy |
+| `gkh ledger status` | whether the switch is on, the ledger folder, whether the receiver is up and on which port, today's line count and the time of the last line, and the state of each of the five keys |
+
+While the ledger is on, the installer owns these `env` keys, under the same rules as the other owned keys: it records the value it found first, leaves a value you change by hand, and `status` names it.
+
+| Key | Value |
+|---|---|
+| `CLAUDE_CODE_ENABLE_TELEMETRY` | `1` |
+| `OTEL_LOGS_EXPORTER` | `otlp` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/json` |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | `http://127.0.0.1:4318/v1/logs` |
+| `OTEL_METRICS_EXPORTER` | `none` |
+
+`gkh ledger off` puts back what each key held before (or removes it), except a key you changed by hand, which stays as you set it. The keys are then no longer owned, so `status` does not list them and a later `install` does not write them again. `uninstall` stops the receiver, removes the switch and puts the keys back too.
+
+The installer never sets an `OTEL_LOG_*` variable, which would make Claude Code send prompt or tool content. When one is set in `settings.json` `env`, `gkh ledger status` warns; the receiver drops the content anyway.
+
+**Restart sessions.** Claude Code reads the `env` block only when a session starts. A session open before `gkh ledger on` sends nothing until you restart it, and `gkh ledger status` says so while one is running. After `gkh ledger off`, a session open before goes on trying to send until you restart it.
+
+The files are in `~/.claude/state/`:
+
+- `gk-ledger-on.json`: the switch, `{"since": <UTC time>}`;
+- `gk-ledger/<YYYY-MM-DD>.jsonl`: one file per UTC day, one line per call;
+- `gk-ledger/receiver.pid` and `gk-ledger/receiver.log`: the running receiver's pid and its error counts (never any content);
+- `gk-ledger/sessions/`: which project and branch each session works in, kept for 90 days.
+
+The session hooks keep the receiver up while the ledger is on: they start it when a session starts or a prompt finds it down, and it exits by itself after 30 minutes with no calls and no live session. `install` restarts it after an update while the ledger is on, so it runs the new code. If another program holds port 4318, no receiver starts, and the seat card and `gkh ledger status` say so.
 
 ## After the update from v1
 

@@ -10,6 +10,7 @@ import io
 import json
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -98,6 +99,13 @@ OTHER_BOX_COMMANDS = ['"$HOME/.claude/hooks/supabase-row-cap.sh"',
 LEGACY_NAMES = ("gk-profile-guard.sh", "hooks/gk-claim.py", "hooks/gk-claims-end.py",
                 "hooks/gk-peers.py", "hooks/gk-remote-clear.py", "hooks/gk-remote-pending.py",
                 "hooks/gk-remote-stop.py")
+
+
+def free_port() -> int:
+    """A loopback port nothing listens on just now."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def runner_python() -> str:
@@ -281,8 +289,10 @@ class InstallBase(unittest.TestCase):
         self.cdir = self.home / ".claude"
         self.cdir.mkdir(parents=True)
         self.rc = self.home / ".bashrc"
+        # GK_LEDGER_PORT: a status line probes the ledger port, never the real 4318.
         env = mock.patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home),
-                                           "GK_CLAUDE_DIR": str(self.cdir), "SHELL": "/bin/bash"})
+                                           "GK_CLAUDE_DIR": str(self.cdir), "SHELL": "/bin/bash",
+                                           "GK_LEDGER_PORT": str(free_port())})
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("GK_PROFILE", None)
@@ -752,6 +762,204 @@ class FableSwitchTests(InstallBase):
                 self.assertEqual(code, 2)
                 self.assertTrue(err.startswith("usage: "), err)
                 self.assertIn("fable off|on|status", err)
+
+
+# The ledger's five telemetry keys and their values, spelled out from spec 4.1.
+LEDGER_ENV = {"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_LOGS_EXPORTER": "otlp",
+              "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+              "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://127.0.0.1:4318/v1/logs",
+              "OTEL_METRICS_EXPORTER": "none"}
+LEDGER_KEYS = ["env." + k for k in LEDGER_ENV]
+
+
+class LedgerTests(InstallBase):
+    """gkh ledger on|off|status: the switch file, the five telemetry keys install owns only while
+    it is on, and the receiver's lifecycle. ledger_ctl.start, restart and stop stand in for the
+    receiver here, so no test leaves one running."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        for name in ("start", "restart", "stop"):
+            patcher = mock.patch.object(cli.ledger_ctl, name,
+                                        lambda *a, _n=name, **k: self.calls.append(_n) or True)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.switch = self.cdir / "state" / "gk-ledger-on.json"
+
+    def env(self) -> dict:
+        return self.settings().get("env", {})
+
+    def edit_settings(self, change) -> None:
+        settings = self.settings()
+        change(settings)
+        write(self.cdir / "settings.json", json.dumps(settings, indent=4))
+
+    def test_install_and_update_leave_ledger_off(self):
+        self.ok("install")
+        self.assertFalse(os.path.lexists(str(self.switch)))
+        self.assertEqual(self.env(), {"CLAUDE_CODE_SUBAGENT_MODEL": "opus"})
+        with mock.patch.object(cli.subprocess, "run",
+                               lambda argv, **kw: subprocess.CompletedProcess(argv, 0)):
+            self.ok("update")
+        self.ok("install")
+        self.assertFalse(os.path.lexists(str(self.switch)))
+        self.assertEqual(self.env(), {"CLAUDE_CODE_SUBAGENT_MODEL": "opus"})
+        self.assertEqual(self.calls, [])
+        out, _ = self.ok("status")
+        self.assertIn("ledger: off\n", out)
+
+    def test_ledger_on_owns_keys_none_hand_changed(self):
+        self.ok("install")
+        out, err = self.ok("ledger", "on")
+        data = json.loads(self.switch.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(data), ["since"])
+        self.assertRegex(data["since"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertIn("ledger: on since %s" % data["since"], out)
+        self.assertIn("restart sessions to start recording", out)
+        self.assertEqual(self.env(), dict({"CLAUDE_CODE_SUBAGENT_MODEL": "opus"}, **LEDGER_ENV))
+        self.assertFalse([k for k in self.env() if k.startswith("OTEL_LOG_")])
+        # One install wrote the keys and restarted the receiver; ledger on then made sure of it.
+        self.assertEqual(self.calls, ["restart", "start"])
+        newest = [a for a in manifest.actions_newest_first(self.journal())
+                  if a["type"] == "settings"][0]
+        for key in LEDGER_KEYS:
+            self.assertEqual(newest["undo"]["owned"][key]["prior"], {"present": False}, key)
+        out, _ = self.ok("status")
+        self.assertNotIn("changed by hand", out)
+        self.assertIn("ledger: on\n", out)
+        self.assertIn("drift: none", out)
+        # An install while on changes nothing, and does not restart the receiver.
+        self.calls.clear()
+        out, _ = self.ok("install")
+        self.assertIn("nothing to change", out)
+        self.assertEqual(self.calls, [])
+        # On again keeps the switch's time.
+        self.ok("ledger", "on")
+        self.assertEqual(json.loads(self.switch.read_text(encoding="utf-8")), data)
+        # A key changed by hand is left, and status names it.
+        self.edit_settings(lambda s: s["env"].update(OTEL_METRICS_EXPORTER="prometheus"))
+        out, _ = self.ok("status")
+        self.assertIn("settings.json keys changed by hand (install leaves them): "
+                      "env.OTEL_METRICS_EXPORTER\n", out)
+        out, _ = self.ok("ledger", "status")
+        self.assertIn("  OTEL_METRICS_EXPORTER: hand-changed\n", out)
+        self.assertIn("  OTEL_LOGS_EXPORTER: owned\n", out)
+
+    def test_ledger_off_restores_priors_and_install_does_not_rewrite(self):
+        write(self.cdir / "settings.json", sm.dumps(
+            {"env": {"OTEL_METRICS_EXPORTER": "prometheus", "MINE": "1"}}))
+        self.ok("install")
+        self.ok("ledger", "on")
+        self.assertEqual(self.env()["OTEL_METRICS_EXPORTER"], "none")
+        self.edit_settings(lambda s: s["env"].update(OTEL_LOGS_EXPORTER="console"))
+        self.calls.clear()
+        out, _ = self.ok("ledger", "off")
+        self.assertIn("ledger: off", out)
+        self.assertFalse(os.path.lexists(str(self.switch)))
+        self.assertEqual(self.calls[0], "stop")
+        self.assertNotIn("restart", self.calls)
+        # The priors are back; the hand change stays.
+        self.assertEqual(self.env(), {"OTEL_METRICS_EXPORTER": "prometheus", "MINE": "1",
+                                      "CLAUDE_CODE_SUBAGENT_MODEL": "opus",
+                                      "OTEL_LOGS_EXPORTER": "console"})
+        out, _ = self.ok("status")
+        self.assertNotIn("changed by hand", out)
+        self.assertIn("drift: none", out)
+        # The keys are no longer owned: a value set by hand later is neither rewritten nor
+        # reported, and install changes nothing.
+        self.edit_settings(lambda s: s["env"].update(CLAUDE_CODE_ENABLE_TELEMETRY="1"))
+        before = snapshot(self.home, mtimes=True, skip=())
+        out, _ = self.ok("install")
+        self.assertIn("nothing to change", out)
+        self.assertEqual(snapshot(self.home, mtimes=True, skip=()), before)
+        out, _ = self.ok("status")
+        self.assertNotIn("changed by hand", out)
+        # Uninstall leaves the released keys as they are now.
+        self.ok("uninstall")
+        self.assertEqual(self.env(), {"OTEL_METRICS_EXPORTER": "prometheus", "MINE": "1",
+                                      "OTEL_LOGS_EXPORTER": "console",
+                                      "CLAUDE_CODE_ENABLE_TELEMETRY": "1"})
+
+    def test_ledger_off_then_on_again_owns_the_keys_afresh(self):
+        self.ok("install")
+        self.ok("ledger", "on")
+        self.ok("ledger", "off")
+        self.assertEqual(self.env(), {"CLAUDE_CODE_SUBAGENT_MODEL": "opus"})
+        self.ok("ledger", "on")
+        self.assertEqual(self.env(), dict({"CLAUDE_CODE_SUBAGENT_MODEL": "opus"}, **LEDGER_ENV))
+        out, _ = self.ok("status")
+        self.assertNotIn("changed by hand", out)
+        self.ok("uninstall")
+        self.assertFalse((self.cdir / "settings.json").exists())
+
+    def test_uninstall_while_on_restores_priors_and_stops_receiver(self):
+        write(self.cdir / "settings.json", sm.dumps(
+            {"theme": "dark", "env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}}))
+        self.ok("install")
+        self.ok("ledger", "on")
+        day = self.cdir / "state" / "gk-ledger" / "2026-11-16.jsonl"
+        write(day, '{"ts": "2026-11-16T10:00:00.000Z"}\n')
+        # Edited since, so uninstall takes the surgical path, not the backup.
+        self.edit_settings(lambda s: s.update(theme="light"))
+        self.calls.clear()
+        self.ok("uninstall")
+        self.assertEqual(self.calls, ["stop"])
+        self.assertFalse(os.path.lexists(str(self.switch)))
+        self.assertEqual(self.settings(), {"theme": "light",
+                                           "env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}})
+        self.assertTrue(day.is_file(), "the ledger's data stay")
+
+    def test_ledger_on_refused_on_windows(self):
+        self.ok("install")
+        before = snapshot(self.home, mtimes=True, skip=())
+        with mock.patch.object(cli, "_windows", lambda: True):
+            code, out, err = self.gk("ledger", "on")
+        self.assertEqual(code, 2)
+        self.assertIn("not available on Windows", err)
+        self.assertEqual(snapshot(self.home, mtimes=True, skip=()), before)
+        self.assertEqual(self.calls, [])
+        # And a switch file put there by hand counts for nothing on Windows.
+        write(self.switch, '{"since": "2026-11-16T10:00:00Z"}')
+        with mock.patch.object(cli.ledger_ctl, "_windows", lambda: True):
+            self.assertFalse(cli.ledger_ctl.switch_on())
+            out, _ = self.ok("install")
+        self.assertIn("nothing to change", out)
+
+    def test_ledger_on_refused_while_peer_busy(self):
+        if os.name == "nt":
+            self.skipTest("spawns sleep")
+        self.ok("install")
+        child = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        write(self.cdir / "sessions" / "s1.json", json.dumps(
+            {"pid": child.pid, "sessionId": "s1", "status": "busy", "name": "builder"}))
+        before = snapshot(self.home, mtimes=True, skip=())
+        for word in ("on", "off"):
+            code, out, err = self.gk("ledger", word)
+            self.assertEqual(code, 3, out + err)
+            self.assertIn("1 session(s) busy: builder.", err)
+        self.assertEqual(snapshot(self.home, mtimes=True, skip=()), before)
+        self.assertEqual(self.calls, [])
+        self.ok("ledger", "on", "--ignore-busy")
+        self.assertTrue(self.switch.is_file())
+        self.ok("ledger", "status")  # status never checks
+
+    def test_ledger_on_with_install_stopped_leaves_the_switch_off(self):
+        self.ok("install")
+        write(self.cdir / "settings.json", "{not json")
+        code, _, err = self.gk("ledger", "on")
+        self.assertEqual(code, 2, err)
+        self.assertFalse(os.path.lexists(str(self.switch)))
+
+    def test_ledger_needs_exactly_one_word(self):
+        for argv in (["ledger"], ["ledger", "maybe"], ["ledger", "on", "off"],
+                     ["ledger", "--ignore-busy"], ["ledger", "on", "--check"]):
+            with self.subTest(argv=argv):
+                code, _, err = self.gk(*argv)
+                self.assertEqual(code, 2)
+                self.assertIn("ledger on|off|status [--ignore-busy]", err)
 
 
 class UninstallTests(InstallBase):
