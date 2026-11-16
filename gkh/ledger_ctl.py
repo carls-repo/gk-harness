@@ -118,9 +118,10 @@ def _command_line(pid: int) -> str | None:
 
 
 def pid() -> int | None:
-    """The pid in the receiver's pidfile, when that process is alive and is the receiver. A
-    pid reused by another program since is not the receiver: its command line does not name
-    gk_ledger.py (when the command line cannot be read, the health probe must answer ours)."""
+    """The pid in the receiver's pidfile, when that process is alive and is the receiver: its
+    command line holds "gk_ledger.py serve". A pid reused by another program since is not, and
+    neither is one whose command line cannot be read (on Windows never, where the ledger does
+    not run), so stop() never signals a process it cannot name."""
     try:
         n = int((ledger_dir() / PID_NAME).read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
@@ -128,9 +129,7 @@ def pid() -> int | None:
     if n <= 0 or n == os.getpid() or not peers.pid_alive(n):
         return None
     line = _command_line(n)
-    if line is None:
-        return n if health() == "ours" else None
-    return n if SCRIPT in line else None
+    return n if line is not None and "%s serve" % SCRIPT in line else None
 
 
 def _python() -> str:
@@ -207,8 +206,10 @@ def stop(timeout: float = 3.0) -> bool:
 
 
 def restart() -> bool:
-    """stop(), then start(): the receiver runs the code install has just copied."""
-    stop()
+    """stop(), then start(): the receiver runs the code install has just copied. False, with
+    nothing started, when the old receiver did not stop."""
+    if not stop():
+        return False
     return start()
 
 

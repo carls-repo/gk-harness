@@ -893,6 +893,56 @@ class LedgerTests(InstallBase):
         self.ok("uninstall")
         self.assertFalse((self.cdir / "settings.json").exists())
 
+    def check_off_after_hand_edits(self, edit) -> None:
+        """Ledger on, edit (all five keys) by hand, ledger off: the release is journalled though
+        settings.json does not change, so status names no hand change, and ledger on writes
+        the five keys afresh."""
+        self.ok("install")
+        self.ok("ledger", "on")
+        self.edit_settings(edit)
+        out, _ = self.ok("status")
+        self.assertIn("settings.json keys changed by hand (install leaves them): %s\n"
+                      % ", ".join(LEDGER_KEYS), out)
+        hand = self.env()
+        self.ok("ledger", "off")
+        self.assertEqual(self.env(), hand, "a hand change is left as it is")
+        newest = [a for a in manifest.actions_newest_first(self.journal())
+                  if a["type"] == "settings"][0]
+        self.assertEqual(sorted(newest["undo"]["released"]), sorted(LEDGER_KEYS))
+        out, _ = self.ok("status")
+        self.assertNotIn("changed by hand", out)
+        self.assertIn("drift: none", out)
+        out, _ = self.ok("install")
+        self.assertIn("nothing to change", out)  # the release is recorded once
+        self.ok("ledger", "on")
+        self.assertEqual(self.env(), dict({"CLAUDE_CODE_SUBAGENT_MODEL": "opus"}, **LEDGER_ENV))
+        out, _ = self.ok("status")
+        self.assertNotIn("changed by hand", out)
+        out, _ = self.ok("ledger", "status")
+        for name in LEDGER_ENV:
+            self.assertIn("  %s: owned\n" % name, out)
+        # Uninstall puts back what the keys held when the ledger went on the second time.
+        self.ok("uninstall")
+        self.assertEqual(self.settings().get("env", {}),
+                         {k: v for k, v in hand.items() if k != "CLAUDE_CODE_SUBAGENT_MODEL"})
+
+    def test_ledger_off_after_all_five_keys_deleted_by_hand(self):
+        self.check_off_after_hand_edits(
+            lambda s: [s["env"].pop(k) for k in LEDGER_ENV])
+
+    def test_ledger_off_after_all_five_keys_changed_by_hand(self):
+        self.check_off_after_hand_edits(
+            lambda s: s["env"].update({k: "mine-" + k for k in LEDGER_ENV}))
+
+    def test_install_reports_a_receiver_that_did_not_restart(self):
+        self.ok("install")
+        self.ok("ledger", "on")
+        self.edit_settings(lambda s: s["hooks"].pop("Stop"))
+        with mock.patch.object(cli.ledger_ctl, "restart", lambda: False):
+            out, err = self.ok("install")
+        self.assertNotIn("receiver restarted", out)
+        self.assertIn("ledger: the receiver was not restarted on port", err)
+
     def test_uninstall_while_on_restores_priors_and_stops_receiver(self):
         write(self.cdir / "settings.json", sm.dumps(
             {"theme": "dark", "env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "0"}}))

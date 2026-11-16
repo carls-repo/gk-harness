@@ -107,6 +107,27 @@ class SharedNamesTests(LedgerCtlBase):
         with mock.patch.object(ledger_ctl, "_windows", lambda: True):
             self.assertFalse(ledger_ctl.switch_on())
 
+    def test_health_key_is_the_one_the_receiver_answers_with(self):
+        import threading
+        import urllib.request
+        ledger = load_hook("gk_ledger")
+        common = load_hook("gk_common")
+        self.assertEqual(ledger_ctl.HEALTH_KEY, "gk-ledger")
+        server = ledger.make_server(self.ldir, self.port)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+        thread.start()
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:%d%s" % (self.port,
+                                                                  ledger.HEALTH_PATH)) as r:
+                reply = json.loads(r.read())
+            self.assertEqual(list(reply), [ledger_ctl.HEALTH_KEY])
+            self.assertEqual(ledger_ctl.health(), "ours")
+            self.assertEqual(common.probe_health(self.port), "ours")
+        finally:
+            server.shutdown()
+            thread.join(5)
+            server.server_close()
+
     def test_health_matches_the_hooks_probe(self):
         common = load_hook("gk_common")
         self.assertEqual(ledger_ctl.health(), "free")
@@ -135,14 +156,38 @@ class LifecycleTests(LedgerCtlBase):
     def test_stop_never_signals_a_pid_that_is_not_the_receiver(self):
         if os.name == "nt":
             self.skipTest("POSIX signals")
-        child = self.sleeper("something-else")
+        # Another program, one that merely names gk_ledger.py, and one not serving.
+        for argv in (("something-else",), ("gk_ledger.py",), ("gk_ledger.py", "status"),
+                     ("serve", "gk_ledger.py")):
+            with self.subTest(argv=argv):
+                child = self.sleeper(*argv)
+                self.write(self.ldir / "receiver.pid", "%d\n" % child.pid)
+                self.assertIsNone(ledger_ctl.pid())
+                self.assertTrue(ledger_ctl.stop(timeout=0.2))
+                self.assertIsNone(child.poll(), "a pid that is not the receiver is not signalled")
+        # A command line that cannot be read is not trusted, even with the port answering ours.
+        child = self.sleeper("gk_ledger.py", "serve")
         self.write(self.ldir / "receiver.pid", "%d\n" % child.pid)
-        self.assertIsNone(ledger_ctl.pid())
-        self.assertTrue(ledger_ctl.stop(timeout=0.2))
-        self.assertIsNone(child.poll(), "a reused pid must not be signalled")
+        self.assertEqual(ledger_ctl.pid(), child.pid)
+        with mock.patch.object(ledger_ctl, "_command_line", lambda n: None), \
+                mock.patch.object(ledger_ctl, "health", lambda: "ours"):
+            self.assertIsNone(ledger_ctl.pid())
+            self.assertTrue(ledger_ctl.stop(timeout=0.2))
+        self.assertIsNone(child.poll())
         for junk in ("", "abc", "-4", "0"):
             self.write(self.ldir / "receiver.pid", junk)
             self.assertIsNone(ledger_ctl.pid(), junk)
+
+    def test_restart_starts_nothing_when_the_old_receiver_did_not_stop(self):
+        calls = []
+        with mock.patch.object(ledger_ctl, "stop", lambda: calls.append("stop") or False), \
+                mock.patch.object(ledger_ctl, "start", lambda: calls.append("start") or True):
+            self.assertFalse(ledger_ctl.restart())
+        self.assertEqual(calls, ["stop"])
+        with mock.patch.object(ledger_ctl, "stop", lambda: calls.append("stop") or True), \
+                mock.patch.object(ledger_ctl, "start", lambda: calls.append("start") or True):
+            self.assertTrue(ledger_ctl.restart())
+        self.assertEqual(calls, ["stop", "stop", "start"])
 
     def test_start_spawns_the_installed_copy_detached(self):
         script = self.write(self.cdir / "hooks" / "gk-harness" / "gk_ledger.py", "")

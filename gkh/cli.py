@@ -303,11 +303,14 @@ def _owned_desired(root: Path, ledger: bool = False) -> dict:
 def _write_happened(a: dict) -> bool:
     """Whether a settings action's write was made: an install stopped between journalling it
     and writing leaves its file absent or equal to its backup (the test uninstall uses to pass
-    such an action over), and then what it records was never written."""
+    such an action over), and then what it records was never written. An action that wrote the
+    very bytes it backed up (a release of the ledger's keys that found nothing to put back)
+    counts as made: the file is the same whether or not its write ran."""
     path = a.get("path")
     current = _sha(Path(path)) if isinstance(path, str) else None
     prior = a.get("prior") if isinstance(a.get("prior"), dict) else {}
-    return current is not None and current != _backup_sha(prior)
+    before = _backup_sha(prior)
+    return current is not None and (current != before or a.get("sha256") == before)
 
 
 def _owned_last(journal: dict) -> tuple:
@@ -372,7 +375,9 @@ def _settings_step(root: Path, cdir: Path, python: str, journal: dict) -> _Step 
     except ValueError as e:
         raise Stop(e) from None
     text = sm.dumps(new)
-    if current is not None and text == sm.dumps(current):
+    # A release is journalled even when it changes no bytes (every key changed or removed by
+    # hand): the record is what ends the keys' ownership.
+    if current is not None and text == sm.dumps(current) and not undo.get("released"):
         return None
     note = SETTINGS_NOTE
     ledger_keys = set(map(sm.dotted, sm.LEDGER_ENV))
@@ -583,7 +588,7 @@ def install(retire: bool, ignore_busy: bool = False) -> int:
         if ledger_ctl.restart():
             print("ledger: receiver restarted on port %d" % ledger_ctl.port())
         else:
-            _warn("ledger: the receiver did not start on port %d (gkh ledger status)"
+            _warn("ledger: the receiver was not restarted on port %d (gkh ledger status)"
                   % ledger_ctl.port())
     return 0
 
@@ -1015,9 +1020,10 @@ def _hook_entry_drift(cdir: Path, settings: Any, python: Any, owned: tuple) -> l
             return ["missing: %s (hook entry %s%s: %s)"
                     % (label, event, " [%s]" % matcher if matcher else "", command)
                     for event, matcher, command in missing]
-        if isinstance(settings, dict) \
-                and sm.dumps(sm.merge(settings, python, cdir, *owned)[0]) != sm.dumps(settings):
-            return ["changed: %s (hook entries or owned keys)" % label]
+        if isinstance(settings, dict):
+            new, undo = sm.merge(settings, python, cdir, *owned)
+            if sm.dumps(new) != sm.dumps(settings) or undo.get("released"):
+                return ["changed: %s (hook entries or owned keys)" % label]
     except (ValueError, TypeError) as e:
         return ["unreadable: %s" % e]
     return []
@@ -1077,8 +1083,10 @@ def status() -> int:
         desired = _owned_desired(root, ledger_on)
     except Stop:
         desired = None  # routes.json is unusable: status still reports the rest
-    # An absent or unreadable settings.json is drift already, not a hand change of every key.
-    changed = sm.hand_changed(settings, last) if isinstance(settings, dict) else []
+    # An absent or unreadable settings.json is drift already, not a hand change of every key;
+    # nor is a ledger key waiting to be released (drift says install will).
+    owned_now = {k: v for k, v in last.items() if k not in release}
+    changed = sm.hand_changed(settings, owned_now) if isinstance(settings, dict) else []
     if changed:
         print("settings.json keys changed by hand (install leaves them): %s"
               % ", ".join(changed))
