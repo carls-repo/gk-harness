@@ -8,6 +8,7 @@ LockTimeout, which `run_hook` catches).
 from __future__ import annotations
 
 import contextlib
+import datetime
 import json
 import os
 import re
@@ -381,6 +382,77 @@ def load_project(toplevel: str | os.PathLike) -> tuple[dict | None, str | None]:
     if type(version) is not int or version != 1:
         return None, "%s has unsupported version %r (expected 1)" % (path, version)
     return data, None
+
+
+LEDGER_HOST = "127.0.0.1"
+LEDGER_PORT = 4318
+NO_REPO = "(no repo)"
+
+
+def ledger_port() -> int:
+    """$GK_LEDGER_PORT when it is an integer from 1 to 65535 (tests only), else LEDGER_PORT."""
+    try:
+        n = int(os.environ.get("GK_LEDGER_PORT", ""))
+    except ValueError:
+        return LEDGER_PORT
+    return n if 1 <= n <= 65535 else LEDGER_PORT
+
+
+def ledger_dir() -> Path:
+    return claude_dir() / "state" / "gk-ledger"
+
+
+def ledger_on_file() -> Path:
+    return claude_dir() / "state" / "gk-ledger-on.json"
+
+
+def ledger_on() -> bool:
+    """Whether the ledger switch file exists. Always False on Windows."""
+    if os.name == "nt":
+        return False
+    return ledger_on_file().exists()
+
+
+def project_identity(cwd: str | os.PathLike) -> dict:
+    """{"cwd", "root", "project", "branch"} for a working directory (spec 4.8)."""
+    cwd = os.fspath(cwd)
+    ident = git_identity(cwd)
+    if ident is None:
+        return {"cwd": cwd, "root": cwd, "project": NO_REPO, "branch": None}
+    common, top, branch = ident
+    data, _reason = load_project(top)
+    name = data.get("name") if data else None
+    if isinstance(name, str) and name:
+        project = name
+    else:
+        p = Path(common)
+        base = p.parent.name if p.name == ".git" else p.name
+        project = base[1:] if base.startswith(".") else base
+        project = project or NO_REPO
+    return {"cwd": cwd, "root": top, "project": project,
+            "branch": None if branch == "HEAD" else branch}
+
+
+def session_map_path(sid: str) -> Path:
+    return ledger_dir() / "sessions" / ("%s.json" % sid)
+
+
+def write_session_map(sid: Any, cwd: str | os.PathLike) -> bool:
+    """Record which project and branch a session works in. Skips an unchanged map.
+
+    Not in SESSION_STATE_DIRS: the map must outlive its session.
+    """
+    safe = safe_sid(sid)
+    if safe is None:
+        return False
+    ident = project_identity(cwd)
+    path = session_map_path(safe)
+    old = read_json(path)
+    keys = ("cwd", "root", "project", "branch")
+    if isinstance(old, dict) and all(old.get(k) == ident[k] for k in keys):
+        return True
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return write_json(path, dict(session=safe, updated=now, **ident))
 
 
 def shared_branch(toplevel: str | os.PathLike | None) -> str | None:
