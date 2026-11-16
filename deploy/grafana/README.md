@@ -9,6 +9,11 @@ view.
 - Grafana listens on `127.0.0.1:3300` only. Anonymous viewers see the dashboard; only the admin
   can change anything.
 - Both containers use host networking, so Prometheus can reach the receiver on `127.0.0.1`.
+- Nothing leaves the machine. `compose.yml` switches off every Grafana default that calls
+  grafana.com or gravatar.com: usage reporting, update checks, the news feed, plugin
+  signature-key retrieval, the plugin catalogue, the preinstalled apps (such as
+  `grafana-lokiexplore-app`), Gravatar and external snapshots. Each setting was checked against
+  Grafana 11.3.0's `conf/defaults.ini`. Recheck them if you bump the Grafana tag.
 - Data sits in the Docker named volumes `prometheus-data` and `grafana-data`. The stack comes
   back after a reboot without the LUKS unlock.
 
@@ -39,8 +44,8 @@ from the top of the gk-harness checkout.
    gkh ledger status
    curl -s http://127.0.0.1:4318/metrics | head -5
    ```
-   Stop here if a port is taken or the receiver does not answer. The last part of P8, a
-   scrape over host networking, is checked in step 7.
+   Stop here if a port is taken or the receiver does not answer. Two parts of P8 are checked
+   later: the scrape over host networking (step 7), and that nothing connects out (step 6).
 
 2. **Install the files root-owned in `/etc/gk-grafana/`.**
    ```bash
@@ -88,12 +93,23 @@ from the top of the gk-harness checkout.
    ```
    `status` must show both containers running, `grafana: up` and `prometheus: up`.
 
+   On the first `up`, check that neither container connects out. Run this a few times in the
+   first two minutes:
+   ```bash
+   sudo ss -tnp state established | grep -E '"(grafana|prometheus)"' \
+     | grep -vE '127\.0\.0\.1:[0-9]+ +127\.0\.0\.1:|\[::1\]:[0-9]+ +\[::1\]:' \
+     || echo "no outbound connections"
+   ```
+   Every run must print `no outbound connections`. A line with another address means Grafana or
+   Prometheus is calling out. Run `gkh grafana down` and find the setting before going on.
+
 7. **Run the live checks.**
    ```bash
    ss -ltn | grep -E ':(3300|9090)\b'
    curl -s 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22gk-ledger%22%7D'
    ```
    - `ss` must show 3300 and 9090 on `127.0.0.1` only.
+   - Repeat the outbound check from step 6. It must still print `no outbound connections`.
    - The query must return the value `1` while the receiver runs. That proves the scrape over
      host networking, the last part of P8.
    - Make a call in a session. It must show in Grafana within a minute.

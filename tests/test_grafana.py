@@ -139,6 +139,21 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(compose.count("network_mode: host"), 2)
         self.assertEqual(compose.count("restart: unless-stopped"), 2)
 
+    def test_compose_keeps_grafana_off_the_network(self):
+        """Every Grafana default that would call grafana.com or gravatar.com is switched off."""
+        lines = {x.strip() for x in (GRAFANA / "compose.yml").read_text().splitlines()}
+        for want in ("GF_ANALYTICS_REPORTING_ENABLED=false",
+                     "GF_ANALYTICS_CHECK_FOR_UPDATES=false",
+                     "GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false",
+                     "GF_NEWS_NEWS_FEED_ENABLED=false",
+                     "GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED=true",
+                     "GF_PLUGINS_PLUGIN_ADMIN_ENABLED=false",
+                     "GF_PLUGINS_PREINSTALL_DISABLED=true",
+                     "GF_SECURITY_DISABLE_GRAVATAR=true",
+                     "GF_SNAPSHOTS_EXTERNAL_ENABLED=false"):
+            with self.subTest(setting=want):
+                self.assertIn("- " + want, lines)
+
     def test_sudoers_allows_exactly_three_commands(self):
         text = (GRAFANA / "sudoers-gk-grafana").read_text()
         self.assertTrue(text.endswith("\n"))
