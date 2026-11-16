@@ -198,6 +198,21 @@ class ServerTests(_Base):
             self.request("GET", "/nope")
         err.write.assert_not_called()
 
+    def test_400_deeply_nested_body(self):
+        # json.loads raises RecursionError here; the client must get 400, not a hang-up.
+        self.assertEqual(self.post(b"[" * 100000)[0], 400)
+        self.assertEqual(self.post(b'{"resourceLogs": ' + b"[" * 100000)[0], 400)
+        self.assertEqual(self.request("GET", "/gk-ledger/health")[0], 200)
+        self.assertEqual(self.ledger_lines(), [])
+
+    def test_reuse_port_disabled(self):
+        # Spec 6: a second bind must fail with EADDRINUSE on any Python version (3.13's
+        # HTTPServer turns SO_REUSEPORT on by default).
+        self.assertIs(gk_ledger.LedgerServer.allow_reuse_port, False)
+        with self.assertRaises(OSError):
+            second = gk_ledger.make_server(self.ledger, port=self.port)
+            second.server_close()
+
 
 class ServeTests(_Base):
     def run_serve(self, **kw):

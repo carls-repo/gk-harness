@@ -10,6 +10,7 @@ from __future__ import annotations
 import calendar
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -130,6 +131,42 @@ def update_notice() -> str | None:
     return update_line(root) if available else None
 
 
+def ledger_notice(sid: str, cwd: Any) -> str | None:
+    """SessionStart's ledger work while the ledger is on: refresh the session map, start the
+    receiver when its port is free, and return the card line for a receiver that is down or
+    a port another program holds. Never raises; a failure adds nothing to the card."""
+    try:
+        if not gk_common.ledger_on():
+            return None
+    except Exception:
+        return None
+    try:
+        if isinstance(cwd, str) and cwd:
+            gk_common.write_session_map(sid, cwd)
+    except Exception as e:
+        _warn("session map", e)
+    try:
+        port = gk_common.ledger_port()
+        state = gk_common.probe_health(port)
+        if state == "free":
+            gk_common.start_receiver(port)
+            state = gk_common.probe_health(port)
+        if state == "free":
+            return gk_common.LEDGER_DOWN
+        if state == "foreign":
+            return gk_common.LEDGER_FOREIGN % port
+    except Exception as e:
+        _warn("receiver", e)
+    return None
+
+
+def _warn(what: str, e: Exception) -> None:
+    try:
+        sys.stderr.write("gk-seat: ledger %s: %r\n" % (what, e))
+    except Exception:
+        pass
+
+
 def _reply(event: str, card: str) -> None:
     gk_common.emit({"hookSpecificOutput": {"hookEventName": event, "additionalContext": card}})
 
@@ -183,6 +220,10 @@ def handle(data: Any) -> None:
         line = update_notice()
         if line:
             card += "\n" + line
+    if event == "SessionStart":
+        notice = ledger_notice(sid, data.get("cwd"))
+        if notice:
+            card += "\n" + notice
     _reply(event, card)
 
 

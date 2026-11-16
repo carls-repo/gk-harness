@@ -134,6 +134,8 @@ def parse_logs(body: bytes) -> list:
         data = json.loads(body)
     except (ValueError, UnicodeDecodeError) as e:
         raise ValueError("body is not JSON: %s" % e) from None
+    except RecursionError:
+        raise ValueError("body is not JSON: nested too deeply") from None
     if not isinstance(data, dict) or not isinstance(data.get("resourceLogs", []), list):
         raise ValueError("body is not an OTLP logs object")
     out = []
@@ -613,6 +615,7 @@ class LedgerServer(ThreadingHTTPServer):
     """The receiver: writes Claude Code's api_request and api_error records to the ledger."""
 
     daemon_threads = True
+    allow_reuse_port = False  # Python 3.13's HTTPServer turns it on; a second bind must fail
     request_queue_size = 128  # the default backlog of 5 resets bursts from many sessions
 
     def __init__(self, ledger_dir: Path, address: tuple) -> None:

@@ -468,6 +468,69 @@ def write_session_map(sid: Any, cwd: str | os.PathLike) -> bool:
     return write_json(path, dict(session=safe, updated=now, **ident))
 
 
+LEDGER_DOWN = ("Ledger: receiver not running, calls are not being recorded "
+               "(gkh ledger status)")
+LEDGER_FOREIGN = ("Ledger: port %d is held by another program, calls are not being recorded "
+                  "(gkh ledger status)")
+
+
+def probe_health(port: int, timeout: float = 0.5) -> str:
+    """"ours" when GET /gk-ledger/health on the loopback port answers JSON holding the
+    "gk-ledger" key, "free" when the connect is refused, "foreign" otherwise (a timeout, an
+    HTTP error, another body)."""
+    import http.client  # imported here: most hook runs never probe
+
+    try:
+        conn = http.client.HTTPConnection(LEDGER_HOST, port, timeout=timeout)
+        try:
+            conn.request("GET", "/gk-ledger/health")
+            body = conn.getresponse().read(4096)
+        finally:
+            conn.close()
+    except ConnectionRefusedError:
+        return "free"
+    except Exception:
+        return "foreign"
+    try:
+        data = json.loads(body)
+    except Exception:
+        return "foreign"
+    return "ours" if isinstance(data, dict) and "gk-ledger" in data else "foreign"
+
+
+def port_open(port: int, timeout: float = 0.1) -> bool:
+    """Whether a TCP connect to the loopback port succeeds. Sends nothing."""
+    import socket
+
+    try:
+        with socket.create_connection((LEDGER_HOST, port), timeout=timeout):
+            return True
+    except (OSError, OverflowError, ValueError):
+        return False
+
+
+def start_receiver(port: int, wait: float = 1.0) -> bool:
+    """Start `gk_ledger.py serve --port <port>` (beside this file) as a detached process: its
+    own session, stdio to /dev/null. Then poll the port for up to `wait` seconds and return
+    whether it opened. With wait <= 0 it returns at once: True when the spawn succeeded."""
+    script = Path(__file__).resolve().parent / "gk_ledger.py"
+    try:
+        subprocess.Popen([sys.executable, str(script), "serve", "--port", str(port)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    if wait <= 0:
+        return True
+    deadline = time.monotonic() + wait
+    while True:
+        if port_open(port):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
 def shared_branch(toplevel: str | os.PathLike | None) -> str | None:
     """The project file's `sharedBranch` at toplevel, or None when there is no usable one.
 

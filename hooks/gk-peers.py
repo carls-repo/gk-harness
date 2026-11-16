@@ -147,6 +147,28 @@ def changes(peers: dict, prev: dict) -> str | None:
     return "Peer sessions changed:\n" + "\n".join(out) if out else None
 
 
+def ledger_tick(own: str | None, cwd: Any) -> None:
+    """UserPromptSubmit's ledger work while the ledger is on: refresh the session map (the
+    branch may have changed) and start the receiver, without waiting, when its port refuses
+    a connect. Adds nothing to the output and never raises."""
+    try:
+        if not gk_common.ledger_on():
+            return
+    except Exception:
+        return
+    try:
+        if own and isinstance(cwd, str) and cwd:
+            gk_common.write_session_map(own, cwd)
+    except Exception as e:
+        sys.stderr.write("gk-peers: ledger session map: %r\n" % (e,))
+    try:
+        port = gk_common.ledger_port()
+        if not gk_common.port_open(port):
+            gk_common.start_receiver(port, wait=0)
+    except Exception as e:
+        sys.stderr.write("gk-peers: ledger receiver: %r\n" % (e,))
+
+
 def handle(data: Any) -> None:
     if not isinstance(data, dict):
         return
@@ -154,6 +176,8 @@ def handle(data: Any) -> None:
     if ev not in ("SessionStart", "UserPromptSubmit"):
         return
     own = gk_common.safe_sid(data.get("session_id"))
+    if ev == "UserPromptSubmit":
+        ledger_tick(own, data.get("cwd"))
     base = gk_common.claude_dir()
     reg = load_registry(base)
     live_ids = {d["sessionId"] for d in reg if gk_common.pid_alive(d["pid"])}
