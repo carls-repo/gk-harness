@@ -150,9 +150,33 @@ class DashboardTests(unittest.TestCase):
                      "GF_PLUGINS_PLUGIN_ADMIN_ENABLED=false",
                      "GF_PLUGINS_PREINSTALL_DISABLED=true",
                      "GF_SECURITY_DISABLE_GRAVATAR=true",
-                     "GF_SNAPSHOTS_EXTERNAL_ENABLED=false"):
+                     "GF_SNAPSHOTS_EXTERNAL_ENABLED=false",
+                     # Outbound HTTP(S) goes to a proxy on the discard port; loopback is exempt.
+                     "HTTP_PROXY=http://127.0.0.1:9",
+                     "HTTPS_PROXY=http://127.0.0.1:9",
+                     "NO_PROXY=127.0.0.1,localhost"):
             with self.subTest(setting=want):
                 self.assertIn("- " + want, lines)
+
+    def test_compose_never_pulls_and_proxies_only_grafana(self):
+        """compose never downloads an image: the pull is an explicit `sudo docker pull`. Only
+        the grafana service carries the proxy guard (Prometheus only reaches 127.0.0.1)."""
+        text = (GRAFANA / "compose.yml").read_text()
+        services = re.split(r"(?m)^  (?=[a-z]+:\n)", text.split("\nservices:\n", 1)[1]
+                            .split("\nvolumes:\n", 1)[0])
+        blocks = {b.split(":", 1)[0]: b for b in services if b.strip()}
+        self.assertEqual(set(blocks), {"prometheus", "grafana"})
+        for name, block in blocks.items():
+            with self.subTest(service=name):
+                self.assertIn("\n    pull_policy: never\n", block)
+        self.assertEqual(text.count("pull_policy: never"), 2)
+        self.assertIn("HTTP_PROXY=", blocks["grafana"])
+        self.assertNotIn("HTTP_PROXY=", blocks["prometheus"])
+        # The README pulls exactly the two pinned tags.
+        readme = (GRAFANA / "README.md").read_text()
+        for tag in ("prom/prometheus:v2.55.1", "grafana/grafana-oss:11.3.0"):
+            self.assertIn("sudo docker pull %s" % tag, readme)
+        self.assertNotIn("compose.yml pull", readme)
 
     def test_sudoers_allows_exactly_three_commands(self):
         text = (GRAFANA / "sudoers-gk-grafana").read_text()
@@ -232,6 +256,8 @@ class GrafanaCommandTests(unittest.TestCase):
             code, _, err = self._run("grafana", "up")
         self.assertEqual(code, 1)
         self.assertIn("sudoers", err)
+        # Docker's data-root is on the LUKS volume: it runs only after gk-data unlock.
+        self.assertIn("is Docker running (after `sudo gk-data unlock`)?", err)
 
     def test_grafana_refuses_off_linux(self):
         for platform in ("darwin", "win32"):

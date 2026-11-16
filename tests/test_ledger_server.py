@@ -83,6 +83,8 @@ class ServerTests(_Base):
         self.assertEqual(line["event"], "api_request")
         self.assertEqual(list(line), list(gk_ledger.LINE_KEYS))
         self.assertEqual(oct(self.ledger.stat().st_mode & 0o777), oct(0o700))
+        # The receiver also makes the session-map folder, private.
+        self.assertEqual(oct((self.ledger / "sessions").stat().st_mode & 0o777), oct(0o700))
 
     def test_health(self):
         status, ctype, body = self.request("GET", "/gk-ledger/health")
@@ -95,6 +97,8 @@ class ServerTests(_Base):
         status, ctype, body = self.request("GET", "/metrics")
         self.assertEqual(status, 200)
         self.assertEqual(ctype, "text/plain; version=0.0.4")
+        self.assertIn('event="api_request"} 0', body.decode())  # a new series shows 0 first
+        status, ctype, body = self.request("GET", "/metrics")
         text = body.decode()
         self.assertIn('event="api_request"} 1', text)
         self.assertIn("gk_ledger_tokens_total{", text)

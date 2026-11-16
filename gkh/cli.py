@@ -596,8 +596,8 @@ def install(retire: bool, ignore_busy: bool = False) -> int:
         if ledger_ctl.restart():
             print("ledger: receiver restarted on port %d" % ledger_ctl.port())
         else:
-            _warn("ledger: the receiver was not restarted on port %d (gkh ledger status)"
-                  % ledger_ctl.port())
+            _warn("ledger: the receiver was not restarted on port %d, so it may still run "
+                  "the old code (gkh ledger status)" % ledger_ctl.port())
     return 0
 
 
@@ -1272,8 +1272,9 @@ def grafana(word: str) -> int:
         return 2
     code = _compose_run(GRAFANA_COMPOSE + GRAFANA_ARGS[word])
     if code != 0:
-        _warn("grafana: docker compose %s failed (exit %d); is /etc/sudoers.d/gk-grafana "
-              "installed? (deploy/grafana/README.md)" % (" ".join(GRAFANA_ARGS[word]), code))
+        _warn("grafana: docker compose %s failed (exit %d); is Docker running (after "
+              "`sudo gk-data unlock`)? is /etc/sudoers.d/gk-grafana installed? "
+              "(deploy/grafana/README.md)" % (" ".join(GRAFANA_ARGS[word]), code))
         if word != "status":
             return 1
     if word != "status":

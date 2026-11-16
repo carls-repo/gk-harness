@@ -106,11 +106,12 @@ def read_json(path: str | os.PathLike) -> Any:
         return None
 
 
-def write_json(path: str | os.PathLike, obj: Any) -> bool:
+def write_json(path: str | os.PathLike, obj: Any, mode: int = 0o666) -> bool:
     """Write obj as JSON atomically: a temp file in the same folder, then os.replace.
 
-    os.replace is retried on PermissionError (Windows refuses to replace a file another
-    process has open). Returns False, with the temp file removed, when anything fails.
+    The file is created with `mode` (less the umask). os.replace is retried on PermissionError
+    (Windows refuses to replace a file another process has open). Returns False, with the temp
+    file removed, when anything fails.
     """
     path = os.fspath(path)
     tmp = None
@@ -119,7 +120,8 @@ def write_json(path: str | os.PathLike, obj: Any) -> bool:
         if folder:
             os.makedirs(folder, exist_ok=True)
         tmp = "%s.%d.%s.tmp" % (path, os.getpid(), os.urandom(4).hex())
-        with open(tmp, "x", encoding="utf-8") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        with open(fd, "w", encoding="utf-8") as f:
             json.dump(obj, f)
         for attempt in range(WRITE_RETRIES + 1):
             try:
@@ -402,6 +404,14 @@ def ledger_dir() -> Path:
     return claude_dir() / "state" / "gk-ledger"
 
 
+def make_private_dirs(*dirs: str | os.PathLike) -> None:
+    """Make each folder in turn, mode 0700, when it is missing. Their parents must come first
+    in the list: Path.mkdir(parents=True) would give a missing parent the default mode. A
+    missing folder above the first one is made with the default mode. Raises OSError."""
+    for i, d in enumerate(dirs):
+        Path(d).mkdir(parents=(i == 0), exist_ok=True, mode=0o700)
+
+
 def ledger_on_file() -> Path:
     return claude_dir() / "state" / "gk-ledger-on.json"
 
@@ -464,8 +474,12 @@ def write_session_map(sid: Any, cwd: str | os.PathLike) -> bool:
     keys = ("cwd", "root", "project", "branch")
     if isinstance(old, dict) and all(old.get(k) == ident[k] for k in keys):
         return True
+    try:
+        make_private_dirs(ledger_dir(), path.parent)
+    except OSError:
+        return False
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return write_json(path, dict(session=safe, updated=now, **ident))
+    return write_json(path, dict(session=safe, updated=now, **ident), mode=0o600)
 
 
 LEDGER_DOWN = ("Ledger: receiver not running, calls are not being recorded "
@@ -512,12 +526,17 @@ def port_open(port: int, timeout: float = 0.1) -> bool:
 def start_receiver(port: int, wait: float = 1.0) -> bool:
     """Start `gk_ledger.py serve --port <port>` (beside this file) as a detached process: its
     own session, stdio to /dev/null. Then poll the port for up to `wait` seconds and return
-    whether it opened. With wait <= 0 it returns at once: True when the spawn succeeded."""
+    whether it opened. With wait <= 0 it returns at once: True when the spawn succeeded.
+    The receiver runs in the ledger folder (made, mode 0700, when missing), so the long-lived
+    process never pins the session's worktree."""
     script = Path(__file__).resolve().parent / "gk_ledger.py"
+    folder = ledger_dir()
     try:
+        make_private_dirs(folder)
         subprocess.Popen([sys.executable, str(script), "serve", "--port", str(port)],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True,
+                         cwd=str(folder))
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
     if wait <= 0:

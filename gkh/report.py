@@ -23,7 +23,8 @@ The usage ledger (spec 4.4, 4.8): <claude dir>/state/gk-ledger/<YYYY-MM-DD>.json
 per model call that Claude Code exported, written by hooks/gk_ledger.py. merge_sources matches
 ledger calls with transcript calls by request id: a call found in both counts once, with the
 ledger's tokens and Claude Code's own cost; a transcript call with no ledger line fills the gap;
-a ledger call with no transcript is grouped under its agent name or "background (<source>)".
+a ledger call with no transcript is grouped under its agent name or "background (<source>)"
+("source (<source>)" with --source ledger, where no transcript is read).
 api_error lines are not model calls: they are counted apart (errors) and never priced.
 """
 from __future__ import annotations
@@ -68,6 +69,8 @@ SOURCES = ("ledger", "transcripts", "both")
 # The ledger folder under the claude dir (hooks/gk_common.py ledger_dir, gkh/ledger_ctl.py).
 LEDGER_PARTS = ("state", "gk-ledger")
 BACKGROUND = "background (%s)"
+# With --source ledger no transcript is read, so an unnamed call is not known to be background.
+BY_SOURCE = "source (%s)"
 COST_TOLERANCE = 0.01  # Claude Code's cost_usd may differ from the routes.json price by this
 TOKEN_KEYS = ("input", "output", "cache_write", "cache_read", "cache_write_1h", "cache_write_5m")
 # Ledger line key -> call key; every other ledger key keeps its name.
@@ -532,7 +535,8 @@ def merge_sources(transcript: Iterable[dict] | None, ledger: Iterable[dict] | No
     transcript call with no match keeps its own figures; its project comes from the session map,
     else project_identity(cwd) when that folder exists, else the folder's name. A ledger call
     with no match is put under its agent_name, else "background (<source>)". "ledger" or
-    "transcripts" yields that side only. claude_dir finds the session maps and run journals."""
+    "transcripts" yields that side only; with "ledger" no transcript is there to match, so an
+    unnamed call is put under "source (<source>)" instead. claude_dir finds the session maps and run journals."""
     if source not in SOURCES:
         raise ValueError("source must be one of %s" % ", ".join(SOURCES))
     places, stages = _Places(claude_dir), _Stages(claude_dir)
@@ -578,7 +582,8 @@ def merge_sources(transcript: Iterable[dict] | None, ledger: Iterable[dict] | No
             if call.get("request_id") in used:
                 continue
             name = call.get("agent_name")
-            call["agent"] = name or BACKGROUND % (call.get("source") or "?")
+            unnamed = BY_SOURCE if source == "ledger" else BACKGROUND
+            call["agent"] = name or unnamed % (call.get("source") or "?")
             call["stage"], call["label"] = stages(call.get("session"), call.get("workflow_run"),
                                                   call.get("agent_id")) \
                 if call.get("workflow_run") else (None, None)

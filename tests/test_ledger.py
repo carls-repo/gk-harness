@@ -7,6 +7,7 @@ import re
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -372,6 +373,28 @@ class NameLookupTests(unittest.TestCase):
             self.assertIsNone(names.workflow(self.SID, "wf_3"))
         self.assertEqual(names.workflow(self.SID, "wf_3"), "big")
 
+    def test_workflow_name_from_script_file_during_the_run(self):
+        # Claude Code writes the run record only when the run ends; the script file
+        # <name>-<run_id>.js exists from before the first agent. The name may hold hyphens.
+        scripts = self.sess / "workflows" / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "gk-review-wf_f8803e0f-b36.js").write_text("// script")
+        (scripts / "other-wf_99999999-000.js").write_text("// another run")
+        names = gk_ledger.NameLookup(self.projects)
+        self.assertEqual(names.workflow(self.SID, "wf_f8803e0f-b36"), "gk-review")
+        lines = {ln["request"]: ln for ln in lines_from(SUB_FIXTURE, names=names)}
+        self.assertEqual(lines["req_011Ch6JExf4NNSa5CDWWwnxC"]["workflow"], "gk-review")
+        # The run record, once written, wins over the script file name.
+        (self.sess / "workflows" / "wf_f8803e0f-b36.json").write_text(
+            json.dumps({"workflowName": "from-record"}))
+        self.assertEqual(names.workflow(self.SID, "wf_f8803e0f-b36"), "from-record")
+        # Unsafe ids find nothing; a file with no name part gives no name.
+        self.assertIsNone(names.workflow(self.SID, "*"))
+        self.assertIsNone(names.workflow("../x", "wf_f8803e0f-b36"))
+        (scripts / "-wf_1.js").write_text("")
+        self.assertIsNone(names.workflow(self.SID, "wf_1"))
+        self.assertIsNone(names.workflow(self.SID, "wf_absent"))
+
     def test_default_projects_dir(self):
         with mock.patch.dict(os.environ, {"GK_CLAUDE_DIR": self.tmp.name}):
             self.assertEqual(gk_ledger.NameLookup().projects_dir,
@@ -496,6 +519,9 @@ class MetricsTests(unittest.TestCase):
         m.add(mline(event="api_error", input=None, output=None, cache_read=None,
                     cache_write=None, cache_write_5m=None, cache_write_1h=None, cost_usd=None,
                     status=500, attempt=2))
+        first = parse_metrics(m.render())  # each new series shows 0 on its first render
+        self.assertTrue(first)
+        self.assertEqual(set(first.values()), {0})
         got = parse_metrics(m.render())
         self.assertEqual(got[key("gk_ledger_requests_total", event="api_request")], 2)
         self.assertEqual(got[key("gk_ledger_requests_total", event="api_error")], 1)
@@ -532,7 +558,48 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(got.get(key("gk_ledger_large_prompts_total"), 0), 0)
         m.add(mline(input=50_001, cache_read=40_000, cache_write=10_000))
         got = parse_metrics(m.render())
+        self.assertEqual(got[key("gk_ledger_large_prompts_total")], 0)  # a new series
+        got = parse_metrics(m.render())
         self.assertEqual(got[key("gk_ledger_large_prompts_total")], 1)
+
+    def test_new_series_shows_zero_on_its_first_render(self):
+        # Prometheus's increase() ignores a series' first sample, so the first render of a
+        # series shows 0 and the next its full running total; existing series are unaffected.
+        m = gk_ledger.Metrics()
+        m.add(mline(cost_usd=0.25))
+        got = parse_metrics(m.render())
+        self.assertEqual(got[key("gk_ledger_requests_total", event="api_request")], 0)
+        self.assertEqual(got[key("gk_ledger_cost_usd_total")], 0)
+        m.add(mline(cost_usd=0.5))
+        m.add(mline(project="Other", input=7))
+        got = parse_metrics(m.render())
+        self.assertEqual(got[key("gk_ledger_requests_total", event="api_request")], 2)
+        self.assertAlmostEqual(got[key("gk_ledger_cost_usd_total")], 0.75)
+        self.assertEqual(got[key("gk_ledger_tokens_total", kind="input")], 20)
+        other = ("gk_ledger_tokens_total",
+                 frozenset(dict(BASE, project="Other", kind="input").items()))
+        self.assertEqual(got[other], 0)  # the new label set starts at 0
+        m.add(mline(project="Other", input=3))
+        got = parse_metrics(m.render())
+        self.assertEqual(got[other], 10)
+        self.assertEqual(got[key("gk_ledger_requests_total", event="api_request")], 2)
+
+    def test_render_is_safe_under_threads(self):
+        m = gk_ledger.Metrics()
+        m.add(mline())
+        renders = []
+
+        def scrape():
+            renders.append(parse_metrics(m.render()))
+
+        threads = [threading.Thread(target=scrape) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        req = key("gk_ledger_requests_total", event="api_request")
+        # Exactly one render saw the new series first and showed 0; the others show 1.
+        self.assertEqual(sorted(r[req] for r in renders), [0] + [1] * 7)
 
     def test_metrics_labels_carry_no_ids(self):
         m = gk_ledger.Metrics()

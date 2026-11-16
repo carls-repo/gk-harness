@@ -193,7 +193,8 @@ can sit on any branch.
 **How it stops**
 
 - It exits after 30 minutes with no request and no live session. A session counts as live when
-  its `sessions/*.json` names a pid that is still running.
+  its `sessions/*.json` names a pid that is still running. Any request counts, a `/metrics`
+  scrape included, so while Prometheus runs (section 4.7) the receiver stays up.
 - While the ledger is on, `install` and `update` restart a running receiver at once, so new code
   takes over without waiting for a session.
 - `gkh ledger off` and `uninstall` stop it through its pidfile.
@@ -219,6 +220,11 @@ One JSON object per line, keys in this order. Absent values are `null`.
 ```
 
 - `status` and `attempt` are filled only on `api_error` lines.
+- When telemetry names a workflow or agent `custom` (Proof P3), the receiver looks up the real
+  name in the session's transcript folder. A workflow's name comes from the run record
+  `workflows/<run>.json` (`workflowName`). Claude Code writes that record only when the run
+  ends, so during the run the name comes from the script file `workflows/scripts/<name>-<run>.js`,
+  which exists before the first agent. The run record wins when both exist.
 - A line is about 450 bytes. At 400 to 2,000 calls a day, that is under 1 MB a day.
 - Files are kept, and nothing rotates them in this version.
 - The attribute names and value types are taken from Proof P1 before the allowlist is written.
@@ -232,7 +238,8 @@ One JSON object per line, keys in this order. Absent values are `null`.
   - a transcript call with no ledger line counts from the transcript, because the receiver was
     down or the call predates the ledger;
   - a ledger line with no transcript match is grouped under the agent column as
-    `background (<query_source>)`.
+    `background (<query_source>)`. With `--source ledger` no transcript is read, so such a
+    line is grouped as `source (<query_source>)` instead: nothing shows it is background.
 - **Stage labels.** A workflow run id and agent id lead to the run's `journal.jsonl`, as today.
   Proof P3 confirms the ids match.
 - **Price.** It prices from `routes.json`, as today. If Claude Code's `cost_usd` total differs
@@ -284,6 +291,12 @@ transcript backfill.
 - The counters start at zero each time the receiver starts, and Prometheus treats that as a
   counter reset. Calls between the last scrape and a restart are missing from the charts only.
   The ledger and `gkh report` stay exact.
+- Prometheus's `increase()` ignores a series' first sample. So `/metrics` shows each series as 0
+  the first time it includes it (a new label set, or every set after a restart), and its
+  running total from the next scrape on. No first value is lost.
+- A `/metrics` scrape counts as a request for the idle timer (section 4.2). While Prometheus
+  runs, the receiver therefore does not idle out, and "Receiver up" stays up. That is on
+  purpose: fewer restarts mean fewer counter resets.
 
 **Prometheus and Grafana in Docker**
 
@@ -296,10 +309,17 @@ transcript backfill.
   - Grafana listens on `127.0.0.1:3300`. Ports 3000 and 3001 are Goodricke's. Ports 9090 and 3300
     were free on 15 November.
 - Prometheus scrapes every 15 seconds and keeps data for 400 days.
-- Data sits in Docker named volumes, not on `/srv/gkdata`, so the stack comes back after a reboot
-  without the LUKS unlock. Both containers are `restart: unless-stopped`.
-- Image versions are pinned exactly at build time. Pulling them is a download, so it happens on
-  Carl's go.
+- Data sits in Docker named volumes. On this box Docker's data-root is `/srv/gkdata/docker`,
+  on the LUKS volume, and `docker.service` starts only after `gk-data unlock` (by hand, or the
+  automatic unlock). Both containers are `restart: unless-stopped`, so after a reboot the
+  stack comes back by itself only once `gk-data unlock` has run and Docker is up. (An earlier
+  draft said the volumes were off `/srv/gkdata`; the final review found that wrong.)
+- Image versions are pinned exactly at build time, and compose never pulls them
+  (`pull_policy: never`). Pulling them is a download, so it is an explicit `sudo docker pull`
+  of the two tags, on Carl's go.
+- Grafana's `HTTP_PROXY` and `HTTPS_PROXY` point at `127.0.0.1:9`, so an outbound call that a
+  setting missed fails; `NO_PROXY` exempts loopback.
+- The dashboard shows times in the browser's time zone. `gkh report` uses UTC days.
 
 **Running it**
 
@@ -542,7 +562,9 @@ labels the gap. If P1 shows content in default records, the allowlist already dr
 - **The mikeref pattern for Docker:** root-owned files plus an exact-command sudoers rule, rather
   than adding Carl to the `docker` group.
 - **Anonymous viewers, and an admin password kept in a root-only file.**
-- **400 days of Prometheus data in Docker volumes.**
+- **400 days of Prometheus data in Docker volumes.** Docker's data-root is on the LUKS volume
+  `/srv/gkdata`, so the data is encrypted at rest, and the stack runs only after
+  `gk-data unlock`.
 - **A project is a repository, and its worktrees share its name.** The folder and branch are
   kept in the ledger and the report.
 - **A session map written by the hooks.** Claude Code's events carry no folder.

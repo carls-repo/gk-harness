@@ -189,6 +189,32 @@ class LifecycleTests(LedgerCtlBase):
             self.assertTrue(ledger_ctl.restart())
         self.assertEqual(calls, ["stop", "stop", "start"])
 
+    def test_restart_is_true_only_for_a_new_receiver(self):
+        # A receiver of ours answered before: restart counts only when the pid changed.
+        cases = (
+            ([41, 42], True),     # the old one stopped and a new one answers
+            ([41, 41], False),    # the same process still answers
+            ([None, 42], False),  # the old one could not be named, so it was never stopped
+            ([41, None], False),  # something answers, but not a receiver this can name
+        )
+        for pids, expected in cases:
+            seq = list(pids)
+            with mock.patch.object(ledger_ctl, "health", lambda: "ours"), \
+                    mock.patch.object(ledger_ctl, "pid", lambda: seq.pop(0)), \
+                    mock.patch.object(ledger_ctl, "stop", lambda: True), \
+                    mock.patch.object(ledger_ctl, "start", lambda: True):
+                self.assertIs(ledger_ctl.restart(), expected, pids)
+        # None of ours answered before: a start that answers is enough.
+        with mock.patch.object(ledger_ctl, "health", lambda: "free"), \
+                mock.patch.object(ledger_ctl, "pid", lambda: None), \
+                mock.patch.object(ledger_ctl, "stop", lambda: True), \
+                mock.patch.object(ledger_ctl, "start", lambda: True):
+            self.assertTrue(ledger_ctl.restart())
+        with mock.patch.object(ledger_ctl, "health", lambda: "free"), \
+                mock.patch.object(ledger_ctl, "stop", lambda: True), \
+                mock.patch.object(ledger_ctl, "start", lambda: False):
+            self.assertFalse(ledger_ctl.restart())
+
     def test_start_spawns_the_installed_copy_detached(self):
         script = self.write(self.cdir / "hooks" / "gk-harness" / "gk_ledger.py", "")
         self.write(self.cdir / "gk-harness.json", json.dumps({"python": "/opt/py/bin/python3"}))

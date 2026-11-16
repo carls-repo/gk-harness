@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -118,6 +119,23 @@ class LedgerCommonTest(unittest.TestCase):
         gk_common.write_session_map("s2", r)
         data = json.loads(gk_common.session_map_path("s2").read_text())
         self.assertEqual(data["branch"], "other")
+
+    @unittest.skipIf(os.name == "nt", "POSIX modes")
+    def test_session_map_folders_and_file_are_private(self):
+        r = self.repo("eps")
+        old = os.umask(0o022)
+        try:
+            self.assertTrue(gk_common.write_session_map("s3", r))
+        finally:
+            os.umask(old)
+        ldir = gk_common.ledger_dir()
+        self.assertEqual(stat.S_IMODE(os.stat(ldir).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(ldir / "sessions").st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(gk_common.session_map_path("s3")).st_mode), 0o600)
+        # A rewrite (the branch moved) keeps the file private.
+        git(r, "checkout", "-q", "-b", "moved")
+        self.assertTrue(gk_common.write_session_map("s3", r))
+        self.assertEqual(stat.S_IMODE(os.stat(gk_common.session_map_path("s3")).st_mode), 0o600)
 
     def test_session_map_unsafe_sid(self):
         self.assertFalse(gk_common.write_session_map("../evil", self.tmp))

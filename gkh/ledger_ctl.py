@@ -206,11 +206,21 @@ def stop(timeout: float = 3.0) -> bool:
 
 
 def restart() -> bool:
-    """stop(), then start(): the receiver runs the code install has just copied. False, with
-    nothing started, when the old receiver did not stop."""
+    """stop(), then start(): the receiver runs the code install has just copied. True only
+    when a receiver now answers and it is a new process: none of ours answered before, or the
+    pid now running differs from the one before. False, with nothing started, when the old
+    receiver did not stop; False too when the old one still answers (stop() could not name
+    it, so start() found the port already ours)."""
+    was_up = health() == "ours"
+    before = pid()
     if not stop():
         return False
-    return start()
+    if not start():
+        return False
+    if not was_up:
+        return True
+    after = pid()
+    return before is not None and after is not None and after != before
 
 
 # --- status ---------------------------------------------------------------------------------

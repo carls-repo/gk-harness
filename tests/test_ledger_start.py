@@ -242,6 +242,14 @@ class RealSpawnTests(unittest.TestCase):
         self.assertTrue(kw.get("close_fds"))
         for k in ("stdin", "stdout", "stderr"):
             self.assertEqual(kw.get(k), subprocess.DEVNULL)
+        # The receiver runs in the ledger folder, made private, so it never pins a worktree.
+        ldir = gk_common.ledger_dir()
+        self.assertEqual(kw.get("cwd"), str(ldir))
+        self.assertTrue(ldir.is_dir())
+        if os.name != "nt":
+            self.assertEqual(os.stat(ldir).st_mode & 0o777, 0o700)
+        if sys.platform.startswith("linux"):
+            self.assertEqual(os.readlink("/proc/%d/cwd" % procs[0].pid), str(ldir))
         self.assertEqual(gk_common.probe_health(port), "ours")
 
     def test_wait_zero_returns_at_once(self):

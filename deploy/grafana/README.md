@@ -14,8 +14,19 @@ view.
   signature-key retrieval, the plugin catalogue, the preinstalled apps (such as
   `grafana-lokiexplore-app`), Gravatar and external snapshots. Each setting was checked against
   Grafana 11.3.0's `conf/defaults.ini`. Recheck them if you bump the Grafana tag.
-- Data sits in the Docker named volumes `prometheus-data` and `grafana-data`. The stack comes
-  back after a reboot without the LUKS unlock.
+- As a guard by construction, Grafana's `HTTP_PROXY` and `HTTPS_PROXY` point at
+  `127.0.0.1:9`, where nothing listens, so any outbound HTTP call a setting missed fails.
+  `NO_PROXY=127.0.0.1,localhost` keeps the Prometheus data source working.
+- `compose.yml` never pulls an image (`pull_policy: never`). The pull is one explicit
+  `sudo docker pull` per pinned tag, on Carl's go (step 5).
+- Data sits in the Docker named volumes `prometheus-data` and `grafana-data`. On this box,
+  Docker's data-root is `/srv/gkdata/docker`, on the LUKS volume, and `docker.service` starts
+  only after `gk-data unlock` (by hand, `sudo gk-data unlock`, or by the automatic unlock where
+  it is enrolled). So after a reboot the stack comes back by itself (`restart: unless-stopped`)
+  only once `gk-data unlock` has run and Docker is up. Until then the dashboard is down.
+- The dashboard shows times in the browser's time zone, so its "today" starts at local
+  midnight. `gkh report` uses UTC days. In British summer time the two "todays" differ by an
+  hour.
 
 Your user is not in the `docker` group, and joining it would amount to root. So the files are
 installed root-owned in `/etc/gk-grafana/`, and the sudoers rule `/etc/sudoers.d/gk-grafana`
@@ -36,16 +47,22 @@ allows exactly three commands: `docker compose -f /etc/gk-grafana/compose.yml` w
 Carl does every step, at the box, in a plain terminal. Every `sudo` step is his. Run the steps
 from the top of the gk-harness checkout.
 
-1. **Run Proof P8.** Check that Docker runs, that ports 3300 and 9090 are still free, and that
-   the receiver answers.
+1. **Run Proof P8.** Check that Docker runs, where its data lives, that ports 3300 and 9090
+   are still free, and that the receiver answers.
    ```bash
-   sudo docker info --format '{{.ServerVersion}}'
+   sudo gk-data status
+   systemctl is-active docker
+   sudo docker info --format '{{.ServerVersion}} {{.DockerRootDir}}'
    ss -ltn | grep -E ':(3300|9090)\b' || echo "3300 and 9090 are free"
    gkh ledger status
    curl -s http://127.0.0.1:4318/metrics | head -5
    ```
-   Stop here if a port is taken or the receiver does not answer. Two parts of P8 are checked
-   later: the scrape over host networking (step 7), and that nothing connects out (step 6).
+   `systemctl is-active docker` must say `active`. The data-root is expected to be
+   `/srv/gkdata/docker`, on the LUKS volume: Docker, and with it this stack, then runs only
+   after `gk-data unlock`. If Docker is not active, run `sudo gk-data unlock` first. Stop here if
+   a port is taken or the receiver does not answer. Three parts of P8 are checked later: that
+   nothing connects out (step 6), the scrape over host networking (step 7), and the return
+   after a reboot (step 7, last check).
 
 2. **Install the files root-owned in `/etc/gk-grafana/`.**
    ```bash
@@ -77,14 +94,15 @@ from the top of the gk-harness checkout.
    ```
    The first line must say `parsed OK`. Do not install the file if it does not.
 
-5. **Pull the images.** This is a download, so it waits for Carl's go. The sudoers rule does not
-   allow `pull`, so this step asks for your password.
+5. **Pull the images.** This is a download, so it waits for Carl's go. `compose.yml` says
+   `pull_policy: never`, so `gkh grafana up` never downloads anything; the pull is this explicit
+   step. The sudoers rule does not allow it, so it asks for your password.
    ```bash
-   sudo /usr/bin/docker compose -f /etc/gk-grafana/compose.yml pull
+   sudo docker pull prom/prometheus:v2.55.1
+   sudo docker pull grafana/grafana-oss:11.3.0
    ```
-   The tags are pinned in `compose.yml` (`prom/prometheus:v2.55.1` and
-   `grafana/grafana-oss:11.3.0`). To bump one, change it in this folder, commit, and repeat
-   step 2.
+   These are the two tags pinned in `compose.yml`. To bump one, change it in this folder,
+   commit, repeat step 2, and pull the new tag the same way.
 
 6. **Start the stack.**
    ```bash
@@ -93,14 +111,27 @@ from the top of the gk-harness checkout.
    ```
    `status` must show both containers running, `grafana: up` and `prometheus: up`.
 
-   On the first `up`, check that neither container connects out. Run this a few times in the
-   first two minutes:
+   On the first `up`, check that neither container connects out. First prove that the checks
+   can see the two processes at all, so that an empty result means something:
    ```bash
-   sudo ss -tnp state established | grep -E '"(grafana|prometheus)"' \
+   sudo ss -ltnp | grep -E '"(grafana|prometheus)"'
+   sudo ss -tunp state connected | grep -E '"(grafana|prometheus)"'
+   ```
+   - The first command lists every listener of both processes. It must show `grafana` on
+     `127.0.0.1:3300` and `prometheus` on `127.0.0.1:9090`, and nothing that is not
+     `127.0.0.1`. If a name is missing, the process is called something else here: fix the
+     names in these commands before going on.
+   - The second must list at least one `prometheus` line to `127.0.0.1:4318` (the scrape). A
+     `grafana` line to `127.0.0.1:9090` shows once the dashboard has been opened.
+
+   Then run the outbound filter a few times in the first two minutes:
+   ```bash
+   sudo ss -tunp state connected | grep -E '"(grafana|prometheus)"' \
      | grep -vE '127\.0\.0\.1:[0-9]+ +127\.0\.0\.1:|\[::1\]:[0-9]+ +\[::1\]:' \
      || echo "no outbound connections"
    ```
-   Every run must print `no outbound connections`. A line with another address means Grafana or
+   Every run must print `no outbound connections`. `state connected` includes connections still
+   being opened and connected UDP sockets (DNS). A line with another address means Grafana or
    Prometheus is calling out. Run `gkh grafana down` and find the setting before going on.
 
 7. **Run the live checks.**
@@ -108,15 +139,23 @@ from the top of the gk-harness checkout.
    ss -ltn | grep -E ':(3300|9090)\b'
    curl -s 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22gk-ledger%22%7D'
    ```
-   - `ss` must show 3300 and 9090 on `127.0.0.1` only.
-   - Repeat the outbound check from step 6. It must still print `no outbound connections`.
+   - `ss` must show 3300 and 9090 on `127.0.0.1` only. Repeat `sudo ss -ltnp` from step 6: every
+     listener of both processes must be on `127.0.0.1`.
+   - Repeat the outbound check from step 6, the positive control first. It must still print
+     `no outbound connections`.
    - The query must return the value `1` while the receiver runs. That proves the scrape over
      host networking, the last part of P8.
    - Make a call in a session. It must show in Grafana within a minute.
    - Compare one day's spend in Grafana with `gkh report --source ledger --since <that day>`.
-     They must agree within 1%.
+     They must agree within 1%. `gkh report` counts UTC days and the dashboard the browser's
+     time zone, so set the dashboard's time zone to UTC for the comparison.
    - `gkh grafana down` must stop both containers. `gkh grafana up` must then bring back the
      same data.
+   - **Reboot check**, at the next planned reboot. Before `gk-data unlock` has run, Docker is not
+     running and `gkh grafana status` fails: that is expected. Once the unlock has run (by hand,
+     `sudo gk-data unlock`, or automatically), `systemctl is-active docker` must say `active`,
+     and `gkh grafana status` must then show `grafana: up` and `prometheus: up` without a
+     `gkh grafana up`. The charts must still hold the data from before the reboot.
 
 8. **Open the dashboard from the Mac.** Forward the port over SSH, then open the page.
    ```bash
@@ -139,8 +178,14 @@ check fails.
 
 - The receiver's counters start at zero each time it starts. Prometheus treats that as a counter
   reset, so the charts lose only the calls between the last scrape and a restart.
-- The receiver exits after 30 minutes with no calls and no live session. "Receiver up" then
-  shows Down. That is normal while nothing runs.
+- The receiver exits after 30 minutes with no request and no live session. Prometheus's scrape
+  of `/metrics` every 15 seconds counts as a request, so while Prometheus runs the receiver does
+  not idle out, and "Receiver up" stays Up. That is on purpose: fewer restarts mean fewer
+  counter resets. "Receiver up" shows Down when the receiver crashed or was stopped (for
+  example by `gkh ledger off`), or before the first session after a reboot starts it.
+- The dashboard uses the browser's time zone; `gkh report` uses UTC days. Compare a day's
+  spend between them with the dashboard's time zone set to UTC (dashboard settings), or in
+  winter, when UK time is UTC.
 - "Spend by source" groups spend by Claude Code's `query_source`. It stands in for a
   background-spend panel, because the receiver cannot tell a background call from a transcript
   one.

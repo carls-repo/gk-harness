@@ -1,13 +1,17 @@
 # gk-harness usage: Prometheus scrapes the usage-ledger receiver (127.0.0.1:4318/metrics) and
 # Grafana shows the "gk-harness usage" dashboard. Installed root-owned in /etc/gk-grafana/ and run
 # only through `gkh grafana up|down|status` (README.md). Both containers use host networking and
-# listen on 127.0.0.1 only. Data sits in Docker named volumes, so the stack comes back after a
-# reboot without the LUKS unlock. Image tags are pinned exactly; Stage 4 may bump them with Carl.
+# listen on 127.0.0.1 only. Data sits in Docker named volumes. On this box Docker's data-root is
+# /srv/gkdata/docker, on the LUKS volume, and docker.service starts only after `gk-data unlock`;
+# so after a reboot the stack comes back by itself only once `sudo gk-data unlock` (or the
+# automatic unlock) has run and Docker is up. Image tags are pinned exactly and never pulled by
+# compose (its pull policy is never): the pull is an explicit `sudo docker pull` on Carl's go.
 name: gk-grafana
 
 services:
   prometheus:
     image: prom/prometheus:v2.55.1
+    pull_policy: never
     network_mode: host
     restart: unless-stopped
     command:
@@ -21,6 +25,7 @@ services:
 
   grafana:
     image: grafana/grafana-oss:11.3.0
+    pull_policy: never
     network_mode: host
     restart: unless-stopped
     # GF_SECURITY_ADMIN_PASSWORD, written at setup (root, mode 0600) and never printed.
@@ -42,6 +47,11 @@ services:
       - GF_PLUGINS_PREINSTALL_DISABLED=true
       - GF_SECURITY_DISABLE_GRAVATAR=true
       - GF_SNAPSHOTS_EXTERNAL_ENABLED=false
+      # A guard by construction: any outbound HTTP(S) a setting above missed goes to a proxy
+      # on the discard port, which refuses it. Loopback (the Prometheus data source) is exempt.
+      - HTTP_PROXY=http://127.0.0.1:9
+      - HTTPS_PROXY=http://127.0.0.1:9
+      - NO_PROXY=127.0.0.1,localhost
     volumes:
       - grafana-data:/var/lib/grafana
       - ./provisioning/datasources:/etc/grafana/provisioning/datasources:ro

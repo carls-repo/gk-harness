@@ -1,7 +1,7 @@
 {
   "uid": "gk-harness-usage",
   "title": "gk-harness usage",
-  "description": "Live view of Claude Code usage from the gk-harness usage-ledger receiver. gkh report stays the exact record.",
+  "description": "Live view of Claude Code usage from the gk-harness usage-ledger receiver. gkh report stays the exact record. Times are in the browser's time zone, so today starts at local midnight; gkh report uses UTC days.",
   "tags": [
     "gk-harness"
   ],
@@ -223,7 +223,7 @@
       "id": 5,
       "type": "stat",
       "title": "Receiver up",
-      "description": "Whether Prometheus's last scrape of the usage-ledger receiver on 127.0.0.1:4318 worked. The receiver exits after 30 minutes with no calls and no live session, and the next session or prompt starts it, so Down while nothing runs is normal.",
+      "description": "Whether Prometheus's last scrape of the usage-ledger receiver on 127.0.0.1:4318 worked. Each scrape counts as a request, so while Prometheus runs the receiver does not idle out and this stays Up. Down means the receiver crashed or was stopped (gkh ledger off), or no session has started it since a reboot; the next session or prompt starts it.",
       "datasource": {
         "type": "prometheus",
         "uid": "gk-prometheus"

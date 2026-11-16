@@ -342,8 +342,8 @@ class SessionLookup:
 
 class NameLookup:
     """Real workflow and agent names for telemetry's `custom` (Stage 0 proof P3), read from
-    the session's transcript folder under projects_dir. Found answers are cached; None is
-    not, because the file may appear later."""
+    the session's transcript folder under projects_dir. Answers from run records and meta
+    files are cached; None is not, because the file may appear later."""
 
     def __init__(self, projects_dir: Optional[Path] = None) -> None:
         self.projects_dir = Path(projects_dir) if projects_dir is not None \
@@ -352,9 +352,32 @@ class NameLookup:
         self._lock = threading.Lock()
 
     def workflow(self, session: Any, run_id: Any) -> Optional[str]:
-        """`workflowName` from projects_dir/*/<session>/workflows/<run_id>.json."""
-        return self._find("workflow", session, run_id,
-                          "*/%s/workflows/%s.json", "workflowName")
+        """`workflowName` from projects_dir/*/<session>/workflows/<run_id>.json. Claude Code
+        writes that run record only when the run ends, so during the run the name comes from
+        the script file it writes before the first agent,
+        projects_dir/*/<session>/workflows/scripts/<name>-<run_id>.js. The run record wins
+        when both exist. A name read from a script file is not cached, so the run record is
+        preferred once it appears."""
+        found = self._find("workflow", session, run_id,
+                           "*/%s/workflows/%s.json", "workflowName")
+        return found if found is not None else self._script_name(session, run_id)
+
+    def _script_name(self, session: Any, run_id: Any) -> Optional[str]:
+        """<name> from the first projects_dir/*/<session>/workflows/scripts/<name>-<run_id>.js.
+        The name may itself hold hyphens: it is everything before "-<run_id>.js"."""
+        s, r = gk_common.safe_sid(session), gk_common.safe_sid(run_id)
+        if s is None or r is None:
+            return None
+        suffix = "-%s.js" % r
+        try:
+            paths = sorted(self.projects_dir.glob("*/%s/workflows/scripts/*%s" % (s, suffix)))
+        except (OSError, ValueError):
+            return None
+        for path in paths:
+            name = path.name[:-len(suffix)]
+            if name and path.name.endswith(suffix):
+                return name
+        return None
 
     def agent(self, session: Any, agent_id: Any) -> Optional[str]:
         """`agentType` from the first projects_dir/*/<session>/subagents/**/agent-<id>.meta.json."""
@@ -412,10 +435,16 @@ def _num(x: Any) -> int:
 
 class Metrics:
     """Prometheus text-format (0.0.4) counters over ledger lines (spec 4.7). Labels never
-    carry session, request, prompt, agent or workflow-run ids."""
+    carry session, request, prompt, agent or workflow-run ids.
+
+    Prometheus's increase() ignores a series' first sample, so a new series (a new label set,
+    or every set after the receiver restarts) would lose its first value. So render() shows a
+    series as 0 the first time it includes it, and its running total from the next render on.
+    """
 
     def __init__(self) -> None:
         self._values: dict = {}
+        self._shown: set = set()  # series some render() has already shown, as 0 the first time
         self._lock = threading.Lock()
 
     def _inc(self, name: str, labels: tuple, by: float) -> None:
@@ -441,7 +470,12 @@ class Metrics:
 
     def render(self) -> str:
         with self._lock:
-            items = sorted(self._values.items())
+            items = []
+            for key, value in sorted(self._values.items()):
+                if key not in self._shown:
+                    self._shown.add(key)
+                    value = 0
+                items.append((key, value))
         out = []
         for name, help_text in _COUNTERS:
             out.append("# HELP %s %s" % (name, help_text))
@@ -653,10 +687,11 @@ class LedgerServer(ThreadingHTTPServer):
 
 def make_server(ledger_dir: Path, port: int, host: str = gk_common.LEDGER_HOST
                 ) -> ThreadingHTTPServer:
-    """A bound, not yet serving, receiver on host:port. Makes ledger_dir (mode 0700)."""
+    """A bound, not yet serving, receiver on host:port. Makes ledger_dir and its sessions
+    folder (mode 0700) when they are missing."""
     server = LedgerServer(ledger_dir, (host, port))
     try:
-        Path(ledger_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
+        gk_common.make_private_dirs(ledger_dir, Path(ledger_dir) / "sessions")
     except OSError as e:
         server.errors.record("ledger_dir", "%s: %s" % (type(e).__name__, e))
     return server

@@ -527,6 +527,12 @@ class LedgerMergeTests(LedgerTestCase):
                                                                  "agent:custom"))
         self.assertEqual(merge.filled, 0)
         self.assertEqual(ledger.calls, 2)
+        # With --source ledger no transcript is read: the unnamed call is labelled by its
+        # source, not called background; a named one keeps its name.
+        calls, _, _ = self.merged("ledger")
+        by = {c["request_id"]: c for c in calls}
+        self.assertEqual(by["req_z"]["agent"], "source (sdk)")
+        self.assertEqual(by["req_y"]["agent"], "worker-haiku-low")
 
     def test_forked_session_counts_once(self):
         # A forked session copies earlier lines into its own file; a retried export can write
