@@ -52,7 +52,7 @@ USAGE = ("usage: install [install [%s] [%s] | uninstall | update [%s] [%s] | sta
 BUSY_EXIT = 3
 # Sources install will not run without. It deploys every hooks/*.py, agents/worker-*.md,
 # agents/Explore.md and workflows/gk-*.js present; there may be no workflows yet.
-HOOK_SUPPORT = ("gk_common.py", "gk_model.py", "gk-remote-skip.py")
+HOOK_SUPPORT = ("gk_common.py", "gk_model.py", "gk_ledger.py", "gk-remote-skip.py")
 OTHER_SOURCES = ("policy.md", "shell/aliases.sh", "shell/aliases.ps1")
 DEPLOYED = (("hooks", "*.py", ("hooks", "gk-harness")),
             (".", "routes.json", ("hooks", "gk-harness")),
