@@ -153,7 +153,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.gk-harness\install.p
 | `gkh uninstall` | replay the journal in reverse |
 | `gkh status` | version, root, python, owned entries, hand-changed keys, the ledger's state, drift, and a warning for a variable that forces every agent's model |
 | `gkh gen [--check]` | write every file generated from `routes.json`: the agents, each workflow's routes block and its phase labels, and the class table in `policy.md`. `--check` writes nothing, lists the stale files and exits 1 when there are any |
-| `gkh report [--since YYYY-MM-DD] [--session ID] [--config-dir DIR] [--json]` | price the session, subagent and workflow transcripts from the `routes.json` prices, by session, day, workflow, stage, agent and model, with Fable's share and Haiku calls over the 100K-token prompt. Cost per class comes from the seat's `Route:` lines and is best effort. It reads only; on a subscription, cost is a proxy for your share of the usage limits |
+| `gkh report [--since YYYY-MM-DD] [--session ID] [--config-dir DIR] [--source ledger\|transcripts\|both] [--json]` | price the usage ledger and the session, subagent and workflow transcripts from the `routes.json` prices, merged by request id (`--source` picks one side; the default is both), by session, day, workflow, stage, agent, model, project and folder, with Fable's share and Haiku calls over the 100K-token prompt. Cost per class comes from the seat's `Route:` lines and is best effort. It reads only; on a subscription, cost is a proxy for your share of the usage limits |
 | `gkh fable off`, `gkh fable on`, `gkh fable status` | the Fable switch, below |
 | `gkh ledger on [--ignore-busy]`, `gkh ledger off [--ignore-busy]`, `gkh ledger status` | the usage ledger, below |
 

@@ -1,8 +1,8 @@
 """The installer's commands: install [--retire-legacy] [--ignore-busy], uninstall, update
 [--retire-legacy] [--ignore-busy], status, gen [--check], fable off|on|status, ledger
 on|off|status [--ignore-busy] (the usage ledger, see ledger_ctl.py), and report [--since
-YYYY-MM-DD] [--session ID] [--config-dir DIR] [--json] (read-only: it prices the transcripts,
-see report.py).
+YYYY-MM-DD] [--session ID] [--config-dir DIR] [--source ledger|transcripts|both] [--json]
+(read-only: it prices the usage ledger and the transcripts, merged by request id, see report.py).
 
 install reads everything and decides every write before it makes the first one, so a problem
 found then (the preflight) stops it with nothing changed (exit 2). The writes then run in a fixed
@@ -43,16 +43,17 @@ JSON = "--json"
 SINCE = "--since"
 SESSION = "--session"
 CONFIG_DIR = "--config-dir"
+SOURCE = "--source"
 # Flags (and fable's and ledger's words), each at most once.
 OPTIONS = {"install": (RETIRE, IGNORE_BUSY), "update": (RETIRE, IGNORE_BUSY), "gen": (CHECK,),
            "fable": FABLE_WORDS, "ledger": LEDGER_WORDS + (IGNORE_BUSY,), "report": (JSON,)}
 # Options that take a value, as "--name value" or "--name=value", each at most once.
-VALUE_OPTIONS = {"report": (SINCE, SESSION, CONFIG_DIR)}
+VALUE_OPTIONS = {"report": (SINCE, SESSION, CONFIG_DIR, SOURCE)}
 USAGE = ("usage: install [install [%s] [%s] | uninstall | update [%s] [%s] | status | gen [%s] "
          "| fable off|on|status | ledger on|off|status [%s] "
-         "| report [%s YYYY-MM-DD] [%s ID] [%s DIR] [%s]]\n"
+         "| report [%s YYYY-MM-DD] [%s ID] [%s DIR] [%s ledger|transcripts|both] [%s]]\n"
          % (RETIRE, IGNORE_BUSY, RETIRE, IGNORE_BUSY, CHECK, IGNORE_BUSY, SINCE, SESSION,
-            CONFIG_DIR, JSON))
+            CONFIG_DIR, SOURCE, JSON))
 BUSY_EXIT = 3
 # Sources install will not run without. It deploys every hooks/*.py, agents/worker-*.md,
 # agents/Explore.md and workflows/gk-*.js present; there may be no workflows yet.
@@ -1247,6 +1248,11 @@ def _price_report(values: dict, as_json: bool) -> int:
     if since is not None and not report.valid_date(since):
         sys.stderr.write("gk-harness: %s wants a date as YYYY-MM-DD, not '%s'.\n" % (SINCE, since))
         return 2
+    source = values.get(SOURCE, "both")
+    if source not in report.SOURCES:
+        sys.stderr.write("gk-harness: %s wants ledger, transcripts or both, not '%s'.\n"
+                         % (SOURCE, source))
+        return 2
     cdir = Path(os.path.abspath(values[CONFIG_DIR])) if CONFIG_DIR in values \
         else paths.claude_dir()
     try:
@@ -1254,9 +1260,14 @@ def _price_report(values: dict, as_json: bool) -> int:
     except RoutesError as e:
         sys.stderr.write("gk-harness: %s\n" % e)
         return 2
-    summary = report.summarise(report.iter_calls(cdir, since, values.get(SESSION),
-                                                 classes=routes.get("classes") or {}), routes)
-    summary.update(since=since, session=values.get(SESSION))
+    session = values.get(SESSION)
+    ledger = None if source == "transcripts" else report.iter_ledger(cdir, since, session)
+    transcripts = None if source == "ledger" else report.iter_calls(
+        cdir, since, session, classes=routes.get("classes") or {})
+    merged = report.merge_sources(transcripts, ledger, source, claude_dir=cdir)
+    summary = report.summarise(merged, routes)
+    summary.update(since=since, session=session,
+                   ledger=report.ledger_summary(ledger, merged, source))
     try:
         sys.stdout.write(report.render(summary, as_json))
         sys.stdout.flush()
