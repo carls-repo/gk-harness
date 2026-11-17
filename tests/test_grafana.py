@@ -1,5 +1,5 @@
 """Tests for deploy/grafana/ (the dashboard) and `gkh grafana up|down|status` (Task 7 of the
-usage ledger). Nothing here runs sudo or docker, and nothing probes the real ports 3300, 9090
+usage ledger). Nothing here runs sudo or docker, and nothing probes the real ports 3030, 9090
 or 4318: the runner is a fake and the health checks go to local servers on ephemeral ports."""
 from __future__ import annotations
 
@@ -134,7 +134,7 @@ class DashboardTests(unittest.TestCase):
         for want in ("prom/prometheus:v2.55.1", "grafana/grafana-oss:11.3.0",
                      "--web.listen-address=127.0.0.1:9090",
                      "--storage.tsdb.retention.time=400d", "GF_SERVER_HTTP_ADDR=127.0.0.1",
-                     "GF_SERVER_HTTP_PORT=3300", "env_file: grafana.env"):
+                     "GF_SERVER_HTTP_PORT=3030", "env_file: grafana.env"):
             self.assertIn(want, compose)
         self.assertEqual(compose.count("network_mode: host"), 2)
         self.assertEqual(compose.count("restart: unless-stopped"), 2)

@@ -306,8 +306,9 @@ transcript backfill.
   - Grafana's provisioning: the data source and the dashboard JSON.
 - Both containers use host networking, so Prometheus can reach the receiver on `127.0.0.1`.
   - Prometheus listens on `127.0.0.1:9090`.
-  - Grafana listens on `127.0.0.1:3300`. Ports 3000 and 3001 are Goodricke's. Ports 9090 and 3300
-    were free on 15 November.
+  - Grafana listens on `127.0.0.1:3030`. Ports 3000 and 3001 are Goodricke's. The first choice,
+    3300, was taken on 17 November by MikeGC's frontend (the self-host move), so Grafana moved to
+    3030, which was free and claimed by no runbook.
 - Prometheus scrapes every 15 seconds and keeps data for 400 days.
 - Data sits in Docker named volumes. On this box Docker's data-root is `/srv/gkdata/docker`,
   on the LUKS volume, and `docker.service` starts only after `gk-data unlock` (by hand, or the
@@ -336,7 +337,7 @@ transcript backfill.
 - Anonymous viewers can see the dashboard.
 - The admin password is generated at setup into `/etc/gk-grafana/grafana.env` (root, mode 0600),
   and is never printed into a session.
-- From the Mac: `ssh -L 3300:127.0.0.1:3300 <box>`, then open `http://localhost:3300`.
+- From the Mac: `ssh -L 3030:127.0.0.1:3030 <box>`, then open `http://localhost:3030`.
 
 **The dashboard, "gk-harness usage"**
 
@@ -415,7 +416,7 @@ in the scratchpad records what arrives.
   and no metrics or traces go anywhere.
 
 - **P8. Docker (before Stage 4, with Carl at the box).** Both containers work with host
-  networking, Prometheus can scrape `127.0.0.1:4318`, and ports 3300 and 9090 are still free.
+  networking, Prometheus can scrape `127.0.0.1:4318`, and ports 3030 and 9090 are still free.
 
 If P4 or P5 fails, the design still holds: the transcripts are the backstop, and the report
 labels the gap. If P1 shows content in default records, the allowlist already drops it.
@@ -512,7 +513,7 @@ labels the gap. If P1 shows content in default records, the allowlist already dr
   3. Pull the pinned images.
   4. Run `gkh grafana up`.
   5. Run the live checks:
-     - `ss -ltn` shows 9090 and 3300 on `127.0.0.1` only;
+     - `ss -ltn` shows 9090 and 3030 on `127.0.0.1` only;
      - a new call shows in Grafana within a minute;
      - one day's spend in Grafana agrees with `gkh report --source ledger` within 1%;
      - `gkh grafana down` stops both containers and keeps their data.
@@ -558,7 +559,7 @@ labels the gap. If P1 shows content in default records, the allowlist already dr
   the receiver. It equals `routes.json` for the current models.
 - **Counters start at zero on restart.** If they were rebuilt from the day's file, Prometheus
   would count the day twice.
-- **Host networking, loopback-bound, on ports 9090 and 3300.**
+- **Host networking, loopback-bound, on ports 9090 and 3030.**
 - **The mikeref pattern for Docker:** root-owned files plus an exact-command sudoers rule, rather
   than adding Carl to the `docker` group.
 - **Anonymous viewers, and an admin password kept in a root-only file.**

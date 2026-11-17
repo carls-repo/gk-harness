@@ -1233,7 +1233,7 @@ def ledger(word: str, options: list) -> int:
 GRAFANA_COMPOSE = ["sudo", "-n", "/usr/bin/docker", "compose", "-f", "/etc/gk-grafana/compose.yml"]
 GRAFANA_ARGS = {"up": ["up", "-d"], "down": ["down"], "status": ["ps"]}
 GRAFANA_HOST = "127.0.0.1"
-GRAFANA_PORT = 3300
+GRAFANA_PORT = 3030
 PROMETHEUS_PORT = 9090
 HEALTH_TIMEOUT = 2.0  # seconds, per URL
 

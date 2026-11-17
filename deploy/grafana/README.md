@@ -6,7 +6,7 @@ them on the "gk-harness usage" dashboard. `gkh report` stays the exact record; G
 view.
 
 - Prometheus listens on `127.0.0.1:9090` only.
-- Grafana listens on `127.0.0.1:3300` only. Anonymous viewers see the dashboard; only the admin
+- Grafana listens on `127.0.0.1:3030` only. Anonymous viewers see the dashboard; only the admin
   can change anything.
 - Both containers use host networking, so Prometheus can reach the receiver on `127.0.0.1`.
 - Nothing leaves the machine. `compose.yml` switches off every Grafana default that calls
@@ -47,13 +47,13 @@ allows exactly three commands: `docker compose -f /etc/gk-grafana/compose.yml` w
 Carl does every step, at the box, in a plain terminal. Every `sudo` step is his. Run the steps
 from the top of the gk-harness checkout.
 
-1. **Run Proof P8.** Check that Docker runs, where its data lives, that ports 3300 and 9090
+1. **Run Proof P8.** Check that Docker runs, where its data lives, that ports 3030 and 9090
    are still free, and that the receiver answers.
    ```bash
    sudo gk-data status
    systemctl is-active docker
    sudo docker info --format '{{.ServerVersion}} {{.DockerRootDir}}'
-   ss -ltn | grep -E ':(3300|9090)\b' || echo "3300 and 9090 are free"
+   ss -ltn | grep -E ':(3030|9090)\b' || echo "3030 and 9090 are free"
    gkh ledger status
    curl -s http://127.0.0.1:4318/metrics | head -5
    ```
@@ -118,7 +118,7 @@ from the top of the gk-harness checkout.
    sudo ss -tunp state connected | grep -E '"(grafana|prometheus)"'
    ```
    - The first command lists every listener of both processes. It must show `grafana` on
-     `127.0.0.1:3300` and `prometheus` on `127.0.0.1:9090`, and nothing that is not
+     `127.0.0.1:3030` and `prometheus` on `127.0.0.1:9090`, and nothing that is not
      `127.0.0.1`. If a name is missing, the process is called something else here: fix the
      names in these commands before going on.
    - The second must list at least one `prometheus` line to `127.0.0.1:4318` (the scrape). A
@@ -136,10 +136,10 @@ from the top of the gk-harness checkout.
 
 7. **Run the live checks.**
    ```bash
-   ss -ltn | grep -E ':(3300|9090)\b'
+   ss -ltn | grep -E ':(3030|9090)\b'
    curl -s 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22gk-ledger%22%7D'
    ```
-   - `ss` must show 3300 and 9090 on `127.0.0.1` only. Repeat `sudo ss -ltnp` from step 6: every
+   - `ss` must show 3030 and 9090 on `127.0.0.1` only. Repeat `sudo ss -ltnp` from step 6: every
      listener of both processes must be on `127.0.0.1`.
    - Repeat the outbound check from step 6, the positive control first. It must still print
      `no outbound connections`.
@@ -159,9 +159,9 @@ from the top of the gk-harness checkout.
 
 8. **Open the dashboard from the Mac.** Forward the port over SSH, then open the page.
    ```bash
-   ssh -L 3300:127.0.0.1:3300 <box>
+   ssh -L 3030:127.0.0.1:3030 <box>
    ```
-   Open `http://localhost:3300`. The dashboard is in the `gk-harness` folder.
+   Open `http://localhost:3030`. The dashboard is in the `gk-harness` folder.
 
 ## Day to day
 
